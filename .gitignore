@@ -1,0 +1,20 @@
+.DS_Store
+node_modules/
+*.log
+.env
+.env.*
+.claude/
+CLAUDE.local.md
+
+# Obsidian writes the plugin's settings into its folder, which may be this repo.
+/data.json
+
+# Build output: npm run build writes both, and a release attaches them.
+/main.js
+/styles.css
+
+# The terminal's test build, and what its tests leave
+.build/
+__pycache__/
+test/picture-mod/.claude-plugin/types/
+test/picture-mod/tsconfig.json

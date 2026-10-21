@@ -1,0 +1,5 @@
+{
+  "name": "vault-terminal-picture-test",
+  "version": "0.0.1",
+  "description": "The terminal's picture test mod: loaded only by the self-test, with --plugin-dir."
+}

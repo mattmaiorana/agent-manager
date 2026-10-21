@@ -1,0 +1,10 @@
+{
+	"id": "agent-manager",
+	"name": "Agent Manager",
+	"version": "1.0.0",
+	"minAppVersion": "1.8.7",
+	"description": "Run Claude Code, Codex, or Antigravity in a terminal inside Obsidian. Start a session from any note, and keep every session listed, resumable, and saved as a note. macOS only for now.",
+	"author": "Matt Maiorana",
+	"authorUrl": "https://github.com/mattmaiorana",
+	"isDesktopOnly": true
+}

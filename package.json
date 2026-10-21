@@ -1,0 +1,34 @@
+{
+  "name": "agent-manager",
+  "private": true,
+  "description": "Obsidian plugin: run Claude Code, Codex, or Antigravity in a terminal inside Obsidian, in any vault.",
+  "main": "main.js",
+  "scripts": {
+    "build": "node esbuild.config.mjs production",
+    "dev": "node esbuild.config.mjs",
+    "verify": "node scripts/verify.mjs",
+    "notices": "node scripts/notices.mjs",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "test": "npm run test:plugin && npm run test:terminal",
+    "test:plugin": "node scripts/test-draft.mjs && node scripts/test-transcript-core.mjs && node scripts/test-dialogs.mjs && node scripts/test-follow.mjs && node scripts/test-note-writeback.mjs",
+    "test:terminal": "python3 -I test/helper_test.py && node esbuild.config.mjs test && node .build/harness.cjs"
+  },
+  "author": "Matt Maiorana",
+  "license": "MIT",
+  "dependencies": {
+    "@xterm/addon-fit": "0.11.0",
+    "@xterm/addon-search": "0.16.0",
+    "@xterm/addon-unicode11": "0.9.0",
+    "@xterm/xterm": "6.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "@typescript/native": "npm:typescript@7.0.2",
+    "esbuild": "0.28.2",
+    "eslint": "10.11.0",
+    "eslint-plugin-obsidianmd": "0.4.0",
+    "obsidian": "1.14.4",
+    "typescript": "npm:@typescript/typescript6@6.0.2"
+  }
+}

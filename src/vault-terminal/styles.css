@@ -1,0 +1,144 @@
+/* vault-terminal's own rules. Every selector is scoped to a vault-terminal
+   class, so nothing outside its own terminals changes. */
+
+/* The pane: the terminal fills it edge to edge. Above it, a host's slot
+   (Agent Manager's strip), which the terminal's area shrinks to fit. */
+.workspace-leaf-content > .view-content.vault-terminal-content {
+  padding: 0;
+  overflow: hidden;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+}
+
+.vault-terminal-content > .vault-terminal-top {
+  flex: none;
+}
+
+.vault-terminal-content > .vault-terminal-top:empty {
+  display: none;
+}
+
+.vault-terminal-content > .vault-terminal-stage {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.vault-terminal-view {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  /* Set from the theme by the view, so the space past the last row and
+     column matches the terminal. */
+  background-color: var(--vault-terminal-background, var(--background-primary));
+}
+
+.vault-terminal-view .xterm {
+  height: 100%;
+  padding: 0;
+}
+
+/* xterm.css paints the viewport black, and comes later in styles.css, so this
+   needs the extra class to win. */
+.vault-terminal-content .vault-terminal-view .xterm .xterm-viewport {
+  background-color: transparent;
+}
+
+/* Cmd+F: a small find bar over the terminal's top right corner. */
+.vault-terminal-content .vault-terminal-search {
+  position: absolute;
+  top: var(--size-4-2);
+  right: var(--size-4-4);
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: var(--size-4-1);
+  padding: var(--size-4-1) var(--size-4-2);
+  background-color: var(--background-secondary);
+  border: var(--border-width) solid var(--background-modifier-border);
+  border-radius: var(--radius-m);
+  box-shadow: var(--shadow-s);
+}
+
+.vault-terminal-content .vault-terminal-search input {
+  width: 180px;
+}
+
+.vault-terminal-content .vault-terminal-search-count {
+  min-width: 5em;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  white-space: nowrap;
+}
+
+/* Settings: the agents' environment variables, one per line. */
+.vault-terminal-variables {
+  width: 100%;
+  min-width: 18em;
+  font-family: var(--font-monospace);
+}
+
+/* The close confirm: a hover anyone can see, since the default theme's
+   buttons barely show one. A color change only, the same
+   for both buttons: no ring, which made a button look bigger, and no focus
+   ring on Cancel, which has the focus from the start so Enter cancels. The
+   buttons otherwise keep Obsidian's look. */
+.vault-terminal-confirm {
+  /* The color mixed into a button's own on hover, and how much: a host or a theme can change either (PORTING.md). */
+  --vault-terminal-hover-toward: var(--text-normal);
+  --vault-terminal-hover-amount: 20%;
+}
+/* In the dark theme the light text color grays the red Close more than it
+   lightens it, which hardly shows: both buttons go toward white instead, by
+   the same amount. */
+.theme-dark .vault-terminal-confirm {
+  --vault-terminal-hover-toward: white;
+  --vault-terminal-hover-amount: 28%;
+}
+.vault-terminal-confirm .modal-button-container button {
+  transition: background-color 100ms ease-in-out;
+}
+.vault-terminal-confirm .modal-button-container button:focus,
+.vault-terminal-confirm .modal-button-container button:focus-visible {
+  outline: none;
+  box-shadow: var(--input-shadow);
+}
+.vault-terminal-confirm .modal-button-container button:not(.mod-warning):hover {
+  background-color: color-mix(in srgb, var(--interactive-normal), var(--vault-terminal-hover-toward) var(--vault-terminal-hover-amount));
+}
+.vault-terminal-confirm .modal-button-container button.mod-warning:hover {
+  background-color: color-mix(in srgb, var(--background-modifier-error), var(--vault-terminal-hover-toward) var(--vault-terminal-hover-amount));
+}
+
+/* Pictures: a canvas over xterm's screen paints each
+   placeholder cell's background and its slice of the picture, covering the
+   placeholder's own glyph. Clicks and selection go through to xterm. */
+.vault-terminal-view .xterm-screen .vault-terminal-pictures {
+  position: absolute;
+  top: 0;
+  left: 0;
+  pointer-events: none;
+  z-index: 1;
+}
+
+/* Hovering a link: where it goes, and how to open it. */
+.vault-terminal-view .vault-terminal-link-tip {
+  position: absolute;
+  z-index: 10;
+  max-width: 320px;
+  padding: var(--size-4-1) var(--size-4-2);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s);
+  background: var(--background-secondary);
+  color: var(--text-normal);
+  font-family: var(--font-interface);
+  font-size: var(--font-ui-smaller);
+  pointer-events: none;
+  overflow-wrap: anywhere;
+}
+
+.vault-terminal-view .vault-terminal-link-tip-how {
+  color: var(--text-muted);
+}
