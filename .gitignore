@@ -18,3 +18,6 @@ CLAUDE.local.md
 __pycache__/
 test/picture-mod/.claude-plugin/types/
 test/picture-mod/tsconfig.json
+
+# The bundled Claude mod: the API types copied in to type-check it (claude-mod/README.md)
+claude-mod/*/.claude-plugin/types/

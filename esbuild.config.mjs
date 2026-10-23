@@ -10,7 +10,8 @@
 import esbuild from "esbuild";
 import process from "process";
 import { builtinModules } from "node:module";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { join, relative } from "node:path";
 import { pathToFileURL } from "node:url";
 import { vaultTerminalStyles, withVaultTerminal } from "./src/vault-terminal/build.mjs";
 import { noticeComment } from "./scripts/notices.mjs";
@@ -26,12 +27,40 @@ const external = [
   ...builtinModules.map((m) => `node:${m}`),
 ];
 
+// The Claude mod (claude-mod/, its README), bundled as text: `import files from "claude-mod-files"`
+// gives { "inline-images/hooks/register.tsx": "...", ... }, every file the mod ships with,
+// without the API types copied in to check it or its tsconfig.
+const MOD_ROOT = "claude-mod";
+function modFiles(dir = MOD_ROOT) {
+  const out = [];
+  for (const name of readdirSync(dir).sort()) {
+    const path = join(dir, name);
+    if (name === "types" || name === "tsconfig.json" || name === "README.md" || name === ".DS_Store") continue;
+    if (statSync(path).isDirectory()) out.push(...modFiles(path));
+    else out.push(path);
+  }
+  return out;
+}
+const claudeMod = {
+  name: "claude-mod-files",
+  setup(build) {
+    build.onResolve({ filter: /^claude-mod-files$/ }, () => ({ path: "claude-mod-files", namespace: "claude-mod" }));
+    build.onLoad({ filter: /.*/, namespace: "claude-mod" }, () => {
+      // The mod alone: claude-mod/.claude-plugin/ is the marketplace for installing it by hand.
+      const files = modFiles(join(MOD_ROOT, "inline-images"));
+      const map = Object.fromEntries(files.map((f) => [relative(MOD_ROOT, f), readFileSync(f, "utf8")]));
+      return { contents: `export default ${JSON.stringify(map)};`, loader: "js", watchFiles: files };
+    });
+  },
+};
+
 export const options = withVaultTerminal({
+  plugins: [claudeMod],
   // "use strict" first: an ES module is strict, but the CommonJS output esbuild writes
   // from it is not unless the file says so.
   // Then the bundled packages' licenses, since an install gets only the built files.
   banner: { js: `"use strict";\n// Built by esbuild from src/. Edit src/, never this file.\n${noticeComment()}` },
-  entryPoints: ["src/main.js"],
+  entryPoints: ["src/main.ts"],
   bundle: true,
   external,
   format: "cjs",

@@ -2,14 +2,16 @@
 
 Run Claude Code, Codex, or Antigravity in a tab in Obsidian. Every session is listed in a sidebar, picks up where it left off, and is saved as a note in your vault. Any note can start a session about itself. There's no special setup or folder layout.
 
-**macOS only, for now.**
+macOS only, for now.
+
+![Agent Manager: the session sidebar beside a note and a Claude Code session](assets/screenshot.png)
 
 ## What it does
 
 - **A terminal made for agent CLIs.** Each session is a tab running the real CLI, with its own keys and colors. Cmd+C and Cmd+V work the Mac way, and pasting a picture hands it to the agent. Drag a note or a file from Finder in to type its path; Cmd+click a path to open it. Scrolling keeps your place through resizes.
 - **Every session in one list.** The sidebar has a **New Session** button, **Daily Chat**, then **Pinned** (sessions you keep at the top, in the order you drag them) and **Recent** (open sessions first, then every other session in the vault, newest first, with a search). Each session has a dot: green when it's open in a tab, an empty ring when it isn't. Click a closed session to resume it. Right-click to pin, rename, copy its resume link, close, or delete.
 - **Daily Chat.** One click opens the day's chat, resumes it if its tab is closed, or starts it. It's named for the day, and never started twice. Its sun is grey until the day's chat has run, yellow once it has, and green while it's open.
-- **Start from any note or folder.** The session is named for it and told to read it, and a note gets a link back to the session in its properties. See below.
+- **Start from any note or folder.** The session is named for it and told to read it, and a note gets a link back to the session in its properties.
 - **Transcripts as notes.** Each session is saved as a Markdown note in one folder (`Agent Transcripts` by default), turn by turn, so you can search, link, and quote it, and it outlasts the CLI's own history.
 - **Three CLIs, one way of working.** Claude Code, Codex, and Antigravity all start, list, resume, and save the same way. Pick a default, or choose per session.
 - **Side chats.** From any session, open a copy of the conversation so far in a new tab, made by the CLI's own fork, and take it somewhere else. The original doesn't change.
@@ -29,11 +31,13 @@ Run Claude Code, Codex, or Antigravity in a tab in Obsidian. Every session is li
 
 ## Install
 
-Agent Manager isn't in Obsidian's community plugin directory yet. Install it with [BRAT](https://github.com/TfTHacker/obsidian42-brat):
+Agent Manager isn't in Obsidian's community plugin directory yet, so it's installed by hand:
 
-1. Install and enable BRAT from Community plugins.
-2. In BRAT's settings, choose "Add beta plugin" and enter `mattmaiorana/agent-manager`.
-3. Enable Agent Manager under Community plugins.
+1. From the [latest release](https://github.com/mattmaiorana/agent-manager/releases/latest), download `main.js`, `manifest.json`, and `styles.css`.
+2. In your vault, make the folder `.obsidian/plugins/agent-manager/` and put the three files in it. (`.obsidian` is hidden in Finder; press Cmd+Shift+. to show it.)
+3. In Obsidian, open Settings → Community plugins, turn community plugins on if they're off, and enable Agent Manager. If it isn't listed, click the refresh button there.
+
+To update, replace the three files with the newer release's and reload Obsidian.
 
 ## Your first session
 
@@ -42,48 +46,6 @@ Agent Manager isn't in Obsidian's community plugin directory yet. Install it wit
 3. Type to the agent. It works in your vault's folder.
 
 Close the tab when you're done. The session stays in Recent; click it to pick up where you left off.
-
-## Starting a session from a note
-
-Open a note and run **Start session from this note** from the command palette, or right-click a note or a folder in the file list and choose **Start agent session**. The session is named for the note and told to read it first, so a to-do, a bug report, or a draft becomes the agent's brief.
-
-A note then gets one property, a link that resumes the session:
-
-```yaml
-main-session: obsidian://agent-manager?vault=My%20Vault&op=resume&session=3f2a91c0-…
-```
-
-The latest session started from a note holds it. The session's transcript note links back to the note in its own `source` property, so the note's backlinks list every session about it, side chats included. A folder gets nothing written, since a folder has no properties. The property names are fixed, so a base written for one vault works in any; what each kind of session is told first is a setting.
-
-### A board of notes
-
-That's all a task board needs. Put your tasks in a folder, then make a [base](https://help.obsidian.md/bases) over it: create a file named `Tasks.base` and paste this in (or paste it into a note inside a ` ```base ` code block). Every row gets a button that starts a session about the note, or resumes the one it has. Bases needs Obsidian 1.9 or later:
-
-```yaml
-filters:
-  and:
-    - file.inFolder("Tasks")
-formulas:
-  session: 'if(note["main-session"], link(note["main-session"], "Resume"), link("obsidian://agent-manager?vault=My%20Vault&op=new&note=" + file.path.replace(/%/g, "%25").replace(/ /g, "%20").replace(/&/g, "%26").replace(/#/g, "%23").replace(/\+/g, "%2B").replace(/\?/g, "%3F"), "Start"))'
-views:
-  - type: table
-    name: Tasks
-    order:
-      - file.name
-      - formula.session
-```
-
-Change `Tasks` to your folder, and `My%20Vault` to your vault's name, with each space written as `%20`. The chain of `replace()` calls encodes the note's path, since Bases has no function for it. Only `link()` makes a clickable button in a formula, so the session property holds a bare link for it to wrap. A Start button uses your default CLI; add `&backend=codex` (or `claude`, `antigravity`) after `op=new` to pick another.
-
-## Links
-
-A note can link to a session with a Markdown link, `[Label](obsidian://agent-manager?…)`, which shows as a pill. Right-click a session in the sidebar and choose "Copy resume link" for one ready to paste. The addresses:
-
-- `obsidian://agent-manager?vault=<vault>&op=resume&session=<id>` resumes a session, or focuses its tab if it's open.
-- `obsidian://agent-manager?vault=<vault>&op=new&note=<path>` starts a session from a note or a folder. The path is from the vault's top, with `.md` for a note: `Tasks/Fix the sink.md`. It starts on your default CLI rather than asking which.
-- `obsidian://agent-manager?vault=<vault>&op=new&backend=<claude|codex|antigravity>&title=<name>` starts a plain session. `backend` works on the `note` link too.
-
-Encode every value, with `%20` for a space: Obsidian doesn't read `+` as a space.
 
 ## Where sessions start
 
@@ -102,24 +64,22 @@ Agent Manager runs on your computer and reads and runs a few things outside the 
 - **Runs** the CLI you start, through a Python helper that reads the process table while the session runs; `ps`, to see whether anything is still running in a terminal; `claude agents --json` before resuming a Claude session; `/sbin/mount` once per load; your login shell once per load, to read its environment, the way a terminal app does; and macOS's `/usr/libexec/path_helper` for a starting PATH until the shell answers.
 - **Looks for Python and the CLIs** in the usual places (Homebrew, python.org, pyenv, uv, conda, `~/.local/bin`, `~/.claude/local`, npm's, Volta's, Bun's, and nvm's folders, and your PATH), running each Python it finds once with a short check, and reading the first line of a CLI that's a script to see whether it needs Node.
 - **Reads Claude Code's settings files** before starting Claude (`~/.claude/settings.json`, or the one in `CLAUDE_CONFIG_DIR`; the managed settings in `/Library/Application Support/ClaudeCode/`; and the vault's `.claude/` settings), only to see whether you've set Claude's scroll speed or the variables below yourself, in which case the terminal leaves them alone.
-- **Adds to every Claude start**, without writing to any settings file: an inline `--settings` with hooks on each prompt, tool use, permission request, stop, and failure (each prints a short code the tab reads, so it knows whether Claude is working or waiting), the kitty notification channel, and the scroll settings above; and, unless you've set them, `CLAUDE_CODE_SCROLL_SPEED`, `CLAUDE_CODE_FORCE_SYNC_OUTPUT`, `CLAUDE_CODE_FORCE_STRIKETHROUGH`, and `CLAUDE_CODE_FORCE_TERMINAL_IMAGES` (with pictures on), for what this terminal supports. Claude's `/hooks` lists the hooks.
+- **Adds to every Claude start**, without writing to any settings file: an inline `--settings` with hooks on each prompt, tool use, permission request, stop, and failure (each prints a short code the tab reads, so it knows whether Claude is working or waiting), the kitty notification channel, and the scroll settings above; and, unless you've set them, `CLAUDE_CODE_SCROLL_SPEED`, `CLAUDE_CODE_FORCE_SYNC_OUTPUT`, `CLAUDE_CODE_FORCE_STRIKETHROUGH`, and `CLAUDE_CODE_FORCE_TERMINAL_IMAGES` (with pictures on), for what this terminal supports. Claude's `/hooks` lists the hooks. With pictures on, also `--plugin-dir` naming the picture mod below, for that session only.
 - **Gives every session the folders in "Added folders"** (none by default), which the CLI can then read and write.
 - **Looks up file paths a session prints**, to make them clickable, and shows one in Finder when you Cmd+click a path outside the vault.
 - **Reads a picture file a CLI asks it to show**, the way the kitty terminal does, and deletes it only when it's a temporary file the CLI marked for deletion.
+- **Shows the pictures Claude sends you.** A small Claude Code mod that ships inside the plugin draws each PNG a Claude session sends you (its SendUserFile tool) as a framed picture, with Open, Save to Downloads, and Copy path. The plugin writes the mod's few files into its own folder (`.obsidian/plugins/agent-manager/claude-mod/`) and passes it to each Claude session with `--plugin-dir`, only while "Show pictures" is on; nothing is downloaded and nothing goes into `~/.claude`. Its buttons run `open`, `cp`, `cmp`, and `sips` on the picture's file, and Save to Downloads writes into `~/Downloads`. Its look comes from show-your-work by Umer Ansari (MIT, credited in `claude-mod/inline-images/THIRD_PARTY_NOTICES.md`).
 - **Keeps a count of sessions waiting for you** in Obsidian's local storage, for the Dock badge, only with "Waiting count on the Dock icon" on (off by default).
 
 **Network:** the plugin's own code makes no network requests. The CLIs talk to their own services, as they do in any terminal. A transcript note is Markdown, so an image an agent links from the web loads from the web, as it would in any note.
 
 **Your sign-in and plan:** Agent Manager starts the real CLI, so sign-in, models, and billing stay with the CLI, and a Claude or ChatGPT subscription works as it does in your terminal. It never asks for an API key. By default it keeps the API keys and provider settings in your shell's startup files (such as `ANTHROPIC_API_KEY` and `OPENAI_API_KEY`) away from agents, so nothing moves you onto per-token billing by accident. That list is a setting.
 
-**Your vault:** it writes transcript notes into one folder, the `main-session` property into a note you start a session from, and an `AGENTS.md` only when you click Create.
+**Your vault:** it writes the picture mod's files into its own plugin folder (above), transcript notes into one folder, the `main-session` property into a note you start a session from, and an `AGENTS.md` only when you click Create.
 
 ## Known limits
 
 - macOS only. The terminal's helper reads the process table through macOS's own library.
-- Quitting Obsidian with Cmd+Q may not ask first, even with an agent working, and it ends every session. Closing a tab or a window does ask.
-- If your login shell's startup files are slow, reading their environment can time out, and agents miss what they export. A startup file can skip its slow part when `VAULT_TERMINAL_ENV_PROBE` is set, which it is only while the terminal reads the environment.
-- Antigravity sessions started outside Agent Manager aren't listed (its files don't say which vault they belong to). Import one with the "Import a session's transcript" command.
 
 ## License
 

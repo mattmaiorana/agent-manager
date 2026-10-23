@@ -269,7 +269,7 @@
 /* Reveal the browser's tab title, when the setting is on.
    Scoped by data-type so no other plugin's sidebar icon is affected. */
 body.agent-manager-show-tab-title .workspace-tab-header[data-type="agent-manager-browser"] .workspace-tab-header-inner-title {
-	display: flex !important;
+	display: flex;
 	margin-left: 5px;
 }
 
@@ -631,10 +631,6 @@ body.agent-manager-show-tab-title .workspace-tab-header[data-type="agent-manager
 }
 
 /* ---- The sidebar -------------------------------------------------------- */
-
-.agent-manager-hidden {
-	display: none !important;
-}
 
 
 /* The form's backend and Start share a row. */

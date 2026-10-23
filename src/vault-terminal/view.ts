@@ -375,6 +375,9 @@ export class TerminalView extends ItemView {
         // Where it goes, since a program's link text can differ from its address.
         hover: (event, uri, range) => {
           if (uri !== PICTURE_LINK) this.showLinkTip(event, uri, sameAddress(this.textIn(range).trim(), uri));
+          // A picture's link is the terminal's own (kitty.ts) and opens nothing, so no pointing hand
+          // over it: xterm sets the hand just before this runs.
+          else term.element?.querySelector(".xterm-screen")?.classList.remove("xterm-cursor-pointer");
         },
         leave: () => this.hideLinkTip(),
         allowNonHttpProtocols: true,

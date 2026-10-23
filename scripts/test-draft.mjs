@@ -1,4 +1,4 @@
-// Tests for src/sessions/draft.js, the unsent-text tracker behind the close confirm and
+// Tests for src/sessions/draft.ts, the unsent-text tracker behind the close confirm and
 // the guards on the plugin's own typing: node scripts/test-draft.mjs
 import { DraftTracker } from "../src/sessions/draft.js";
 

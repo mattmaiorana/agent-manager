@@ -1,4 +1,4 @@
-// Tests for the transcript writer (src/transcripts/transcript-core.js), against an
+// Tests for the transcript writer (src/transcripts/transcript-core.ts), against an
 // in-memory vault: node scripts/test-transcript-core.mjs
 import fs from "node:fs";
 import os from "node:os";

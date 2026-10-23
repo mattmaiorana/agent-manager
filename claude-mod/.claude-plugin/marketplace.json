@@ -1,0 +1,7 @@
+{
+  "name": "agent-manager-mods",
+  "owner": { "name": "Matt Maiorana" },
+  "plugins": [
+    { "name": "inline-images", "source": "./inline-images", "description": "Shows the PNG images Claude sends you as framed pictures in the terminal, with Open, Save to Downloads, and Copy path." }
+  ]
+}

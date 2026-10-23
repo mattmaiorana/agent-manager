@@ -20,6 +20,8 @@ export default defineConfig(
     "scripts",
     "test",
     "src/selftest",
+    // The Claude mod: Claude Code runs it, not Obsidian, and it ships as text in main.js.
+    "claude-mod",
   ]),
   {
     languageOptions: {
@@ -48,6 +50,18 @@ export default defineConfig(
         ignoreWords: ["Enter", "S", "Meta", "MB", "NAME"],
         ignoreRegex: ["^~/", "^[A-Z_]+="],
       }],
+    },
+  },
+  {
+    // All of src/'s TypeScript, the terminal's included (the self-test is ignored above):
+    // values typed `any` are errors, so the types can't slide back.
+    files: ["src/**/*.ts"],
+    rules: {
+      "@typescript-eslint/no-unsafe-assignment": "error",
+      "@typescript-eslint/no-unsafe-member-access": "error",
+      "@typescript-eslint/no-unsafe-call": "error",
+      "@typescript-eslint/no-unsafe-argument": "error",
+      "@typescript-eslint/no-unsafe-return": "error",
     },
   },
 );

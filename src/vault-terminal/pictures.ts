@@ -24,6 +24,9 @@ const EVENTS_KEPT = 400;
 const DECODE_SETTLE_MS = 40;
 const DECODES_AT_ONCE = 4;
 
+/** Neighboring cells of one placement on one row, drawn with a single clip. */
+interface PictureRun { x0: number; x1: number; c: FoundCell; bmp: ImageBitmap; width: number; height: number; cols: number; rows: number }
+
 export class PictureLayer {
   readonly filter: GraphicsFilter;
   readonly graphics: KittyGraphics;
@@ -341,7 +344,44 @@ export class PictureLayer {
     for (let r = 0; r < term.rows; r++) {
       const line = buf.getLine(buf.viewportY + r);
       if (!line) continue;
-      for (const c of this.cellsOn(line, r, scratch, theme)) {
+      const cells = this.cellsOn(line, r, scratch, theme);
+      // A placeholder's glyph, drawn by xterm under this canvas, spills a little into the cell
+      // after it. Inside a run that cell is painted too; after a run's last one a blank cell is
+      // painted with its own background, or the spill shows as a sliver in the id's color.
+      for (let i = 0; i < cells.length; i++) {
+        const c = cells[i];
+        if (cells[i + 1]?.x === c.x + 1) continue;
+        const next = c.x + 1 < line.length ? line.getCell(c.x + 1, scratch) : undefined;
+        if (!next || next.getChars().trim() !== "") continue;
+        const nx0 = px((c.x + 1) * cell.width);
+        ctx.fillStyle = background(next, theme);
+        ctx.fillRect(nx0, px(r * cell.height), px((c.x + 2) * cell.width) - nx0, px((r + 1) * cell.height) - px(r * cell.height));
+      }
+      // Each cell's background, then the picture once per run of neighboring cells of one
+      // placement on this row, clipped to the run: one draw per row, not one per cell, so a
+      // large picture scrolls without a draw for each of its thousands of cells.
+      // In an object, not a variable: a closure's writes aren't seen by TypeScript's narrowing.
+      const at: { run: PictureRun | null } = { run: null };
+      const flush = () => {
+        const run = at.run;
+        if (!run) return;
+        const { c, bmp, width, height, cols, rows } = run;
+        const boxW = cols * cell.width;
+        const boxH = rows * cell.height;
+        const scale = Math.min(boxW / width, boxH / height);
+        const dw = width * scale;
+        const dh = height * scale;
+        const left = c.x * cell.width - c.col * cell.width + (boxW - dw) / 2;
+        const top = r * cell.height - c.row * cell.height + (boxH - dh) / 2;
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(run.x0, px(r * cell.height), run.x1 - run.x0, px((r + 1) * cell.height) - px(r * cell.height));
+        ctx.clip();
+        ctx.drawImage(bmp, left * dpr, top * dpr, dw * dpr, dh * dpr);
+        ctx.restore();
+        at.run = null;
+      };
+      for (const c of cells) {
         const x0 = px(c.x * cell.width);
         const y0 = px(r * cell.height);
         const x1 = px((c.x + 1) * cell.width);
@@ -352,32 +392,28 @@ export class PictureLayer {
         const img = this.graphics.images.get(c.id);
         const places = this.graphics.placements.get(c.id);
         const place = c.placement ? places?.get(c.placement) : places?.values().next().value;
-        if (!img || !place) continue;
+        if (!img || !place) { flush(); continue; }
         placed.add(img.id);
         const ready = this.bitmap(img);
         const prev = ready ? null : this.previous.get(img.id);
         const bmp = ready ?? prev?.bmp;
-        if (!bmp) continue;
+        if (!bmp) { flush(); continue; }
         const width = prev?.width ?? img.width;
         const height = prev?.height ?? img.height;
         const cols = place.cols || Math.ceil(width / cell.width);
         const rows = place.rows || Math.ceil(height / cell.height);
-        if (c.row >= rows || c.col >= cols) continue;
-        const boxW = cols * cell.width;
-        const boxH = rows * cell.height;
-        const scale = Math.min(boxW / width, boxH / height);
-        const dw = width * scale;
-        const dh = height * scale;
-        const left = c.x * cell.width - c.col * cell.width + (boxW - dw) / 2;
-        const top = r * cell.height - c.row * cell.height + (boxH - dh) / 2;
-        ctx.save();
-        ctx.beginPath();
-        ctx.rect(x0, y0, x1 - x0, y1 - y0);
-        ctx.clip();
-        ctx.drawImage(bmp, left * dpr, top * dpr, dw * dpr, dh * dpr);
-        ctx.restore();
+        if (c.row >= rows || c.col >= cols) { flush(); continue; }
         this.graphics.touch(img);
+        // The same picture, row and placement, one cell on: the run grows. Otherwise a new run.
+        const r0 = at.run;
+        if (r0 && r0.bmp === bmp && r0.c.row === c.row && r0.c.placement === c.placement && r0.c.id === c.id && x0 === r0.x1 && c.col - r0.c.col === c.x - r0.c.x) {
+          r0.x1 = x1;
+          continue;
+        }
+        flush();
+        at.run = { x0, x1, c, bmp, width, height, cols, rows };
       }
+      flush();
     }
     this.lastPaint = found;
     this.painted = found.length > 0;

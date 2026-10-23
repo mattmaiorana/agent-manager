@@ -2,6 +2,27 @@
 
 All notable changes to Agent Manager are recorded here, in [Keep a Changelog](https://keepachangelog.com) format. The first release is 1.0.0.
 
+## [Unreleased]
+
+## [1.0.1] - 2026-10-21
+
+### Added
+
+- **The pictures Claude sends you, in the terminal.** A Claude Code mod ships inside the plugin and draws each PNG a Claude session sends (SendUserFile) as a framed picture, with Open, Save to Downloads, and Copy path, capped in height so scrolling stays smooth. The plugin writes it into its own folder and passes it to every Claude start and resume with `--plugin-dir` while "Show pictures" is on; nothing is downloaded or written to `~/.claude`. Its look and some of its speed-ups come from show-your-work (MIT, credited). The mod is also a marketplace for installing it by hand (`claude-mod/`); a copy installed that way and the bundled one don't draw a picture twice.
+
+### Fixed
+
+- A tab whose saved backend name is one every JavaScript object inherits ("constructor") now falls back to Claude, as an unknown name always did, instead of breaking the tab (found by Codex reviewing the TypeScript conversion).
+- From Obsidian's plugin checker: the manifest's description no longer says "Obsidian"; the plugin's own CSS has no `!important` (two remain in xterm's, which the build appends) (a hidden row uses Obsidian's own `toggle`, and the sidebar's tab-title rule wins by being specific); the starting-folder picker asks Obsidian for folders (`getAllFolders`) instead of listing every file in the vault.
+- A picture a program draws (kitty graphics) no longer shows a pointing hand, since clicking it does nothing, nor a thin colored line beside it.
+- Large pictures scroll smoothly: each row of a picture is drawn at once, not each cell (about 2 ms a paint for a full-width screenshot).
+
+### Changed
+
+- The release workflow uses current actions on Node 24 (`actions/checkout@v7`, `actions/setup-node@v7`, `actions/attest@v4`) and builds with Node 24, ahead of GitHub retiring Node 20.
+- The notice shown when the login shell's environment can't be read explains `VAULT_TERMINAL_ENV_PROBE` itself, rather than pointing at the README.
+- The plugin is TypeScript now: the plugin class and its parts (`src/plugin/`), the session tab (`src/sessions/`, with its transcript overlay and its note write-back), the sidebar (`src/browser/`), the transcript writer and the import, the settings tab, the dialogs, Live Preview's link pills, the constants, and the shared data types, checked by the typecheck and by lint rules that refuse untyped values there. No change in behavior, except that opening a transcript note whose path is a folder now says the note isn't written yet instead of trying to open the folder.
+
 ## [1.0.0] - 2026-10-21
 
 ### Added

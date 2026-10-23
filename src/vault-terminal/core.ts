@@ -554,7 +554,7 @@ export class VaultTerminal {
         this.probeNoticeShown = true;
         this.probeNoticeAt = Date.now();
         const instead = this.loginPath ? "the PATH saved from an earlier start" : "a default PATH";
-        new Notice(`${this.name} couldn't read your login shell's environment (${(e as Error).message}), so terminals use ${instead} and agents miss what your startup files export. A slow startup file can skip its slow part when VAULT_TERMINAL_ENV_PROBE is set: see the README.`, 15000);
+        new Notice(`${this.name} couldn't read your login shell's environment (${(e as Error).message}), so terminals use ${instead} and agents miss what your startup files export. A slow startup file can skip its slow part when VAULT_TERMINAL_ENV_PROBE is set, which it is only while the terminal reads the environment.`, 15000);
       }
     }
   }

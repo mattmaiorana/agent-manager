@@ -1,7 +1,6 @@
 // The checks every change runs (`npm run verify`): a clean build, the tests, the
-// typecheck, and the things a build and the tests can't see in this plain-JavaScript
-// plugin: names used but never declared, methods called that nothing defines, the built
-// file's shape, and import cycles.
+// typecheck, and the things a build and the tests can't see: the built file's shape, that
+// the plugin's source is all TypeScript, and import cycles.
 //
 //   node scripts/verify.mjs
 import fs from "node:fs";
@@ -15,8 +14,6 @@ import { noticeComment, notices } from "./notices.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 process.chdir(ROOT);
-// Browser, Node, and Obsidian globals the plugin's own modules use.
-const KNOWN_GLOBALS = ["Buffer", "MutationObserver", "ResizeObserver", "URL", "URLSearchParams", "clearTimeout", "console", "createDiv", "createFragment", "document", "getComputedStyle", "navigator", "process", "queueMicrotask", "requestAnimationFrame", "require", "setTimeout", "window"];
 
 const results = [];
 const pass = (name, detail = "") => results.push({ name, ok: true, detail });
@@ -64,8 +61,9 @@ try {
 
 // ---- 3. Tests --------------------------------------------------------------------------
 {
-  for (const file of ["scripts/test-draft.mjs", "scripts/test-transcript-core.mjs", "scripts/test-dialogs.mjs", "scripts/test-follow.mjs"]) {
-    const r = spawnSync(process.execPath, [file], { encoding: "utf8" });
+  // Each through scripts/run-test.mjs, which bundles it so its source can be JavaScript or TypeScript.
+  for (const file of ["scripts/test-draft.mjs", "scripts/test-transcript-core.mjs", "scripts/test-dialogs.mjs", "scripts/test-follow.mjs", "scripts/test-note-writeback.mjs"]) {
+    const r = spawnSync(process.execPath, ["scripts/run-test.mjs", file], { encoding: "utf8" });
     const out = (r.stdout + r.stderr).trim().split("\n");
     r.status === 0 ? pass(`test ${path.basename(file)}`, out[out.length - 1]) : fail(`test ${path.basename(file)}`, out.filter((l) => /FAIL|Error/.test(l)).slice(0, 3).join(" | ") || `exit ${r.status}`);
   }
@@ -157,66 +155,16 @@ if (loaded) {
   issues.length ? fail("built file's shape", issues.slice(0, 8).join("; ")) : pass("built file's shape", `strict; at load only the export glue and ${calls} applyParts call(s); ${parts.length} parts, none using super`);
 }
 
-// ---- 5. Names used but never declared --------------------------------------------------
+// ---- 5. Plain JavaScript ------------------------------------------------------------------
+// This used to check Agent Manager's JavaScript for names used but never declared, and for
+// methods called on `this` or `this.plugin` that nothing defines. The plugin is all
+// TypeScript now, and the typecheck (strict) refuses both, so those checks are gone. This
+// says so, and fails if a JavaScript module comes back into src/, which the typecheck
+// would see only loosely.
 {
-  // Agent Manager's own JavaScript: the terminal's TypeScript has the typecheck instead.
-  const srcFiles = Object.keys(metafile.inputs).filter((f) => f.startsWith("src/") && f.endsWith(".js") && !f.startsWith("src/vault-terminal/"));
-  const linterNoUndef = (code, globals) => linter.verify(code, [{
-    languageOptions: { ecmaVersion: "latest", sourceType: "module", globals },
-    rules: { "no-undef": "error" },
-    // The source's own eslint-disable comments are for npm run lint's rules, not this one.
-    linterOptions: { reportUnusedDisableDirectives: "off" },
-  }]);
-  const known = KNOWN_GLOBALS;
-  const globals = Object.fromEntries(known.map((g) => [g, "readonly"]));
-  const bad = [];
-  for (const f of srcFiles) {
-    for (const m of linterNoUndef(fs.readFileSync(f, "utf8"), globals)) bad.push(`${f}:${m.line} ${m.message}`);
-  }
-  bad.length ? fail("undeclared names", bad.slice(0, 10).join("; ")) : pass("undeclared names", `${srcFiles.length} module(s), ${known.length} known globals`);
-}
-
-// Every method called on `this` or `this.plugin` exists somewhere: defined in Agent
-// Manager's JavaScript or the terminal's TypeScript, assigned as a property, or part of
-// Obsidian's API. A call to a deleted method parses, builds, and passes the typecheck,
-// and fails only when it runs. A name is checked, not which object has it.
-{
-  const own = Object.keys(metafile.inputs).filter((f) => f.startsWith("src/") && f.endsWith(".js") && !f.startsWith("src/vault-terminal/"));
-  const defined = new Set();
-  const walkAll = (n, fn) => {
-    if (!n || typeof n !== "object") return;
-    if (Array.isArray(n)) return n.forEach((x) => walkAll(x, fn));
-    fn(n);
-    for (const k of Object.keys(n)) if (k !== "parent") walkAll(n[k], fn);
-  };
-  const keyName = (k) => (k && (k.type === "Identifier" || k.type === "PrivateIdentifier") ? k.name : k && k.type === "Literal" ? String(k.value) : null);
-  const asts = {};
-  for (const f of own) {
-    const { ast } = parse(fs.readFileSync(f, "utf8"), "module");
-    asts[f] = ast;
-    walkAll(ast, (n) => {
-      if (n.type === "MethodDefinition" || n.type === "PropertyDefinition" || n.type === "Property") { const k = keyName(n.key); if (k) defined.add(k); }
-      if (n.type === "AssignmentExpression" && n.left.type === "MemberExpression" && !n.left.computed) defined.add(n.left.property.name);
-    });
-  }
-  // The terminal's TypeScript, and Obsidian's API, by the names they declare: a member
-  // name followed by "(" or ":" at the start of a declaration line.
-  const declared = (file) => { try { for (const m of fs.readFileSync(file, "utf8").matchAll(/^\s*(?:(?:public|private|protected|static|readonly|async|abstract|get|set)\s+)*#?([A-Za-z_$][\w$]*)\??\s*(?:<[^>]*>)?\s*[(:=]/gm)) defined.add(m[1]); } catch {} };
-  for (const f of Object.keys(metafile.inputs).filter((f) => f.startsWith("src/vault-terminal/") && f.endsWith(".ts"))) declared(f);
-  declared("node_modules/obsidian/obsidian.d.ts");
-  const missing = [];
-  for (const [f, ast] of Object.entries(asts)) {
-    walkAll(ast, (n) => {
-      if (n.type !== "CallExpression" || n.callee.type !== "MemberExpression" || n.callee.computed) return;
-      const obj = n.callee.object;
-      const onThis = obj.type === "ThisExpression";
-      const onPlugin = obj.type === "MemberExpression" && !obj.computed && obj.object.type === "ThisExpression" && obj.property.name === "plugin";
-      if (!onThis && !onPlugin) return;
-      const name = n.callee.property.name;
-      if (!defined.has(name)) missing.push(`${f}:${n.loc.start.line} ${onPlugin ? "this.plugin." : "this."}${name}()`);
-    });
-  }
-  missing.length ? fail("called methods exist", missing.slice(0, 10).join("; ")) : pass("called methods exist", `${own.length} module(s), ${defined.size} names`);
+  const mods = Object.keys(metafile.inputs).filter((f) => f.startsWith("src/"));
+  const js = mods.filter((f) => /\.(c|m)?js$/.test(f));
+  js.length ? fail("all TypeScript", `JavaScript in src/: ${js.join(", ")}`) : pass("all TypeScript", `${mods.length} module(s); the typecheck covers undeclared names and missing methods`);
 }
 
 // ---- 6. No import cycles ------------------------------------------------------------------

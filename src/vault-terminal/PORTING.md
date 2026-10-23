@@ -2,7 +2,7 @@
 
 `vault-terminal` is a terminal for Obsidian: real terminals (xterm.js 6 over a small Python helper), built to run Claude Code, Codex and Antigravity unmodified, with their state, notifications, pictures and Mac keys. This folder is all of it. A plugin hosts it by giving it a few things about itself; nothing here imports from outside the folder.
 
-Agent Manager hosts it (`src/plugin/terminal-host.js`). This file is for any plugin that hosts it.
+Agent Manager hosts it (`src/plugin/terminal-host.ts`). This file is for any plugin that hosts it.
 
 ## Copying it
 

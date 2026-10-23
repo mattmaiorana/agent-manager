@@ -1,4 +1,4 @@
-// Tests for the dialog guard (src/sessions/constants.js, DIALOG_RE): the plugin types
+// Tests for the dialog guard (src/sessions/constants.ts, DIALOG_RE): the plugin types
 // nothing into a CLI while one of these shows, since an Enter there answers it.
 //   node scripts/test-dialogs.mjs
 import { DIALOG_RE } from "../src/sessions/constants.js";

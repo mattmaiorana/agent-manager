@@ -1,5 +1,5 @@
 // Tests writing a session's resume link (main-session) back into the note it was started from
-// (src/notes/view-note.js: maybeWriteNoteBack, with plugin/notes.js's helpers). The two
+// (src/notes/view-note.ts: maybeWriteNoteBack, with plugin/notes.ts's helpers). The two
 // parts are bundled with Obsidian stubbed out and run against an in-memory note:
 // node scripts/test-note-writeback.mjs
 import path from "node:path";

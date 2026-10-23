@@ -1,5 +1,5 @@
 // Tests that a session tab follows its conversation to a new id, keeping its tab, pin,
-// name, and transcript (src/sessions/identity.js: _detectRehostedSession, _repointTo).
+// name, and transcript (src/sessions/identity.ts: _detectRehostedSession, _repointTo).
 // The identity part is bundled with Obsidian stubbed out, then run against real
 // transcript files in a temporary folder: node scripts/test-follow.mjs
 import fs from "node:fs";
