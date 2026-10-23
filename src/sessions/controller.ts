@@ -99,6 +99,11 @@ class SessionController implements TerminalController {
   declare _handoffIntent: string | null | undefined;
   declare _handoffMode: HandoffMode | null | undefined;
   declare _daily: boolean | undefined;
+  // The agent it was launched as, by id ("" for none), until its id's record holds it
+  // (plugin/agents.ts); undefined for a resume, which reads the record.
+  declare _agentId: string | undefined;
+  // A fork's: the agent its source's conversation launched as, which the fork keeps.
+  declare _launchAgentId: string | undefined;
   declare _forkFrom: ForkFrom | null | undefined;
   declare _noteSupport: boolean | undefined;
   declare _noteClaim: boolean | undefined;
@@ -222,6 +227,18 @@ class SessionController implements TerminalController {
     return this.sessionTitle || this.getBackend().label;
   }
   icon(): string { return "bot"; }
+  // The session's agent, by id ("" for none): its id's record once there is one (Move
+  // to changes it), else what it was launched as.
+  agentId(this: Session): string {
+    const rec = this.plugin.recordedAgentId(this._ownSessionId());
+    return rec !== undefined ? rec : (this._agentId ?? "");
+  }
+  // The agent its conversation launched as, which the CLI keeps: its id's record, else
+  // what this tab launched as.
+  conversationAgentId(this: Session): string {
+    const rec = this.plugin.launchAgentOf(this._ownSessionId());
+    return rec !== undefined ? rec : (this._launchAgentId ?? this._agentId ?? "");
+  }
   exitHint(): string {
     if (this._inert) return "This tab can't be restarted. Close it when you're done with it.";
     return "Press Enter to resume this session.";
@@ -240,6 +257,8 @@ class SessionController implements TerminalController {
     if (this._noteReplaces) state.noteReplaces = true;
     if (this._forkFrom) state.forkFrom = this._forkFrom;
     if (this._daily) state.daily = true;
+    if (this._agentId !== undefined) state.agent = this._agentId;
+    if (this._launchAgentId !== undefined) state.launchAgent = this._launchAgentId;
     if (this._ticketLinks && Object.keys(this._ticketLinks).length) state.ticketLinks = this._ticketLinks;
     // Took a turn: its transcript was found, or it was a resume. A restore that finds no
     // transcript for a tab that never did starts it afresh rather than failing.
@@ -271,6 +290,8 @@ class SessionController implements TerminalController {
     if (state.forkFrom && typeof state.forkFrom === "object") this._forkFrom = state.forkFrom;
     if (typeof state.launchToken === "string") this._launchToken = state.launchToken;
     if (state.daily) this._daily = true;
+    if (typeof state.agent === "string") this._agentId = state.agent;
+    if (typeof state.launchAgent === "string") this._launchAgentId = state.launchAgent;
     if (state.ticketLinks && typeof state.ticketLinks === "object") this._ticketLinks = { ...state.ticketLinks };
     if (state.started) this._started = true;
     if (state.rehostedFrom && typeof state.rehostedFrom === "object") this._rehostedFrom = state.rehostedFrom;
@@ -342,6 +363,11 @@ class SessionController implements TerminalController {
     // way goes without it.
     const modDir = backendKey === "claude" ? this.plugin.claudeModDir?.() : null;
     if (modDir) global.push("--plugin-dir", modDir);
+    // The agent its conversation launched as, on every start the CLI takes it on
+    // (context/agents.ts, agentArgs): a resume or a fork keeps it, whatever the session
+    // is filed under since, so the CLI's header and the conversation agree.
+    const resumeId = this.resumeSessionId && /^[0-9a-fA-F-]{16,}$/.test(this.resumeSessionId) ? this.resumeSessionId : null;
+    global.push(...this.plugin.agentLaunchArgs(backendKey, this.conversationAgentId(), !!(resumeId || this._forkFrom), resumeId || this._forkFrom?.id || null));
     const addDirs = this.plugin.addedFolders().filter((d) => path.resolve(d) !== path.resolve(cwd));
     if (addDirs.length && backend.addDirFlag) {
       for (const dir of addDirs) global.push(backend.addDirFlag, dir);
@@ -364,7 +390,7 @@ class SessionController implements TerminalController {
       // inside it (_sendFork). The tab is on the source until the fork answers.
       return { args: [...global, ...splitCommand(backend.resumeByIdFlag), fork.id], folder: this.workingDir || "" };
     }
-    const id = this.resumeSessionId && /^[0-9a-fA-F-]{16,}$/.test(this.resumeSessionId) ? this.resumeSessionId : null;
+    const id = resumeId;
     if (id && backend.resumeByIdFlag) {
       if (backendKey === "claude") {
         // A Claude session Remote Control re-hosted runs as a background agent, which
@@ -528,6 +554,8 @@ class SessionController implements TerminalController {
     const backendKey = this.getBackendKey();
     this.backendKey = backendKey;
     const fork = this._forkFrom;
+    // A fork keeps the agent its source's conversation launched as.
+    if (fork) this._launchAgentId = this.plugin.launchAgentOf(fork.id);
     this.launchSessionId = backendKey === "claude" ? (reuseId || this.plugin.newSessionId()) : null;
     // Codex and Antigravity learn their id only once they write a transcript, which is
     // found by a token unique to this launch in the opening (_resolveModelFile). A side
@@ -540,12 +568,15 @@ class SessionController implements TerminalController {
     if (this.workingDir) this.plugin.rememberSessionFolder(this.workingDir).catch(() => {});
     // A Claude side chat's id is minted here, so it's recorded as one at once.
     if (fork && backendKey === "claude") this.plugin.adoptSideChat(this.launchSessionId, null, fork.id).catch(() => {});
+    // So is a Claude session's agent; Codex's and Antigravity's once their id is known
+    // (updateDurableTranscript).
+    if (this.launchSessionId && this._agentId !== undefined) this.plugin.recordSessionAgent(this.launchSessionId, this._agentId, { launchAgentId: this._launchAgentId }).catch(() => {});
     // A session continuing another with nothing to start from is told only to read what
     // it's handed and wait; the plain opening would tell it to read nothing.
     const continuing = !!this._handoffMode && this._handoffMode !== "side-chat";
     this._opening = fork ? null
-      : continuing && !this._notePath && !this._folderPath ? "Then wait for instructions."
-      : this.plugin.buildOpening({ notePath: this._notePath || null, folderPath: this._folderPath || null, daily: !!this._daily });
+      : continuing && !this._notePath && !this._folderPath ? [this.plugin.agentOpening(this.agentId()), "Then wait for instructions."].filter(Boolean).join(" ")
+      : this.plugin.buildOpening({ notePath: this._notePath || null, folderPath: this._folderPath || null, daily: !!this._daily, agentId: this.agentId() });
     this._go();
     if (!fork) void this.sendOpening(title);
     else if (backendKey === "antigravity") void this._sendFork();
@@ -632,6 +663,9 @@ class SessionController implements TerminalController {
     this._resumeStep = null;
     this._resetSessionIdentity();
     this._opening = null;
+    // Its agent is the one recorded for it (agentId); a resume never works it out again.
+    // A tab restored before its id was recorded carries what it launched as, and records it.
+    if (this._agentId !== undefined && this.resumeSessionId) this.plugin.recordSessionAgent(this.resumeSessionId, this._agentId, { launchAgentId: this._launchAgentId }).catch(() => {});
     if (session.backend && CLI_BACKENDS[session.backend]) this.backendKey = session.backend;
     // Antigravity records no working folder, so its sessions resume in the starting folder.
     const start = this.plugin.startDir();

@@ -204,8 +204,9 @@ function sanitizeTranscriptName(name: string | null | undefined): string {
     .slice(0, 120) || "Untitled";
 }
 // `source`: a link to the note the session was started from (a wikilink), or the
-// folder's vault path with a trailing slash, written as given, or nothing.
-function transcriptHeader(title: string | null | undefined, sessionId: string | null | undefined, backend: string | null | undefined, source: string | null = null): string {
+// folder's vault path with a trailing slash, written as given, or nothing. `agent`: the
+// session's agent's name, or nothing.
+function transcriptHeader(title: string | null | undefined, sessionId: string | null | undefined, backend: string | null | undefined, source: string | null = null, agent: string | null = null): string {
   const t = title || "Untitled session";
   return [
     "---",
@@ -213,6 +214,7 @@ function transcriptHeader(title: string | null | undefined, sessionId: string | 
     "session_id: " + JSON.stringify(sessionId || ""),
     "backend: " + (backend || ""),
     ...(source ? ["source: " + JSON.stringify(source)] : []),
+    ...(agent ? ["agent: " + JSON.stringify(agent)] : []),
     "generated_by: agent-manager (append-only transcript; new turns append below, existing content is never rewritten)",
     "---",
     "",
@@ -361,14 +363,21 @@ async function writeDurableTranscript(io: TranscriptIO, opts: TranscriptWriteOpt
   if (!msgs.length) return null;
   const fullId = String(sessionId || deriveSessionId(transcriptFile, backend));
   const title = sessionTitle || deriveTitle(raw, backend);
-  // One note per session id, found by the id in its frontmatter, whatever its title.
-  // Locked by the folder and the id's short key, not the full id: two sessions whose ids
+  // One note per session id, found by the id in its frontmatter, whatever its title:
+  // the note the caller finds anywhere under the transcripts folder (`findExisting`, asked
+  // inside the lock, which a move between agents' folders also takes), else one in `dir`. Locked by the
+  // transcripts folder and the id's short key, not the full id: two sessions whose ids
   // share their first eight characters would otherwise both find no note and pick one
   // name for it.
-  return withTranscriptLock(dir + "\n" + noteIdKey(fullId), async () => {
+  return withTranscriptLock((opts.lockDir || dir) + "\n" + noteIdKey(fullId), async () => {
     let names: string[] = [];
     try { names = (await io.list(dir)) || []; } catch { /* best effort */ }
-    let relPath = await findNoteFor(io, dir, names, fullId);
+    let relPath: string | null = null;
+    const existing = opts.findExisting?.() || null;
+    if (existing && await io.exists(existing)) {
+      try { if (noteSessionId(await io.read(existing)) === fullId) relPath = existing; } catch { /* best effort */ }
+    }
+    if (!relPath) relPath = await findNoteFor(io, dir, names, fullId);
     const seen = new Set<string | undefined>();
     if (relPath) {
       const existing = await io.read(relPath);
@@ -382,7 +391,7 @@ async function writeDurableTranscript(io: TranscriptIO, opts: TranscriptWriteOpt
       // Never over a note that's there (one of another session, named alike).
       if (await io.exists(relPath)) relPath = dir + "/" + transcriptBasename(fullId, title + " " + fullId.slice(-4), shortTaken) + ".md";
       await io.ensureDir(dir);
-      await io.create(relPath, transcriptHeader(title, fullId, backend, opts.source || null));
+      await io.create(relPath, transcriptHeader(title, fullId, backend, opts.source || null, opts.agent || null));
     }
     let addition = "";
     let added = 0;

@@ -3,6 +3,7 @@
 import type { App, PluginManifest, WorkspaceLeaf } from "obsidian";
 import { import_obsidian } from "../externals.js";
 import { isBackendKey } from "../constants/backends.js";
+import { AgentMethods } from "./agents.js";
 import { ClaudeModMethods } from "./claude-mod.js";
 import { ConfigMethods } from "./config.js";
 import { LinkMethods } from "./links.js";
@@ -175,7 +176,17 @@ class VaultTerminalPlugin extends import_obsidian.Plugin {
         const to = moved(stringOf(this.pluginData[key] ?? "") || null);
         if (to) { this.pluginData[key] = to; named = true; }
       }
-      if (start || named) this.savePluginData().catch(() => {});
+      // And each agent's home folder and instructions note.
+      const agents = this.allAgents();
+      let agentsMoved = false;
+      for (const a of agents) {
+        const home = a.home ? moved(a.home) : null;
+        if (home) { a.home = home; agentsMoved = true; }
+        const notePath = moved(a.instructions || null);
+        if (notePath) { a.instructions = notePath; agentsMoved = true; }
+      }
+      if (agentsMoved) this.pluginData.agents = agents;
+      if (start || named || agentsMoved) this.savePluginData().catch(() => {});
     }));
     // Track the most recently focused session tab, and keep the browser's active-row
     // highlight in sync. ANY focus change can change which session is active (or move
@@ -361,7 +372,7 @@ class VaultTerminalPlugin extends import_obsidian.Plugin {
 // The plugin's type: the class, and every part's methods, which applyParts puts on the
 // class's prototype below. Made from the parts themselves, so it can't drift from them;
 // a name two parts both define is a type error here, as it's an error in applyParts.
-interface AgentManagerPlugin extends VaultTerminalPlugin, ClaudeModMethods, TerminalHostMethods, ShellMethods, TranscriptMethods, ConfigMethods, NoteMethods, LinkMethods, SessionMethods, SetupMethods, TicketMethods, WorkspaceMethods {}
-applyParts(VaultTerminalPlugin, ClaudeModMethods, TerminalHostMethods, ShellMethods, TranscriptMethods, ConfigMethods, NoteMethods, LinkMethods, SessionMethods, SetupMethods, TicketMethods, WorkspaceMethods);
+interface AgentManagerPlugin extends VaultTerminalPlugin, AgentMethods, ClaudeModMethods, TerminalHostMethods, ShellMethods, TranscriptMethods, ConfigMethods, NoteMethods, LinkMethods, SessionMethods, SetupMethods, TicketMethods, WorkspaceMethods {}
+applyParts(VaultTerminalPlugin, AgentMethods, ClaudeModMethods, TerminalHostMethods, ShellMethods, TranscriptMethods, ConfigMethods, NoteMethods, LinkMethods, SessionMethods, SetupMethods, TicketMethods, WorkspaceMethods);
 export { VaultTerminalPlugin };
 export type { AgentManagerPlugin };

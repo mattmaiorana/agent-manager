@@ -64,6 +64,9 @@ class IdentityMethods {
     this.plugin._restoreQueue = mine.catch(() => {});
     await mine;
     if (session && session.sessionId && !this.plugin.placeMissing(session)) {
+      // A restore that picked the conversation's continuation under a new id: its agent
+      // records come along before the resume reads them.
+      if (savedId && this.plugin.carrySessionAgent(savedId, session.sessionId)) void this.plugin.savePluginData();
       this.resumeSession(session);
     } else if (!session && this._restoreReason === "gone" && !this._started && !this._forkFrom) {
       // Never took a turn, so the CLI has nothing to resume (a Claude session writes
@@ -184,6 +187,8 @@ class IdentityMethods {
     const d = this.plugin.pluginData;
     let carried = false;
     if (oldId && d.sessionNames && oldId in d.sessionNames && !(sessionId in d.sessionNames)) { d.sessionNames[sessionId] = d.sessionNames[oldId]; carried = true; }
+    // So does its agent.
+    if (this.plugin.carrySessionAgent(oldId, sessionId)) carried = true;
     // A pin moves to the new id outright, keeping its place, so home doesn't keep a row
     // for the old twin beside the live one.
     if (oldId && oldId !== sessionId) {

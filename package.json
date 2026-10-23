@@ -11,7 +11,7 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "test": "npm run test:plugin && npm run test:terminal",
-    "test:plugin": "node scripts/run-test.mjs scripts/test-draft.mjs && node scripts/run-test.mjs scripts/test-transcript-core.mjs && node scripts/run-test.mjs scripts/test-dialogs.mjs && node scripts/run-test.mjs scripts/test-follow.mjs && node scripts/run-test.mjs scripts/test-note-writeback.mjs && node scripts/run-test.mjs scripts/test-launch-context.mjs && node scripts/run-test.mjs scripts/test-session-links.mjs && node scripts/run-test.mjs scripts/test-sent-files.mjs",
+    "test:plugin": "node scripts/run-test.mjs scripts/test-draft.mjs && node scripts/run-test.mjs scripts/test-transcript-core.mjs && node scripts/run-test.mjs scripts/test-dialogs.mjs && node scripts/run-test.mjs scripts/test-follow.mjs && node scripts/run-test.mjs scripts/test-note-writeback.mjs && node scripts/run-test.mjs scripts/test-launch-context.mjs && node scripts/run-test.mjs scripts/test-session-links.mjs && node scripts/run-test.mjs scripts/test-sent-files.mjs && node scripts/run-test.mjs scripts/test-agents.mjs",
     "test:terminal": "python3 -I test/helper_test.py && node esbuild.config.mjs test && node .build/harness.cjs"
   },
   "author": "Matt Maiorana",

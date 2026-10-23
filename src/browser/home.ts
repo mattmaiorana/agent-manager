@@ -99,9 +99,10 @@ class BrowserMethods {
       this._focusCardName = !cardOpen;
       this.renderBrowser();
     });
+    this.renderAgentSwitch(wrap);
     if (cardOpen) this.renderNewSessionForm(wrap);
-    this.renderTicketsRow(wrap);
     this.renderTodayRow(wrap);
+    this.renderTicketsRow(wrap);
     this.renderSetupNote(wrap);
     // Let the header paint before the transcript scan, which is synchronous disk I/O.
     await new Promise((r) => window.setTimeout(r, 0));
@@ -165,6 +166,49 @@ class BrowserMethods {
       this.renderBrowser();
     })(); });
   }
+  // The agent switch, once there's an agent: who new sessions and Daily Chat start as,
+  // and whose sessions Pinned and Recent show. Its choices are the agents, and No agent
+  // when that's the Default agent (switchChoices). Two choices are a pair of pills, more a
+  // dropdown, and one is just its name.
+  renderAgentSwitch(this: Browser, wrap: HTMLElement): void {
+    const agents = this.plugin.switchChoices();
+    if (!agents.length) return;
+    const current = { id: this.plugin.switchedAgentId() };
+    const row = wrap.createDiv({ cls: "agent-manager-agent-switch" });
+    if (agents.length === 1) {
+      row.createSpan({ cls: "agent-manager-agent-single", text: agents[0].name });
+      return;
+    }
+    if (agents.length === 2) {
+      // A purple thumb under the two slides to the one clicked, then the lists redraw.
+      row.addClass("is-pills");
+      row.setAttribute("role", "radiogroup");
+      row.setAttribute("aria-label", "Agent profile");
+      const at = Math.max(0, agents.findIndex((a) => a.id === current?.id));
+      row.setCssProps({ "--agent-manager-switch-i": String(at) });
+      row.createDiv({ cls: "agent-manager-agent-thumb" });
+      const pills: HTMLElement[] = [];
+      agents.forEach((a, i) => {
+        const on = i === at;
+        const pill = row.createEl("button", { cls: "agent-manager-agent-pill" + (on ? " is-active" : ""), text: a.name, attr: { role: "radio", "aria-checked": String(on) } });
+        pills.push(pill);
+        pill.addEventListener("click", () => {
+          if (pill.hasClass("is-active")) return;
+          row.setCssProps({ "--agent-manager-switch-i": String(i) });
+          for (const p of pills) { p.toggleClass("is-active", p === pill); p.setAttribute("aria-checked", String(p === pill)); }
+          const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
+          window.setTimeout(() => { void this.plugin.setSwitchedAgent(a.id); }, reduce ? 0 : 200);
+        });
+      });
+      return;
+    }
+    const select = row.createEl("select", { cls: "dropdown agent-manager-agent-select", attr: { "aria-label": "Agent profile" } });
+    for (const a of agents) {
+      const opt = select.createEl("option", { text: a.name, value: a.id });
+      if (a.id === current?.id) opt.selected = true;
+    }
+    select.addEventListener("change", () => { void this.plugin.setSwitchedAgent(select.value); });
+  }
   // Today's chat: one row that goes to the day's chat, resumes it, or starts it.
   renderTodayRow(this: Browser, wrap: HTMLElement): void {
     const name = this.plugin.dailyChatName();
@@ -172,7 +216,9 @@ class BrowserMethods {
     const icon = row.createSpan({ cls: "agent-manager-today-icon" });
     import_obsidian.setIcon(icon, "sun");
     const col = row.createDiv({ cls: "agent-manager-today-text" });
-    col.createDiv({ cls: "agent-manager-today-title", text: "Daily Chat" });
+    // Named for the switched profile, so the switch shows whose chat it opens.
+    const profile = this.plugin.switchedAgent();
+    col.createDiv({ cls: "agent-manager-today-title", text: profile ? `${profile.name} Daily Chat` : "Daily Chat" });
     // The day, written out, rather than the session's name.
     col.createDiv({ cls: "agent-manager-today-name", text: new Date().toLocaleDateString(undefined, { month: "long", day: "numeric", year: "numeric" }) });
     row.setAttribute("aria-label", name);
@@ -181,7 +227,7 @@ class BrowserMethods {
     row.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); go(); } });
     this.refreshTodayDot(row);
   }
-  // The Tickets button, above Daily Chat while tickets and the button are on: it opens
+  // The Tickets button, under Daily Chat while tickets and the button are on: it opens
   // the tickets base, or the note set in settings, under the name set there.
   renderTicketsRow(this: Browser, wrap: HTMLElement): void {
     if (!this.plugin.ticketsOn() || this.plugin.pluginData.ticketsButton === false) return;
@@ -204,9 +250,11 @@ class BrowserMethods {
     const leaf = this.plugin.todaysChatLeaf();
     const v = leaf && this.plugin.sessionOf(leaf);
     const open = !!leaf && (!v || !!v.running);
-    if (open) this._todayRan = name;
+    // Keyed by the agent too, so two agents with one template don't share it.
+    const key = `${this.plugin.switchedAgentId() || ""}\n${name}`;
+    if (open) this._todayRan = key;
     row.classList.toggle("is-open", open);
-    row.classList.toggle("has-run", !open && this._todayRan === name);
+    row.classList.toggle("has-run", !open && this._todayRan === key);
   }
   // A shell command shown as code; a click copies it.
   copyableCommand(parent: HTMLElement, command: string): void {
@@ -307,9 +355,14 @@ class BrowserMethods {
     let pinned: SessionRecord[] = [], sessions: SessionRecord[] = [];
     try { pinned = await this.plugin.readPinnedSessions(); } catch { /* best effort */ }
     try { sessions = await this.plugin.listedSessions(); } catch { /* best effort */ }
+    // While there are agents, only the switched agent's sessions, and those with none.
+    const shows = (s: SessionRecord) => this.plugin.agentShows(this.plugin.agentOfSession(s));
+    pinned = pinned.filter(shows);
+    sessions = sessions.filter(shows);
     // Has today's chat run? Its session is listed once it has a transcript.
     const today = this.plugin.dailyChatName();
-    if (sessions.some((s) => s.displayName === today) || pinned.some((s) => (s.displayName || s.title) === today)) this._todayRan = today;
+    // Filtered to the switched agent above, so a match is its own (or one with no agent).
+    if (sessions.some((s) => s.displayName === today) || pinned.some((s) => (s.displayName || s.title) === today)) this._todayRan = `${this.plugin.switchedAgentId() || ""}\n${today}`;
     // The row being built, not the one still showing.
     const todayRow = parentEl.querySelector(".agent-manager-today");
     if (todayRow) this.refreshTodayDot(todayRow);
@@ -321,6 +374,7 @@ class BrowserMethods {
     for (const o of this.plugin.getOpenSessions()) {
       const k = this.plugin.openSessionKey(o);
       if (pinnedKeys.has(k) || seenOpen.has(k)) continue;
+      if (o.leaf && !this.plugin.agentShows(this.plugin.agentOfLeaf(o.leaf))) continue;
       seenOpen.add(k);
       // The open tab's record by id once the tab knows it. A tab with no id yet is a
       // fresh launch, never an older session of the same name.
@@ -556,6 +610,7 @@ class BrowserMethods {
         })
       );
     }
+    this.addMoveToAgent(menu, session.sessionId, session.backend, () => this.renderBrowser());
     if (leaf) {
       menu.addItem((item) =>
         item.setTitle("Reveal open tab").setIcon("arrow-right").onClick(() => {
@@ -612,6 +667,8 @@ class BrowserMethods {
     const named = id && this.plugin.pluginData.sessionNames?.[id] != null;
     // `named` found the rename in sessionNames.
     if (named) delete (this.plugin.pluginData.sessionNames as Record<string, string>)[id];
+    // And its agent records.
+    if (id) { delete this.plugin.pluginData.sessionAgents?.[id]; delete this.plugin.pluginData.sessionLaunchAgents?.[id]; }
     // A session with a file is a store record, which has its id (IndexRecord).
     if (session.backend === "antigravity") this.plugin.forgetAntigravitySession(id as string);
     await this.plugin.savePluginData();

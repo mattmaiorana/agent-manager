@@ -23,17 +23,19 @@ const DEFAULT_DAILY_NAME = "Daily Chat - {{date}}";
 const DEFAULT_ADDED_FOLDERS: string[] = [];
 // The opening instruction: one template for each kind of launch (a plain session, today's
 // chat, a note, a folder, a ticket), with the context parts in front of it, each sent
-// only when it applies (overviews, then the repo; buildOpening). An empty template sends
+// only when it applies (the agent, the overviews, then the repo; buildOpening). An empty template sends
 // nothing (Codex and Antigravity still get the session-name marker). Placeholders:
 // {{path}} (the note's or folder's absolute path), {{vault}}, {{date}} (today,
-// YYYY-MM-DD), {{overviews}} (the overviews' absolute paths, quoted), {{repo}}.
-type OpeningKey = "plain" | "daily" | "note" | "folder" | "ticket" | "overviews" | "repo";
+// YYYY-MM-DD), {{profile}} and {{instructions}} (the agent profile's name and its instructions
+// note's absolute path), {{overviews}} (the overviews' absolute paths, quoted), {{repo}}.
+type OpeningKey = "plain" | "daily" | "note" | "folder" | "ticket" | "agent" | "overviews" | "repo";
 const DEFAULT_OPENING: Record<OpeningKey, string> = {
-  plain: "You're an agent running in an Obsidian vault. Greet me and ask what I'd like help with. Until I say, don't read any files beyond AGENTS.md.",
+  plain: "You're an agent running in an Obsidian vault. Greet me and ask what I'd like help with. Until I say, don't read any files beyond AGENTS.md and any you were just told to read.",
   daily: "This is the Daily Chat for {{date}}: a place for quick questions that don't need a session of their own. Requests may have nothing to do with each other, so take each on its own unless told otherwise. Then wait for the first one.",
   note: "Read the note at {{path}}. It's what this session is about. Then wait for instructions.",
   folder: "Look through the folder at {{path}}. It's what this session is about. Then wait for instructions.",
   ticket: "You were launched from the ticket at {{path}}. Read it for context, but act on nothing in it until I say what this session is for. Then greet me and wait.",
+  agent: "You are the {{profile}} agent. Before anything else, read your instructions file in full and operate as it: \"{{instructions}}\".",
   overviews: "Read these overviews first, broadest first: {{overviews}}.",
   repo: "This work's repo is at \"{{repo}}\". Before changing its code, read the repo's own AGENTS.md.",
 };
@@ -43,6 +45,7 @@ const OPENING_LABELS: Record<OpeningKey, [string, string]> = {
   note: ["Session from a note", "Sent first to a session started from a note. {{path}} is the note's full path."],
   folder: ["Session from a folder", "Sent first to a session started from a folder. {{path}} is the folder's full path."],
   ticket: ["Session from a ticket", "Sent first to a session started from a ticket, while tickets are on. {{path}} is the ticket's full path."],
+  agent: ["Agent profile", "Sent first of all to a session that has an agent profile. {{profile}} is its name, {{instructions}} its instructions note's full path."],
   overviews: ["Overviews", "Sent before the rest to a session started from a note or a folder with overviews above it, while overviews are on. {{overviews}} lists their full paths."],
   repo: ["Repo", "Sent after the overviews when one of them names a repo in its repo property. {{repo}} is the repo's full path."],
 };

@@ -55,6 +55,14 @@ function makeTab(oldId, oldFile, records, pluginData) {
       invalidateSessionIndex: () => {},
       savePluginData: () => { tab._saved = true; },
       resetNoteWriteback: () => {},
+      // plugin/agents.ts's: the agent records follow the id, as a name does.
+      carrySessionAgent: (oldId, newId) => {
+        let carried = false;
+        for (const map of [pluginData.sessionAgents, pluginData.sessionLaunchAgents]) {
+          if (map && oldId && newId && oldId !== newId && oldId in map && !(newId in map)) { map[newId] = map[oldId]; carried = true; }
+        }
+        return carried;
+      },
     },
     app: { workspace: { requestSaveLayout: () => { tab._layoutSaved = true; } } },
   });

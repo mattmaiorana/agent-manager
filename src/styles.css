@@ -49,6 +49,7 @@
    well apart from the next, so the sections read as sections. */
 .agent-manager-home-head + .agent-manager-sublabel,
 .agent-manager-today + .agent-manager-sublabel,
+.agent-manager-tickets + .agent-manager-sublabel,
 .agent-manager-setup + .agent-manager-sublabel {
 	margin-top: 26px;
 }
@@ -682,9 +683,10 @@ body.agent-manager-show-tab-title .workspace-tab-header[data-type="agent-manager
 	background-color: var(--background-modifier-hover);
 }
 
-/* The Tickets button, above Daily Chat while tickets are on: the same row, with Daily
-   Chat closer under it. */
-.agent-manager-tickets + .agent-manager-today {
+/* The Tickets button, under Daily Chat while tickets are on: the same row, the two
+   close together. */
+.agent-manager-tickets + .agent-manager-today,
+.agent-manager-today + .agent-manager-tickets {
 	margin-top: 8px;
 }
 
@@ -925,4 +927,101 @@ body {
 }
 .bases-rendered-value a.external-link[href^="obsidian://agent-manager"]::after {
 	display: none;
+}
+
+/* ---- Agent switch -----------------------------------------------------
+   Under the header, once there's an agent: two agents are a pair of pills sharing
+   one track, more a full-width dropdown, and one is just its name. */
+
+.agent-manager-agent-switch {
+	margin: 18px 0 0;
+}
+
+/* The buttons under the switch sit as close to it as to each other. */
+.agent-manager-agent-switch + .agent-manager-tickets,
+.agent-manager-agent-switch + .agent-manager-today {
+	margin-top: 8px;
+}
+
+.agent-manager-agent-switch.is-pills {
+	position: relative;
+	display: flex;
+	gap: 2px;
+	padding: 2px;
+	border-radius: 8px;
+	border: 1px solid var(--background-modifier-border);
+}
+
+/* The thumb: the picked agent's purple, under the two pills, sliding to the one
+   clicked. */
+.agent-manager-agent-thumb {
+	position: absolute;
+	top: 2px;
+	bottom: 2px;
+	left: 2px;
+	width: calc((100% - 6px) / 2);
+	transform: translateX(calc(var(--agent-manager-switch-i) * (100% + 2px)));
+	border-radius: 6px;
+	background-color: var(--interactive-accent);
+	transition: transform 200ms ease;
+}
+
+/* Under the switch's class, so it wins over Obsidian's own button style. */
+.agent-manager-agent-switch .agent-manager-agent-pill {
+	position: relative;
+	z-index: 1;
+	flex: 1 1 0;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	/* Like the buttons below it: 35px tall with the track, and their titles' type. */
+	height: 29px;
+	padding: 0 8px;
+	border: none;
+	border-radius: 6px;
+	font-size: var(--font-ui-small);
+	font-weight: 600;
+	background: transparent;
+	box-shadow: none;
+	color: var(--text-muted);
+	cursor: pointer;
+	transition: color 200ms ease;
+}
+
+.agent-manager-agent-switch .agent-manager-agent-pill:hover {
+	background: transparent;
+	color: var(--text-normal);
+}
+
+.agent-manager-agent-switch .agent-manager-agent-pill.is-active,
+.agent-manager-agent-switch .agent-manager-agent-pill.is-active:hover {
+	background: transparent;
+	color: var(--text-on-accent);
+}
+
+/* No glow from a mouse click; the keyboard focus ring stays. */
+.agent-manager-agent-switch .agent-manager-agent-pill:focus:not(:focus-visible) {
+	box-shadow: none;
+	outline: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.agent-manager-agent-thumb,
+	.agent-manager-agent-switch .agent-manager-agent-pill {
+		transition: none;
+	}
+}
+
+.agent-manager-agent-select {
+	width: 100%;
+	height: 35px;
+	border-radius: 8px;
+	font-size: var(--font-ui-small);
+	font-weight: 600;
+}
+
+.agent-manager-agent-single {
+	font-size: var(--font-ui-small);
+	color: var(--text-muted);
 }

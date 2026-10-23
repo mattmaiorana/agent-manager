@@ -525,6 +525,9 @@ class SessionMethods {
       v._handoffIntent = opts?.handoffIntent || null;
       v._handoffMode = opts?.handoffMode || (opts?.handoffNote ? "side-chat" : null);
       v._daily = !!opts?.daily;
+      // Its agent, settled now: the session it continues gives it, else where it starts
+      // (plugin/agents.ts, launchAgentId).
+      v._agentId = opts?.agentId !== undefined ? opts.agentId : this.launchAgentId({ notePath: opts?.notePath, folderPath: opts?.folderPath });
       v._forkFrom = opts?.forkFrom || null;
       // A side chat never takes over its note's link; a launch from the note does.
       v._noteSupport = !!opts?.sideSession;
@@ -563,12 +566,14 @@ class SessionMethods {
   }
   // ---- Today's chat ----
   // Today's chat's tab, loaded or not, or null: a session tab named for today.
+  // While there are agents, it's the switched agent's: named for it and recorded as its.
   todaysChatLeaf(this: AgentManagerPlugin): WorkspaceLeaf | null {
     const name = this.dailyChatName();
+    const switched = this.switchedAgentId();
     for (const leaf of this.sessionLeaves()) {
       const v = this.sessionOf(leaf);
       const title = v ? v.sessionTitle : this.savedSessionState(leaf)?.sessionTitle;
-      if (title === name) return leaf;
+      if (title === name && (switched === null || this.listedAgentOf(this.agentOfLeaf(leaf)) === switched)) return leaf;
     }
     return null;
   }
@@ -603,11 +608,12 @@ class SessionMethods {
       const name = this.dailyChatName();
       let sessions: SessionRecord[] = [];
       try { sessions = await this.listedSessions(); } catch { /* best effort */ }
-      const earlier = sessions.find((s) => s.displayName === name);
+      const switched = this.switchedAgentId();
+      const earlier = sessions.find((s) => s.displayName === name && (switched === null || this.listedAgentOf(this.recordedAgentId(s.sessionId)) === switched));
       if (earlier) { await this.startResume(earlier, sourceView); return; }
       const offered = this.getBrowserBackends();
       const backend = offered.includes(this.getCurrentBackend()) ? this.getCurrentBackend() : offered[0];
-      await this.startSession(name, null, { backendOverride: backend, daily: true });
+      await this.startSession(name, null, { backendOverride: backend, daily: true, agentId: switched || "" });
     } finally {
       this._openingToday = false;
     }

@@ -93,8 +93,11 @@ class ConfigMethods {
     const pad = (n: number) => String(n).padStart(2, "0");
     return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
   }
-  // Today's chat's name: the setting, with {{date}} filled in.
+  // Today's chat's name: the switched agent's while there are agents, else the setting,
+  // with {{date}} filled in.
   dailyChatName(this: AgentManagerPlugin): string {
+    const agent = this.switchedAgent();
+    if (agent) return this.agentDailyName(agent);
     const v = this.pluginData.dailyChatName;
     const template = typeof v === "string" && v.trim() ? v.trim() : DEFAULT_DAILY_NAME;
     return template.replace(/\{\{date\}\}/g, this.todayString());
@@ -143,23 +146,33 @@ class ConfigMethods {
       overviewName: this.overviewName(),
       templatePath: this.ticketTemplatePath(),
       resolvePath: (v) => this.resolveUserPath(v),
+      homes: this.agentHomes(),
     });
   }
   // The opening instruction for a launch, as one line: the context parts that apply
-  // (the overviews, then the repo), then the kind's own template: the ticket template
-  // for a ticket, the note or folder one for a session started from one, the daily one
-  // for today's chat, else the plain one. Empty when every part is.
-  buildOpening(this: AgentManagerPlugin, { notePath, folderPath, daily }: { notePath?: string | null; folderPath?: string | null; daily?: boolean } = {}): string {
+  // (the agent, the overviews, then the repo), then the kind's own template: the ticket
+  // template for a ticket, the note or folder one for a session started from one, the
+  // daily one for today's chat, else the plain one. Empty when every part is. The agent
+  // is the session's own (`agentId`), settled at launch.
+  buildOpening(this: AgentManagerPlugin, { notePath, folderPath, daily, agentId }: { notePath?: string | null; folderPath?: string | null; daily?: boolean; agentId?: string | null } = {}): string {
     const vault = this.getVaultPath();
     const from = notePath || folderPath;
-    const ctx: LaunchContext = from ? this.launchContext({ notePath, folderPath }) : { ticket: null, overviews: [], repo: null };
+    const ctx: LaunchContext = from ? this.launchContext({ notePath, folderPath }) : { ticket: null, overviews: [], repo: null, agent: null };
     const vars: Record<string, string> = { path: from ? path.join(vault, from) : "", vault, date: this.todayString() };
     const kind = ctx.ticket ? "ticket" : notePath ? "note" : folderPath ? "folder" : daily ? "daily" : "plain";
-    return composeOpening((key) => this.openingPart(key), ctx, kind, vars, (p) => path.join(vault, p));
+    return composeOpening((key) => this.openingPart(key), ctx, kind, vars, (p) => path.join(vault, p), this.agentOpeningInfo(agentId));
   }
-  // Where every session's durable transcript is filed: one folder.
-  transcriptTarget(this: AgentManagerPlugin): { transcriptDir: string } {
-    return { transcriptDir: this.folderOf("transcriptsFolder") };
+  // The Agent part alone, filled in, for a session that's told nothing else: "" for none.
+  agentOpening(this: AgentManagerPlugin, agentId: string | null | undefined): string {
+    const info = this.agentOpeningInfo(agentId);
+    if (!info) return "";
+    const empty: LaunchContext = { ticket: null, overviews: [], repo: null, agent: null };
+    return composeOpening((key) => (key === "agent" ? this.openingPart("agent") : ""), empty, "plain", {}, (p) => p, info);
+  }
+  // Where a session's durable transcript is filed: the transcripts folder, or with an
+  // agent, its folder there. `lockDir` is the transcripts folder either way.
+  transcriptTarget(this: AgentManagerPlugin, agentId: string | null = null): { transcriptDir: string; lockDir: string } {
+    return { transcriptDir: this.agentTranscriptDir(agentId), lockDir: this.folderOf("transcriptsFolder") };
   }
 }
 export { ConfigMethods };

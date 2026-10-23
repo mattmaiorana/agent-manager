@@ -198,8 +198,14 @@ class ViewTranscriptMethods {
       let size: number | null = null;
       try { if (file) size = fs.statSync(file).size; } catch { /* best effort */ }
       const backend = this.getBackendKey();
+      // Its agent is recorded once its id is known (a Claude session's is at launch).
+      const ownId = this._ownSessionId();
+      if (ownId && this._agentId !== undefined) await this.plugin.recordSessionAgent(ownId, this._agentId, { launchAgentId: this._launchAgentId });
+      const agentId = this.agentId();
       const res = await this.plugin._tc().writeDurableTranscript(this.plugin._vaultTranscriptIO(), {
-        ...this.plugin.transcriptTarget(),
+        ...this.plugin.transcriptTarget(agentId),
+        agent: this.plugin.agentById(agentId)?.name || null,
+        findExisting: () => this.plugin.findTranscriptNoteBySessionId(ownId)?.path || null,
         backend,
         sessionTitle: this.sessionTitle, // live capture keeps the session's name
         sessionId: this._ownSessionId(),

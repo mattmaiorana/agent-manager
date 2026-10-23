@@ -150,4 +150,50 @@ class FileSuggest extends PathSuggest<TFile> {
   }
   candidates(): TFile[] { return this.app.vault.getFiles().filter((f) => this.extensions.includes(f.extension)); }
 }
-export { FileSuggest, FolderSuggest, ChoicePickerModal, ConfirmModal, SessionSwitcherModal };
+// A new agent's fields, filled in a popup (the Agents settings' Add): its name, its
+// instructions note, its home folder, and its Daily Chat name. `problem` checks the name
+// (null when it's fine); `onAdd` gets the four as typed.
+interface NewAgentFields { name: string; instructions: string; home: string; dailyName: string }
+class AgentModal extends import_obsidian.Modal {
+  declare _problem: (name: string) => string | null;
+  declare _onAdd: (fields: NewAgentFields) => Promise<void>;
+  declare _dailyPlaceholder: string;
+  constructor(app: App, problem: (name: string) => string | null, onAdd: (fields: NewAgentFields) => Promise<void>, dailyPlaceholder: string) {
+    super(app);
+    this._problem = problem;
+    this._onAdd = onAdd;
+    this._dailyPlaceholder = dailyPlaceholder;
+  }
+  override onOpen(): void {
+    this.titleEl.setText("Add an agent profile");
+    const f: NewAgentFields = { name: "", instructions: "", home: "", dailyName: "" };
+    const { contentEl } = this;
+    const nameRow = new import_obsidian.Setting(contentEl).setName("Name").setDesc("Its transcripts go in a folder of this name.")
+      .addText((t) => { t.setPlaceholder("Personal").onChange((v) => { f.name = v; }); });
+    new import_obsidian.Setting(contentEl).setName("Instructions note").setDesc("The note that says who this agent profile is and how it works.")
+      .addText((t) => { t.setPlaceholder("Agents/Personal.md").onChange((v) => { f.instructions = v; }); new FileSuggest(this.app, t.inputEl, ["md"]); });
+    new import_obsidian.Setting(contentEl).setName("Home folder").setDesc("A session started from a note or folder in here starts with this agent profile. Empty for none; / for the whole vault.")
+      .addText((t) => { t.setPlaceholder("None").onChange((v) => { f.home = v; }); new FolderSuggest(this.app, t.inputEl); });
+    new import_obsidian.Setting(contentEl).setName("Daily chat name").setDesc("{{profile}} is its name, {{date}} today's date.")
+      .addText((t) => { t.setPlaceholder(this._dailyPlaceholder).onChange((v) => { f.dailyName = v; }); });
+    const buttons = contentEl.createDiv({ cls: "modal-button-container" });
+    buttons.createEl("button", { text: "Cancel" }).addEventListener("click", () => this.close());
+    const add = buttons.createEl("button", { text: "Add", cls: "mod-cta" });
+    const submit = () => {
+      const problem = this._problem(f.name);
+      if (problem) { new import_obsidian.Notice(problem); return; }
+      void this._onAdd(f).then(() => this.close());
+    };
+    add.addEventListener("click", submit);
+    contentEl.addEventListener("keydown", (e) => {
+      // Enter in a field adds, unless a path suggestion is open to pick from.
+      if (e.key === "Enter" && !e.isComposing && !document.querySelector(".suggestion-container")) { e.preventDefault(); submit(); }
+    });
+    window.setTimeout(() => nameRow.controlEl.querySelector("input")?.focus(), 0);
+  }
+  override onClose(): void {
+    this.contentEl.empty();
+  }
+}
+export { AgentModal, FileSuggest, FolderSuggest, ChoicePickerModal, ConfirmModal, SessionSwitcherModal };
+export type { NewAgentFields };

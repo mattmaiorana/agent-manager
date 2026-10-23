@@ -88,8 +88,11 @@ class TranscriptMethods {
   }
   // An imported Antigravity conversation becomes this vault's, so it's listed and resumable.
   async importSession(this: AgentManagerPlugin, { backend, sessionId, file }: { backend: BackendKey; sessionId: string; file: string }): Promise<TranscriptWrite | null> {
+    const agentId = this.recordedAgentId(sessionId) ?? null;
     const res = await this._tc().writeDurableTranscript(this._vaultTranscriptIO(), {
-      ...this.transcriptTarget(), backend, sessionId, transcriptFile: file,
+      ...this.transcriptTarget(agentId), backend, sessionId, transcriptFile: file,
+      agent: this.agentById(agentId)?.name || null,
+      findExisting: () => this.findTranscriptNoteBySessionId(sessionId)?.path || null,
     });
     if (res && backend === "antigravity") await this.rememberAntigravitySession(sessionId);
     // The sidebar lists an imported Antigravity session from now on.
@@ -119,8 +122,9 @@ class TranscriptMethods {
       },
     }).open();
   }
-  // The transcript note for a session id, or null: in the transcripts folder, a note
-  // whose name ends in the id's short or long key and whose frontmatter records the id.
+  // The transcript note for a session id, or null: in the transcripts folder or a folder
+  // in it (an agent's), a note whose name ends in the id's short or long key and whose
+  // frontmatter records the id.
   findTranscriptNoteBySessionId(this: AgentManagerPlugin, sessionId: string | null | undefined): TFile | null {
     if (!sessionId) return null;
     const tc = this._tc();
@@ -128,7 +132,9 @@ class TranscriptMethods {
     const ends = [`(${tc.noteIdKey(id)}).md`, `(${tc.noteIdKey(id, true)}).md`];
     const root = this.app.vault.getAbstractFileByPath(this.folderOf("transcriptsFolder"));
     if (!(root instanceof import_obsidian.TFolder)) return null;
-    for (const child of root.children || []) {
+    const children = [...(root.children || [])];
+    for (const c of root.children || []) if (c instanceof import_obsidian.TFolder) children.push(...c.children);
+    for (const child of children) {
       if (!(child instanceof import_obsidian.TFile) || !ends.some((e) => child.name.endsWith(e))) continue;
       const fm = this.app.metadataCache.getFileCache(child)?.frontmatter;
       if (fm) { if (String(fm.session_id || "") === id) return child; continue; }

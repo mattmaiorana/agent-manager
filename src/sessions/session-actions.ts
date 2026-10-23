@@ -5,7 +5,8 @@
 import { import_obsidian } from "../externals.js";
 import { CLI_BACKENDS } from "../constants/backends.js";
 import { INPUT_GUARD_NOTICE_MS } from "./constants.js";
-import type { App, TFile } from "obsidian";
+import { ChoicePickerModal } from "../ui/modals.js";
+import type { App, Menu, TFile } from "obsidian";
 import type { CliBackend } from "../constants/backends.js";
 import type { AgentManagerPlugin } from "../plugin/main.js";
 import type { Session } from "./controller.js";
@@ -24,6 +25,32 @@ interface RenameTarget {
   displayName: string;
 }
 class SessionActionMethods {
+  // "Move to agent…" in a session's menu, while there are agents and the session has an
+  // id: refiles it under another agent (plugin/agents.ts, moveSessionToAgent). `done`
+  // runs after a move.
+  addMoveToAgent(this: SessionActionHost, menu: Menu, sessionId: string | null, backend: string, done?: () => void): void {
+    const agents = this.plugin.agentList();
+    if (!sessionId || !agents.length) return;
+    menu.addItem((item) => item.setTitle("Move to agent profile…").setIcon("folder-input").onClick(() => {
+      const cur = this.plugin.recordedAgentId(sessionId) ?? "";
+      const choices = agents.filter((a) => a.id !== cur).map((a) => ({ id: a.id, name: a.name }));
+      if (this.plugin.agentById(cur)) choices.push({ id: "", name: "No agent profile" });
+      if (!choices.length) { new import_obsidian.Notice("There's no other agent profile to move this session to."); return; }
+      // A move refiles the session; every CLI keeps the agent a conversation started as
+      // (tested 2026-10-22: Claude ignores --agent on a resume, Codex its instructions).
+      const effect = "Filed under it. The conversation itself keeps the profile it started with.";
+      new ChoicePickerModal(this.app, choices, {
+        placeholder: "Move this session to which agent profile?",
+        label: (c) => c.name,
+        sub: () => effect,
+        onPick: async (c) => {
+          await this.plugin.moveSessionToAgent(sessionId, c.id);
+          new import_obsidian.Notice(`Moved to ${c.name}. ${effect}`);
+          done?.();
+        },
+      }).open();
+    }));
+  }
   // A small pill naming a session's CLI backend, color-coded per backend.
   appendBackendBadge(parentEl: HTMLElement, backendKey: string): HTMLElement {
     // Any name: one CLI_BACKENDS doesn't have reads undefined.

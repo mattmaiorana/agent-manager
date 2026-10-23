@@ -56,6 +56,17 @@ export interface PluginData {
   overviewTemplate?: unknown;
   // Starting folders whose AGENTS.md offer was dismissed.
   agentsFileDismissed?: unknown;
+  // Use agent profiles (off by default), the agents (context/agents.ts, readAgents), the
+  // switch's pick, and the Default agent, by id.
+  useAgents?: unknown;
+  agents?: unknown;
+  currentAgent?: unknown;
+  defaultAgent?: unknown;
+  // Each session's agent, by session id: an agent's id, or "" for none (plugin/agents.ts).
+  sessionAgents?: Record<string, string>;
+  // The agent each session's conversation launched as, by session id: what a resume or a
+  // fork passes the CLI, which keeps it whatever Move to files the session under.
+  sessionLaunchAgents?: Record<string, string>;
   // Renames, by session id.
   sessionNames?: Record<string, string>;
   // The Antigravity conversations started in this vault, by id.
@@ -149,6 +160,10 @@ export type SavedSessionState = {
   sessionId?: string;
   // Tickets the session writes its lines to besides its source, with each one's kind.
   ticketLinks?: Record<string, LinkKind | null>;
+  // The agent it's filed under, and the one its conversation launched as when that
+  // differs (a fork of a moved session), by id ("" for none), until its id is recorded.
+  agent?: string;
+  launchAgent?: string;
   // Never saved: set by openSessionLeaf for a tab its caller launches.
   awaitLaunch?: boolean;
 };
@@ -187,6 +202,9 @@ export interface LaunchOptions {
   // Continue Session's new main session: it takes the note's main-session over from the
   // one it continues, so a ticket's one-main check lets it start.
   newMain?: boolean;
+  // The agent, by id ("" for none), when it comes from the session this one continues
+  // rather than from where it starts.
+  agentId?: string;
 }
 export type HandoffMode = "side-chat" | "transcript" | "last" | "pointer";
 
@@ -225,6 +243,15 @@ export interface TranscriptWriteOptions {
   transcriptFile: string | null;
   sessionTitle?: string | null;
   source?: string | null;
+  // The agent's name, for a new note's `agent` property.
+  agent?: string | null;
+  // Finds the session's note wherever it is under the transcripts folder, asked inside
+  // the writer's lock (a move takes the same lock): the writer appends to it rather than
+  // look in transcriptDir.
+  findExisting?: () => string | null;
+  // The folder the writer's lock is keyed on (the transcripts folder), so a note moved
+  // between agents' folders mid-write isn't written twice.
+  lockDir?: string;
 }
 
 // One transcript record, parsed (parseTranscriptRecord): a turn of either side, or the

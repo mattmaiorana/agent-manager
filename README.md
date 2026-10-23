@@ -16,6 +16,7 @@ macOS only, for now.
 - **Three CLIs, one way of working.** Claude Code, Codex, and Antigravity all start, list, resume, and save the same way. Pick a default, or choose per session.
 - **Continue Session.** From any session, start a new one that picks up from it, on any CLI. A session started from a note offers a side session, which leaves the note's main session alone, or a new main session, which takes its place. Then choose what it gets: on the same CLI, a copy of the whole conversation (the CLI's own fork) or a fresh start; on another CLI, the transcript to read or a fresh start. A fresh start reads the ticket or the note, or with neither, only the last message, and is told where the transcript is.
 - **Safe to close.** Closing a tab asks first when the agent is working or you have text you haven't sent. When a CLI exits, its tab keeps what it printed, and Enter resumes the session.
+- **Agent profiles, if you need a wall.** Most vaults don't: one session can do any kind of work, and overviews organize it by project. A profile is for keeping things apart, such as work and personal, when each needs its own instructions and its own reference files, not one per role. Turn on Use agent profiles in settings, add one (a name, a note with its instructions, and a home folder), and sessions start with it: Claude Code and Codex get the instructions when the session starts, and every CLI is told about them first thing. A session started from a note in a profile's home folder starts with that profile; a switch at the top of the sidebar picks the profile other sessions start with, and lists only its sessions. Each profile gets its own Daily Chat and its own transcripts folder. Every session is an agent either way: a profile is only who it starts as, and a session with no agent profile can do everything.
 - **It follows a session that moves.** When Claude's Remote Control or a compaction continues a conversation under a new id, the tab, its pin, its name, and its transcript follow it.
 
 ## Requirements
@@ -81,6 +82,8 @@ Agent Manager runs on your computer and reads and runs a few things outside the 
 ## Known limits
 
 - macOS only. The terminal's helper reads the process table through macOS's own library.
+- Antigravity has no way to take an agent profile's instructions when it starts, so it gets them only in the session's first message.
+- A session keeps the agent profile it started with. Move to agent profile… files it under another, but the conversation itself doesn't change.
 
 ## License
 

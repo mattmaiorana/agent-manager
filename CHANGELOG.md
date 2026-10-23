@@ -4,6 +4,29 @@ All notable changes to Agent Manager are recorded here, in [Keep a Changelog](ht
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-10-22
+
+Agent profiles.
+
+### Added
+
+- **Agent profiles.** Turn on Use agent profiles and add one (a name, an instructions note, an optional home folder, and its own Daily Chat name), and sessions start with it: Claude Code gets it as an agent (`--agents` and `--agent`), Codex as developer instructions, and every CLI's opening names it and its note. There are none until you add one.
+  - A session started from a note or folder in a profile's home folder starts with that profile (the deepest home wins); one started outside every home starts with the **Default agent profile**, No agent profile unless set. A session started from the sidebar, Daily Chat, or the New session command starts with the profile picked on the sidebar's switch.
+  - **The switch**, at the top of the sidebar: two choices are a pill whose purple thumb slides to the one picked, more a dropdown. Either is the height of the System Dashboard and Daily Chat buttons below it, in their titles' type. It picks who new sessions and Daily Chat start as, and Pinned and Recent list only that choice's sessions. A session with no agent profile (or one the plugin didn't start) is listed under the Default agent profile; while that's No agent profile, No agent profile is a choice of its own on the switch, with its own list and Daily Chat.
+  - **One Daily Chat per profile per day**, named by the profile's own Daily Chat name (`{{profile}} Daily Chat - {{date}}` by default). The sidebar's button says whose it is (Alpha Daily Chat), changing with the switch; with No agent profile picked it's Daily Chat.
+  - **Transcripts per profile**, in a folder of the profile's name in the transcripts folder, with an `agent` property. Renaming a profile renames its folder.
+  - Side chats and Continue Session keep the profile of the session they came from.
+  - **Move to agent profile…**, in a session's menu on the sidebar and on its strip, files it under another profile: its list, its transcript folder, and what sessions continued from it start with. The conversation itself keeps the profile it started with, since neither Claude Code nor Codex changes it on a resume.
+  - A new opening part, **Agent profile**, sent first: "You are the {{profile}} agent…".
+  - **Add an agent profile** opens a popup for its name, instructions note, home folder, and Daily Chat name; it sits at the top of the section, above Default agent profile.
+  - **Each profile can be turned off** without losing its settings: it leaves the switch, homes, and the Default agent profile, and its sessions are listed as if they had no agent profile until it's back on.
+  - **Words:** what you add in settings is an agent profile everywhere you see it, since every session is an agent; a profile is only who it starts as.
+
+### Changed
+
+- Settings: each CLI's first switch is **Enable** (was "Offer for new sessions"); **Default CLI**, now **Default backend (CLI)**, lists only the enabled CLIs and says it's what a ticket with no `backend` starts on; **Openings** moved down, just above Advanced.
+- Daily Chat sits above the Tickets button.
+
 ## [1.1.0] - 2026-10-22
 
 Tickets, with overviews to go with them.

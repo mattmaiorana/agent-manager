@@ -24,6 +24,10 @@ export interface ContextOptions {
   templatePath: string;
   // A `repo:` value as an absolute path (a leading ~ is the home folder), or null.
   resolvePath(value: string): string | null;
+  // The agents with a home folder, by id, each home a vault path ("" for the root), in
+  // settings order. The deepest home holding the session's note or folder gives its
+  // agent; of two with the same home, the first.
+  homes?: { id: string; home: string }[];
 }
 
 export interface LaunchContext {
@@ -34,6 +38,10 @@ export interface LaunchContext {
   overviews: string[];
   // The repo of the nearest overview that names one, as an absolute path.
   repo: string | null;
+  // The agent whose home folder holds the session's note or folder (the deepest, when
+  // homes nest), by id, or null. Only where the session sits: an agent recorded on the
+  // session, or picked at launch, wins over it (plugin/agents.ts, launchAgentId).
+  agent: string | null;
 }
 
 // Where a session starts: a note, or a folder.
@@ -65,11 +73,22 @@ function folderChain(top: string, bottom: string): string[] {
   return out;
 }
 
+// The agent whose home holds `folder`: the deepest home, by id; null for none.
+export function homeAgent(folder: string, homes: { id: string; home: string }[]): string | null {
+  let best: { id: string; home: string } | null = null;
+  for (const h of homes) {
+    if (!h.id || !within(folder, h.home)) continue;
+    if (!best || h.home.length > best.home.length) best = h;
+  }
+  return best ? best.id : null;
+}
+
 export function launchContext(from: LaunchFrom, vault: ContextVault, opts: ContextOptions): LaunchContext {
   const notePath = from.notePath || null;
   const folder = notePath ? parentOf(notePath) : (from.folderPath ?? null);
-  const ctx: LaunchContext = { ticket: null, overviews: [], repo: null };
+  const ctx: LaunchContext = { ticket: null, overviews: [], repo: null, agent: null };
   if (notePath && isTicket(notePath, vault, opts)) ctx.ticket = notePath;
+  if (folder !== null) ctx.agent = homeAgent(folder, opts.homes || []);
   if (folder === null || !opts.useOverviews) return ctx;
   const name = opts.overviewName;
   for (const dir of folderChain(opts.startFolder, folder)) {
@@ -85,18 +104,22 @@ export function launchContext(from: LaunchFrom, vault: ContextVault, opts: Conte
   return ctx;
 }
 
-// The opening, from its parts: the overviews part when there are overviews, the repo part
-// when there's a repo, then the kind's own template, each as one line with its
-// placeholders filled in ({{overviews}} is the overviews' absolute paths, quoted). An
-// empty part is left out; all empty is "".
+// The opening, from its parts: the agent part when the session has an agent (`agent`, its
+// name and its instructions note's absolute path, since which agent a session gets isn't
+// only where it sits), the overviews part when there are overviews, the repo part when
+// there's a repo, then the kind's own template, each as one line with its placeholders
+// filled in ({{overviews}} is the overviews' absolute paths, quoted). An empty part is
+// left out; all empty is "".
 export type OpeningKind = "plain" | "daily" | "note" | "folder" | "ticket";
-export function composeOpening(template: (key: OpeningKind | "overviews" | "repo") => string, ctx: LaunchContext, kind: OpeningKind, vars: Record<string, string>, absolute: (vaultPath: string) => string): string {
-  const all: Record<string, string> = { ...vars, overviews: ctx.overviews.map((p) => `"${absolute(p)}"`).join(", "), repo: ctx.repo || "" };
-  const fill = (key: OpeningKind | "overviews" | "repo") => template(key)
+export type OpeningPartKey = OpeningKind | "agent" | "overviews" | "repo";
+export function composeOpening(template: (key: OpeningPartKey) => string, ctx: LaunchContext, kind: OpeningKind, vars: Record<string, string>, absolute: (vaultPath: string) => string, agent: { name: string; instructions: string } | null = null): string {
+  const all: Record<string, string> = { ...vars, overviews: ctx.overviews.map((p) => `"${absolute(p)}"`).join(", "), repo: ctx.repo || "", profile: agent?.name || "", instructions: agent?.instructions || "" };
+  const fill = (key: OpeningPartKey) => template(key)
     .replace(/\s*\n\s*/g, " ")
     .trim()
     .replace(/\{\{(\w+)\}\}/g, (whole, k: string) => (k in all ? all[k] : whole));
   const parts: string[] = [];
+  if (agent) parts.push(fill("agent"));
   if (ctx.overviews.length) parts.push(fill("overviews"));
   if (ctx.repo) parts.push(fill("repo"));
   parts.push(fill(kind));

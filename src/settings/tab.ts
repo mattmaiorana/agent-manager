@@ -3,10 +3,12 @@
 import { import_obsidian } from "../externals.js";
 import { CLI_BACKENDS, REAL_BACKENDS, isBackendKey } from "../constants/backends.js";
 import { DEFAULT_DAILY_NAME, DEFAULT_NAMES, DEFAULT_OPENING, DEFAULT_OVERVIEW_NAME, DEFAULT_TICKET_TEMPLATE, NAME_LABELS, OPENING_LABELS } from "../constants/names.js";
-import { FileSuggest, FolderSuggest } from "../ui/modals.js";
+import { AgentModal, FileSuggest, FolderSuggest } from "../ui/modals.js";
 import { AGENTS } from "../vault-terminal/agents";
 import { agentSettings, agentVariableSettings, appearanceSettings, linkSettings, pythonSettings } from "../vault-terminal/settings";
 import { isArray, stringOf } from "../util/guards.js";
+import { DEFAULT_AGENT_DAILY_NAME, agentNameProblem, parseHome } from "../context/agents.js";
+import type { AgentDef } from "../context/agents.js";
 import type { App } from "obsidian";
 import type { BackendKey } from "../constants/backends.js";
 import type { NameKey, OpeningKey } from "../constants/names.js";
@@ -33,7 +35,7 @@ class AgentManagerSettingsTab extends import_obsidian.PluginSettingTab {
     containerEl.empty();
     this.displayGeneral(containerEl);
     this.displayContext(containerEl);
-    this.displayNotes(containerEl);
+    this.displayAgentList(containerEl);
     this.displayAgents(containerEl);
     const core = this.plugin.terminal;
     if (core) {
@@ -41,6 +43,7 @@ class AgentManagerSettingsTab extends import_obsidian.PluginSettingTab {
       appearanceSettings(containerEl, core);
       linkSettings(containerEl, core);
     }
+    this.displayNotes(containerEl);
     this.displayAdvanced(containerEl);
     scroller.scrollTop = top;
     containerEl.scrollTop = own;
@@ -74,11 +77,13 @@ class AgentManagerSettingsTab extends import_obsidian.PluginSettingTab {
   }
   displayGeneral(containerEl: HTMLElement): void {
     new import_obsidian.Setting(containerEl)
-      .setName("Default CLI")
-      .setDesc("What a new session runs until you pick another in the sidebar. Starting from a note or a folder offers it first.")
+      .setName("Default backend (CLI)")
+      .setDesc("What a new session runs until you pick another in the sidebar, and what a ticket with no backend property starts on. Starting from a note or a folder offers it first. Lists the CLIs that are enabled below.")
       .addDropdown((drop) => {
-        for (const key of REAL_BACKENDS) drop.addOption(key, CLI_BACKENDS[key].label);
-        drop.setValue(this.plugin.getCurrentBackend());
+        const enabled = this.plugin.getBrowserBackends();
+        for (const key of enabled) drop.addOption(key, CLI_BACKENDS[key].label);
+        const current = this.plugin.getCurrentBackend();
+        drop.setValue(enabled.includes(current) ? current : enabled[0]);
         drop.onChange(async (value) => {
           this.plugin.pluginData.cliBackend = value;
           await this.save();
@@ -107,7 +112,7 @@ class AgentManagerSettingsTab extends import_obsidian.PluginSettingTab {
     this.nameSetting(containerEl, "transcriptsFolder");
     new import_obsidian.Setting(containerEl)
       .setName("Daily chat name")
-      .setDesc("The day's chat is found and named by this. {{date}} is today's date, as 2026-10-19.")
+      .setDesc("The day's chat is found and named by this. {{date}} is today's date, as 2026-10-19. Once there are agent profiles, each one's own daily chat name is used instead.")
       .addText((text) => {
         text.setPlaceholder(DEFAULT_DAILY_NAME).setValue(stringOf(this.plugin.pluginData.dailyChatName || ""));
         text.inputEl.addEventListener("change", () => { void (async () => {
@@ -233,6 +238,138 @@ class AgentManagerSettingsTab extends import_obsidian.PluginSettingTab {
     this.textSetting(containerEl, "ticketsButtonName", "Tickets button name", "What the button says.", "Tickets", () => this.rerenderSidebars());
     this.pathSetting(containerEl, "ticketsNote", "Tickets button opens", "The note or base the button opens, such as a dashboard that embeds the tickets base. Empty is the tickets base in the AGENTS.md folder.", "Tickets.base");
   }
+  // Agents: none until one is added. Add an agent and the Default agent first, then each
+  // agent's name, instructions note, home folder, and Daily Chat name.
+  displayAgentList(containerEl: HTMLElement): void {
+    new import_obsidian.Setting(containerEl).setName("Agent profiles").setHeading();
+    new import_obsidian.Setting(containerEl)
+      .setName("Use agent profiles")
+      .setDesc("Every session is an agent; a profile is who it starts as. Most vaults need none: one session can do any kind of work, and overviews organize it by project. Profiles are for walling things off, such as work and personal, when each needs its own instructions and its own reference files, not one per role. Turned off, the profiles are kept.")
+      .addToggle((toggle) => toggle
+        .setValue(this.plugin.agentsOn())
+        .onChange(async (value) => {
+          this.plugin.pluginData.useAgents = value;
+          await this.save();
+          this.rerenderSidebars();
+          this.drawSettings();
+        }));
+    if (!this.plugin.agentsOn()) return;
+    const all = this.plugin.allAgents();
+    const save = async (list: AgentDef[]) => {
+      this.plugin.pluginData.agents = list;
+      await this.save();
+      this.rerenderSidebars();
+    };
+    new import_obsidian.Setting(containerEl)
+      .setName("Add an agent profile")
+      .addButton((b) => b.setButtonText("Add").onClick(() => {
+        new AgentModal(this.app, (name) => agentNameProblem(name, this.plugin.allAgents().map((a) => a.name)), async (f) => {
+          const home = parseHome(f.home);
+          const list = this.plugin.allAgents();
+          list.push({
+            id: this.plugin.newSessionId(),
+            name: f.name.trim(),
+            instructions: f.instructions.trim() ? (0, import_obsidian.normalizePath)(f.instructions.trim()) : "",
+            home: home ? (0, import_obsidian.normalizePath)(home) : home,
+            dailyName: f.dailyName.trim(),
+            enabled: true,
+          });
+          await save(list);
+          this.drawSettings();
+        }, DEFAULT_AGENT_DAILY_NAME).open();
+      }));
+    // While there are agents on: it decides where sessions with none are listed.
+    const on = this.plugin.agentList();
+    if (on.length) {
+      new import_obsidian.Setting(containerEl)
+        .setName("Default agent profile")
+        .setDesc("The profile a session started from a note or folder outside every home folder starts with, and where sessions with no agent profile are listed in the sidebar. Left at no agent profile, the sidebar's switch offers that too.")
+        .addDropdown((dd) => {
+          dd.addOption("", "No agent profile");
+          for (const a of on) dd.addOption(a.id, a.name);
+          dd.setValue(this.plugin.defaultAgent()?.id || "");
+          dd.onChange(async (value) => {
+            if (value) this.plugin.pluginData.defaultAgent = value; else delete this.plugin.pluginData.defaultAgent;
+            await this.save();
+            this.rerenderSidebars();
+          });
+        });
+    }
+    all.forEach((agent, index) => {
+      const update = async (change: Partial<AgentDef>) => {
+        const list = this.plugin.allAgents();
+        const i = list.findIndex((a) => a.id === agent.id);
+        if (i === -1) return;
+        list[i] = { ...list[i], ...change };
+        await save(list);
+      };
+      // Its heading row: on or off, move up, remove. Off hides its settings and keeps them.
+      const head = new import_obsidian.Setting(containerEl)
+        .setName(agent.name)
+        .setClass("agent-manager-agent-head");
+      if (!agent.enabled) head.setDesc("Off: its settings are kept. Its sessions are listed as if they had no agent profile.");
+      if (index > 0) head.addExtraButton((b) => b.setIcon("arrow-up").setTooltip("Move up").onClick(async () => {
+        const list = this.plugin.allAgents();
+        [list[index - 1], list[index]] = [list[index], list[index - 1]];
+        await save(list);
+        this.drawSettings();
+      }));
+      head.addExtraButton((b) => b.setIcon("trash").setTooltip("Remove this agent profile").onClick(async () => {
+        await save(this.plugin.allAgents().filter((a) => a.id !== agent.id));
+        if (this.plugin.pluginData.defaultAgent === agent.id) delete this.plugin.pluginData.defaultAgent;
+        if (this.plugin.pluginData.currentAgent === agent.id) delete this.plugin.pluginData.currentAgent;
+        await this.save();
+        this.rerenderSidebars();
+        this.drawSettings();
+      }));
+      head.addToggle((t) => t.setTooltip(agent.enabled ? "Turn this agent profile off" : "Turn this agent profile on").setValue(agent.enabled).onChange(async (value) => {
+        await update({ enabled: value });
+        this.drawSettings();
+      }));
+      if (!agent.enabled) return;
+      new import_obsidian.Setting(containerEl)
+        .setName("Name")
+        .setDesc("Its transcripts go in a folder of this name in the transcripts folder.")
+        .addText((text) => {
+          text.setValue(agent.name);
+          text.inputEl.addEventListener("change", () => { void (async () => {
+            const name = text.inputEl.value.trim();
+            if (name === agent.name) return;
+            const problem = agentNameProblem(name, this.plugin.allAgents().filter((a) => a.id !== agent.id).map((a) => a.name));
+            if (problem) { new import_obsidian.Notice(problem); text.setValue(agent.name); return; }
+            await update({ name });
+            await this.plugin.renameAgentFiles(agent.name, name);
+            this.drawSettings();
+          })(); });
+        });
+      new import_obsidian.Setting(containerEl)
+        .setName("Instructions note")
+        .setDesc("The note that says who this agent profile is and how it works.")
+        .addText((text) => {
+          text.setPlaceholder("Agents/Personal.md").setValue(agent.instructions);
+          new FileSuggest(this.app, text.inputEl, ["md"]);
+          text.inputEl.addEventListener("change", () => { void update({ instructions: text.inputEl.value.trim() ? (0, import_obsidian.normalizePath)(text.inputEl.value.trim()) : "" }); });
+        });
+      new import_obsidian.Setting(containerEl)
+        .setName("Home folder")
+        .setDesc("A session started from a note or folder in here starts with this agent profile. Empty for none; / for the whole vault.")
+        .addText((text) => {
+          text.setPlaceholder("None").setValue(agent.home === null ? "" : agent.home === "" ? "/" : agent.home);
+          new FolderSuggest(this.app, text.inputEl);
+          text.inputEl.addEventListener("change", () => {
+            const home = parseHome(text.inputEl.value);
+            void update({ home: home ? (0, import_obsidian.normalizePath)(home) : home });
+          });
+        });
+      new import_obsidian.Setting(containerEl)
+        .setName("Daily chat name")
+        .setDesc("This agent profile's daily chat is found and named by this. {{profile}} is its name, {{date}} today's date.")
+        .addText((text) => {
+          text.setPlaceholder(DEFAULT_AGENT_DAILY_NAME).setValue(agent.dailyName);
+          text.inputEl.addEventListener("change", () => { void update({ dailyName: text.inputEl.value.trim() }); });
+        });
+    });
+  }
   // A text setting, saved on change (blur or Enter); empty removes it, for its default.
   textSetting(containerEl: HTMLElement, key: "overviewName" | "ticketsButtonName", name: string, desc: string, placeholder: string, after?: () => void): void {
     new import_obsidian.Setting(containerEl)
@@ -296,7 +433,7 @@ class AgentManagerSettingsTab extends import_obsidian.PluginSettingTab {
       setting.settingEl.addClass("agent-manager-env-setting");
     }
   }
-  // Each CLI: offered or not (and whether it's installed), its command and location.
+  // Each CLI: enabled or not (and whether it's installed), its command and location.
   displayAgents(containerEl: HTMLElement): void {
     const status = this.plugin.setupStatus();
     const core = this.plugin.terminal;
@@ -305,23 +442,23 @@ class AgentManagerSettingsTab extends import_obsidian.PluginSettingTab {
       new import_obsidian.Setting(containerEl).setName(backend.label).setHeading();
       const desc = createFragment((f) => {
         if (!status) f.appendText("Checking whether it's installed…");
-        else if (status.installed[key]) f.appendText("Installed. Offered for new sessions in the sidebar and the file menu.");
+        else if (status.installed[key]) f.appendText("Installed. While it's enabled, it's offered for new sessions in the sidebar and the file menu.");
         else {
           f.appendText("Not found. To install it, run this in Terminal, then sign in to it there once:");
           f.createEl("code", { cls: "agent-manager-setup-cmd", text: backend.install });
         }
       });
       const offer = new import_obsidian.Setting(containerEl)
-        .setName("Offer for new sessions")
+        .setName("Enable")
         .setDesc(desc)
         .addToggle((toggle) => toggle
           .setValue(this.storedBackends().includes(key))
           .onChange(async (value) => {
             let list = this.storedBackends();
             list = value ? REAL_BACKENDS.filter((k) => k === key || list.includes(k)) : list.filter((k) => k !== key);
-            // At least one stays offered, or nothing could start a session.
+            // At least one stays enabled, or nothing could start a session.
             if (!list.length) {
-              new import_obsidian.Notice("At least one CLI has to be offered.");
+              new import_obsidian.Notice("At least one CLI has to be enabled.");
               toggle.setValue(true);
               return;
             }
@@ -339,7 +476,7 @@ class AgentManagerSettingsTab extends import_obsidian.PluginSettingTab {
             this.drawSettings();
           }));
       }
-      // A CLI's own settings show only while it's offered.
+      // A CLI's own settings show only while it's enabled.
       if (!this.storedBackends().includes(key)) continue;
       const agent = AGENTS.find((a) => a.id === key);
       if (core && agent) agentSettings(containerEl, core, agent);

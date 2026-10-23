@@ -1,7 +1,7 @@
 {
 	"id": "agent-manager",
 	"name": "Agent Manager",
-	"version": "1.1.0",
+	"version": "1.2.0",
 	"minAppVersion": "1.8.7",
 	"description": "Run Claude Code, Codex, or Antigravity in a terminal tab. Start a session from any note, and keep every session listed, resumable, and saved as a note. macOS only for now.",
 	"author": "Matt Maiorana",

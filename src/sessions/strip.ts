@@ -40,6 +40,7 @@ class StripMethods {
         if (id) menu.addItem((i) => i.setTitle(`Copy session id (${id.slice(0, 8)})`).setIcon("copy").onClick(async () => {
           try { await navigator.clipboard.writeText(id); new import_obsidian.Notice(`Copied session id ${id}`); } catch { /* best effort */ }
         }));
+        this.addMoveToAgent(menu, id, this.getBackendKey());
         menu.showAtMouseEvent(evt);
       });
     }
@@ -255,6 +256,7 @@ class StripMethods {
       notePath: this._notePath || null,
       folderPath: this._folderPath || null,
       forkFrom: { id, backend, cwd: this.workingDir || null },
+      agentId: this.agentId(),
     });
   }
   // Continue Session's menu: the CLIs offered, this one first. A session started from a
@@ -327,6 +329,8 @@ class StripMethods {
       folderPath: this._notePath ? null : this._folderPath || null,
       sideSession: role === "side",
       newMain: role === "main",
+      // A continuation keeps this session's agent, none included.
+      agentId: this.agentId(),
       ...(forkFrom ? { forkFrom } : {
         handoffNote: transcript,
         handoffFromBackend: here,
@@ -355,6 +359,7 @@ class StripMethods {
       handoffNote: notePath,
       handoffFromBackend: backend,
       handoffIntent: (this.sessionTitle || "").replace(SIDE_SUFFIX_RE, "").trim() || "Untitled",
+      agentId: this.agentId(),
     });
   }
   // Refresh the strip's model badge from the transcript. Called when the strip is
