@@ -10,6 +10,8 @@ import { isCodexSubagentSessionMeta, lastMessageTsOf, readFileHead } from "../se
 import type { Browser, LaunchOptions, OpenSession, Session, SessionRecord, StoreRecord } from "../types.js";
 import { isArray, stringOf } from "../util/guards.js";
 import type { AgentManagerPlugin } from "./main.js";
+// Past this many parsed transcript heads, an index read drops the ones it didn't use.
+const HEAD_CACHE_MAX = 4096;
 
 // The CLIs' JSON lines, typed as the CLIs write them. A field the code checks before use
 // is `unknown`; the rest are used as written, as they always were (a line that isn't the
@@ -78,12 +80,23 @@ class SessionMethods {
     const hit = this._headParseCache.get(full);
     // A file is always parsed by the same reader (each CLI's files are in its own store),
     // so what's cached for it is what `compute` returns.
-    if (hit && hit.mtime === mtimeMs) return hit.value as T;
+    // Each entry remembers the last index read that used it (sweepHeadCache).
+    const read = this._headParseRead || 0;
+    if (hit && hit.mtime === mtimeMs) { hit.read = read; return hit.value as T; }
     const value = compute();
-    // A soft cap, so the cache can't grow without bound; clearing re-warms it.
-    if (this._headParseCache.size > 4096) this._headParseCache.clear();
-    this._headParseCache.set(full, { mtime: mtimeMs, value });
+    this._headParseCache.set(full, { mtime: mtimeMs, value, read });
     return value;
+  }
+  // After an index read: once the cache is over its size, the entries that read didn't
+  // use (files gone, or only a lookup by id visited) go. Never during a read, so however
+  // many files a read visits (Codex's store is never pruned), the next read finds them
+  // all; evicting as it went would make a read drop what it needs next.
+  sweepHeadCache(this: AgentManagerPlugin): void {
+    const cache = this._headParseCache;
+    const read = this._headParseRead || 0;
+    this._headParseRead = read + 1;
+    if (!cache || cache.size <= HEAD_CACHE_MAX) return;
+    for (const [file, entry] of cache) if (entry.read !== read) cache.delete(file);
   }
   // The title between the session-name marker's quotes, or null.
   markedTitle(this: AgentManagerPlugin, text: unknown): string | null {
@@ -299,8 +312,20 @@ class SessionMethods {
     this._sessionIndex = null;
   }
   async _readSessionIndex(this: AgentManagerPlugin): Promise<SessionRecord[]> {
-    // The vault's root, the starting folder, and every folder a session of this plugin
-    // has run in, so a session started in an earlier starting folder stays listed.
+    const cwds = this.sessionCwds();
+    const found: StoreRecord[] = [];
+    for (const backend of REAL_BACKENDS) {
+      try { found.push(...this.readStore(backend, cwds)); } catch { /* best effort */ }
+    }
+    const records = found.map((r) => this.classify(r));
+    records.sort((a, b) => b.mtime - a.mtime);
+    this.sweepHeadCache();
+    return records;
+  }
+  // The folders whose sessions are this vault's: the vault's root, the starting folder,
+  // and every folder a session of this plugin has run in, so a session started in an
+  // earlier starting folder stays listed.
+  sessionCwds(this: AgentManagerPlugin): Set<string> {
     const cwds = new Set([path.resolve(this.getVaultPath()), path.resolve(this.startDir())]);
     for (const dir of isArray(this.pluginData.sessionFolders) ? this.pluginData.sessionFolders : []) {
       if (typeof dir === "string" && dir) cwds.add(path.resolve(dir));
@@ -316,13 +341,15 @@ class SessionMethods {
     for (const dir of [...cwds]) {
       try { cwds.add(fs.realpathSync(dir)); } catch { /* a folder that's gone */ }
     }
-    const found: StoreRecord[] = [];
-    for (const backend of REAL_BACKENDS) {
-      try { found.push(...this.readStore(backend, cwds)); } catch { /* best effort */ }
-    }
-    const records = found.map((r) => this.classify(r));
-    records.sort((a, b) => b.mtime - a.mtime);
-    return records;
+    return cwds;
+  }
+  // The CLI a new session starts on when nothing picks one: the default, if it's offered,
+  // else the first that is.
+  defaultLaunchBackend(this: AgentManagerPlugin): BackendKey {
+    const offered = this.getBrowserBackends();
+    // With nothing offered at all (no valid list, nothing installed), the first CLI, so
+    // a caller can always name one; starting it then says what's missing.
+    return offered.includes(this.getCurrentBackend()) ? this.getCurrentBackend() : offered[0] ?? REAL_BACKENDS[0];
   }
   // A record's name and whether it is listed. Claude and Codex sessions are read from
   // the vault's folder only, so each is listed; Antigravity's store is shared by every
@@ -508,8 +535,7 @@ class SessionMethods {
     // pick wins over it; with neither, the view uses the default.
     // Only the sidebar has a pick; a session tab reads undefined here.
     const lb = (sourceView as { _launchBackend?: unknown } | null | undefined)?._launchBackend;
-    const offered = this.getBrowserBackends();
-    const fallback = offered.includes(this.getCurrentBackend()) ? this.getCurrentBackend() : offered[0];
+    const fallback = this.defaultLaunchBackend();
     const launchBackend = (opts?.backendOverride && isBackendKey(opts.backendOverride)) ? opts.backendOverride
       : (lb && isBackendKey(lb) ? lb : fallback);
     const prepare = (v: Session) => {
@@ -525,6 +551,7 @@ class SessionMethods {
       v._handoffIntent = opts?.handoffIntent || null;
       v._handoffMode = opts?.handoffMode || (opts?.handoffNote ? "side-chat" : null);
       v._daily = !!opts?.daily;
+      v._setup = !!opts?.setup;
       // Its agent, settled now: the session it continues gives it, else where it starts
       // (plugin/agents.ts, launchAgentId).
       v._agentId = opts?.agentId !== undefined ? opts.agentId : this.launchAgentId({ notePath: opts?.notePath, folderPath: opts?.folderPath });

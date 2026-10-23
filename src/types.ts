@@ -154,6 +154,8 @@ export type SavedSessionState = {
   noteReplaces?: boolean;
   forkFrom?: ForkFrom;
   daily?: boolean;
+  // Set up this vault's session (plugin/guides.ts).
+  setup?: boolean;
   started?: boolean;
   launchToken?: string;
   rehostedFrom?: RehostedFrom;
@@ -205,6 +207,8 @@ export interface LaunchOptions {
   // The agent, by id ("" for none), when it comes from the session this one continues
   // rather than from where it starts.
   agentId?: string;
+  // Set up this vault: the opening points at the setup guide (plugin/guides.ts).
+  setup?: boolean;
 }
 export type HandoffMode = "side-chat" | "transcript" | "last" | "pointer";
 

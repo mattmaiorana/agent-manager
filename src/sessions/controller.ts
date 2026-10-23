@@ -8,7 +8,7 @@
 import type { App, WorkspaceLeaf } from "obsidian";
 import { StringDecoder, fs, import_obsidian, path } from "../externals.js";
 import { CLI_BACKENDS, INPUT_PASTE_MIN, isBackendKey } from "../constants/backends.js";
-import { OPENING_LEAD, sessionNamePrompt } from "../constants/names.js";
+import { OPENING_LEAD, SETUP_SESSION_NAME, plainSessionName, sessionNamePrompt } from "../constants/names.js";
 import { DIALOG_RE, INPUT_GUARD_NOTICE_MS } from "./constants.js";
 import { splitCommand } from "../vault-terminal/finder";
 import { IdentityMethods } from "./identity.js";
@@ -99,6 +99,8 @@ class SessionController implements TerminalController {
   declare _handoffIntent: string | null | undefined;
   declare _handoffMode: HandoffMode | null | undefined;
   declare _daily: boolean | undefined;
+  // Set up this vault's session: its opening points at the setup guide (plugin/guides.ts).
+  declare _setup: boolean | undefined;
   // The agent it was launched as, by id ("" for none), until its id's record holds it
   // (plugin/agents.ts); undefined for a resume, which reads the record.
   declare _agentId: string | undefined;
@@ -131,6 +133,8 @@ class SessionController implements TerminalController {
   declare _modelFile: string | null | undefined;
   declare _durableReconciledSize: number | undefined;
   declare _durableCaughtUp: boolean | undefined;
+  declare _durableMisses: number | undefined;
+  declare _durableRetryAt: number | undefined;
   // Sent files (transcripts/view-transcripts.ts, saveSentFiles): a pass running, and one still to copy.
   declare _sentFilesSaving: boolean | undefined;
   declare _sentFilesPending: boolean | undefined;
@@ -215,6 +219,10 @@ class SessionController implements TerminalController {
     // One of the backends by name, not a name every object inherits ("constructor").
     return isBackendKey(key) ? key : "claude";
   }
+  // Set up this vault's session: started by the setup button, or resumed by its name.
+  isSetupSession(this: Session): boolean {
+    return !!this._setup || this.sessionTitle === SETUP_SESSION_NAME;
+  }
   getBackend(): CliBackend {
     return CLI_BACKENDS[this.getBackendKey()];
   }
@@ -257,6 +265,7 @@ class SessionController implements TerminalController {
     if (this._noteReplaces) state.noteReplaces = true;
     if (this._forkFrom) state.forkFrom = this._forkFrom;
     if (this._daily) state.daily = true;
+    if (this._setup) state.setup = true;
     if (this._agentId !== undefined) state.agent = this._agentId;
     if (this._launchAgentId !== undefined) state.launchAgent = this._launchAgentId;
     if (this._ticketLinks && Object.keys(this._ticketLinks).length) state.ticketLinks = this._ticketLinks;
@@ -290,6 +299,7 @@ class SessionController implements TerminalController {
     if (state.forkFrom && typeof state.forkFrom === "object") this._forkFrom = state.forkFrom;
     if (typeof state.launchToken === "string") this._launchToken = state.launchToken;
     if (state.daily) this._daily = true;
+    if (state.setup) this._setup = true;
     if (typeof state.agent === "string") this._agentId = state.agent;
     if (typeof state.launchAgent === "string") this._launchAgentId = state.launchAgent;
     if (state.ticketLinks && typeof state.ticketLinks === "object") this._ticketLinks = { ...state.ticketLinks };
@@ -366,29 +376,37 @@ class SessionController implements TerminalController {
     // The agent its conversation launched as, on every start the CLI takes it on
     // (context/agents.ts, agentArgs): a resume or a fork keeps it, whatever the session
     // is filed under since, so the CLI's header and the conversation agree.
-    const resumeId = this.resumeSessionId && /^[0-9a-fA-F-]{16,}$/.test(this.resumeSessionId) ? this.resumeSessionId : null;
-    global.push(...this.plugin.agentLaunchArgs(backendKey, this.conversationAgentId(), !!(resumeId || this._forkFrom), resumeId || this._forkFrom?.id || null));
+    // Ids read from a transcript go into argv and paths, so they're checked first: one that
+    // began with "--" would be read as a flag.
+    const validId = (id: string | null | undefined): string | null => (id && /^[0-9a-fA-F-]{16,}$/.test(id) ? id : null);
+    const resumeId = validId(this.resumeSessionId);
+    const forkId = validId(this._forkFrom?.id);
+    global.push(...this.plugin.agentLaunchArgs(backendKey, this.conversationAgentId(), !!(resumeId || forkId), resumeId || forkId));
     const addDirs = this.plugin.addedFolders().filter((d) => path.resolve(d) !== path.resolve(cwd));
+    // The setup session reads its guide from the plugin's folder, which sits outside a
+    // session started below the vault's root: Claude asks before reading outside its
+    // folders, so it's given that one (Codex and Antigravity read it without asking).
+    const guides = backendKey === "claude" && this.isSetupSession() ? this.plugin.guidesDir() : null;
+    if (guides && !isInside(guides, cwd) && !addDirs.some((d) => isInside(guides, d))) addDirs.push(guides);
     if (addDirs.length && backend.addDirFlag) {
       for (const dir of addDirs) global.push(backend.addDirFlag, dir);
       if (backend.addDirWriteFlags) global.push(...splitCommand(backend.addDirWriteFlags));
     }
     // A side chat: a copy of another session's conversation, made by the CLI's own fork.
-    const fork = this._forkFrom;
-    if (fork && !this.resumeSessionId) {
+    if (forkId && !this.resumeSessionId) {
       // Claude: resume the source as a new session, with the id the plugin minted.
       if (backendKey === "claude") {
-        const args = [...global, "--resume", fork.id, "--fork-session"];
+        const args = [...global, "--resume", forkId, "--fork-session"];
         if (this.launchSessionId) args.push("--session-id", this.launchSessionId);
         // Claude has a name flag (constants/backends.ts).
         if (this.sessionName) args.push(backend.nameFlag as string, this.sessionName);
         return { args, folder: this.workingDir || "" };
       }
       // Codex: its fork subcommand, by id. The fork's id is learned from its new rollout.
-      if (backendKey === "codex") return { args: [...global, "fork", fork.id], folder: this.workingDir || "" };
+      if (backendKey === "codex") return { args: [...global, "fork", forkId], folder: this.workingDir || "" };
       // Antigravity has no launch flag for it: open the source conversation, then /fork
       // inside it (_sendFork). The tab is on the source until the fork answers.
-      return { args: [...global, ...splitCommand(backend.resumeByIdFlag), fork.id], folder: this.workingDir || "" };
+      return { args: [...global, ...splitCommand(backend.resumeByIdFlag), forkId], folder: this.workingDir || "" };
     }
     const id = resumeId;
     if (id && backend.resumeByIdFlag) {
@@ -445,6 +463,12 @@ class SessionController implements TerminalController {
     if (/^(?:\x1b\[[IO])+$/.test(data)) return;
     this._draft.feed(data, this.getBackendKey());
     this.lastUserInputAt = Date.now();
+  }
+  inputCleared(): void {
+    this._draft.clear();
+  }
+  dialogShowing(): boolean {
+    return this._dialogShowing();
   }
   stateChange(state: ProgramState | null): void {
     // Seen working: a real session, past any trust dialog.
@@ -543,7 +567,8 @@ class SessionController implements TerminalController {
   // chat, in the folder of the session it copies (`_forkFrom`, set by startSession).
   // `reuseId`: a Claude session restored before its first turn keeps its id (and so its pin).
   launchSession(this: Session, subject: string | null | undefined, reuseId: string | null = null): void {
-    const title = String(subject || "").trim() || "Untitled";
+    // Every new session's name passes here, so this is where it's made one plain line.
+    const title = plainSessionName(String(subject || "")) || "Untitled";
     this._decided = true;
     this.sessionTitle = title;
     this.sessionName = title;
@@ -575,8 +600,16 @@ class SessionController implements TerminalController {
     // it's handed and wait; the plain opening would tell it to read nothing.
     const continuing = !!this._handoffMode && this._handoffMode !== "side-chat";
     this._opening = fork ? null
+      : this._setup ? this.plugin.setupOpening(this.agentId())
       : continuing && !this._notePath && !this._folderPath ? [this.plugin.agentOpening(this.agentId()), "Then wait for instructions."].filter(Boolean).join(" ")
       : this.plugin.buildOpening({ notePath: this._notePath || null, folderPath: this._folderPath || null, daily: !!this._daily, agentId: this.agentId() });
+    // A setup session never starts without its guide, a restored tab included: it would
+    // run with neither its instructions nor the propose-only line.
+    if (this._setup && !this._opening) {
+      new import_obsidian.Notice("Agent Manager: the setup guide couldn't be written into the plugin's folder, so setup didn't start. Try reloading the plugin.", 10000);
+      this.leaf.detach();
+      return;
+    }
     this._go();
     if (!fork) void this.sendOpening(title);
     else if (backendKey === "antigravity") void this._sendFork();
@@ -1008,6 +1041,11 @@ interface Session extends SessionController, ViewTranscriptMethods, StripMethods
 applyParts(SessionController, ViewTranscriptMethods, StripMethods, ViewNoteMethods, ViewTicketMethods, IdentityMethods, SessionActionMethods);
 // Is this a session? instanceof finds the class; applyParts above gave every instance the
 // parts, which is what Session adds.
+// Is `p` the folder `dir` or inside it?
+function isInside(p: string, dir: string): boolean {
+  const rel = path.relative(path.resolve(dir), path.resolve(p));
+  return rel === "" || (!!rel && !rel.startsWith("..") && !path.isAbsolute(rel));
+}
 function isSession(x: unknown): x is Session {
   return x instanceof SessionController;
 }

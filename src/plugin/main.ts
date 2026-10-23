@@ -6,6 +6,7 @@ import { isBackendKey } from "../constants/backends.js";
 import { AgentMethods } from "./agents.js";
 import { ClaudeModMethods } from "./claude-mod.js";
 import { ConfigMethods } from "./config.js";
+import { GuideMethods } from "./guides.js";
 import { LinkMethods } from "./links.js";
 import { NoteMethods } from "./notes.js";
 import { SessionMethods } from "./sessions.js";
@@ -41,19 +42,24 @@ class VaultTerminalPlugin extends import_obsidian.Plugin {
   declare _reloadAsked: number | undefined;
   // The Claude mod's folder (claude-mod.ts).
   declare _claudeModDir: string | null | undefined;
+  // The guides' folder (guides.ts).
+  declare _guidesDir: string | null | undefined;
   // The setup check (setup.ts).
   declare _setup: SetupStatus | undefined;
   declare _setupCheck: Promise<SetupStatus> | null | undefined;
   // claude agents --json, shared for a few seconds (shell.ts).
   declare _agentsShared: { at: number; promise: Promise<unknown[]> } | null | undefined;
   // The session index and its caches (sessions.ts).
-  declare _headParseCache: Map<string, { mtime: number; value: unknown }> | undefined;
+  declare _headParseCache: Map<string, { mtime: number; value: unknown; read: number }> | undefined;
+  declare _headParseRead: number | undefined;
+  declare _movedTranscriptNotes: Map<string, string> | undefined;
   declare _sessionIndex: { at: number; records: Promise<SessionRecord[]> } | null | undefined;
   declare _lastActivityCache: Map<string, { mtime: number | null | undefined; at: number }> | undefined;
   declare _noteLaunches: Map<string, number | null> | undefined;
   // Tickets whose main session is being started, until its tab exists (startSession).
   declare _ticketLaunching: Set<string> | undefined;
   declare _openingToday: boolean | undefined;
+  declare _openingSetup: boolean | undefined;
   declare _resuming: Set<string> | undefined;
   // The workspace (workspace.ts).
   declare _browserCreateInFlight: boolean | undefined;
@@ -93,6 +99,8 @@ class VaultTerminalPlugin extends import_obsidian.Plugin {
     // Before the session view is registered (loadTerminal): a plugin reload reopens session
     // tabs as soon as it is, and a Claude start reads the mod's folder (claude-mod.ts).
     await this.prepareClaudeMod();
+    // The guides a session reads, such as the setup guide (guides.ts).
+    await this.prepareGuides();
     // The data first, then the views: the new terminal reads its settings as it loads.
     this.loadTerminal();
     this.registerView(BROWSER_VIEW_TYPE, (leaf) => new BrowserView(leaf, this));
@@ -176,6 +184,13 @@ class VaultTerminalPlugin extends import_obsidian.Plugin {
         const to = moved(stringOf(this.pluginData[key] ?? "") || null);
         if (to) { this.pluginData[key] = to; named = true; }
       }
+      // And the folders the plugin writes in: transcripts, and sent files when that's a
+      // vault path (a "./" one is beside each note, so it has nothing to follow).
+      const transcripts = moved(this.folderOf("transcriptsFolder"));
+      if (transcripts) { this.pluginData.names = { ...(this.pluginData.names || {}), transcriptsFolder: transcripts }; named = true; }
+      const sentFolder = stringOf(this.pluginData.sentFilesFolder ?? "").trim();
+      const sentTo = sentFolder && !sentFolder.startsWith("./") ? moved(sentFolder) : null;
+      if (sentTo) { this.pluginData.sentFilesFolder = sentTo; named = true; }
       // And each agent's home folder and instructions note.
       const agents = this.allAgents();
       let agentsMoved = false;
@@ -232,6 +247,11 @@ class VaultTerminalPlugin extends import_obsidian.Plugin {
       id: "new-session",
       name: "New session",
       callback: () => this.startSession("", null)
+    });
+    this.addCommand({
+      id: "set-up-vault",
+      name: "Set up this vault (experimental)",
+      callback: () => this.openVaultSetup()
     });
     this.addCommand({
       id: "open-session-switcher",
@@ -372,7 +392,7 @@ class VaultTerminalPlugin extends import_obsidian.Plugin {
 // The plugin's type: the class, and every part's methods, which applyParts puts on the
 // class's prototype below. Made from the parts themselves, so it can't drift from them;
 // a name two parts both define is a type error here, as it's an error in applyParts.
-interface AgentManagerPlugin extends VaultTerminalPlugin, AgentMethods, ClaudeModMethods, TerminalHostMethods, ShellMethods, TranscriptMethods, ConfigMethods, NoteMethods, LinkMethods, SessionMethods, SetupMethods, TicketMethods, WorkspaceMethods {}
-applyParts(VaultTerminalPlugin, AgentMethods, ClaudeModMethods, TerminalHostMethods, ShellMethods, TranscriptMethods, ConfigMethods, NoteMethods, LinkMethods, SessionMethods, SetupMethods, TicketMethods, WorkspaceMethods);
+interface AgentManagerPlugin extends VaultTerminalPlugin, AgentMethods, ClaudeModMethods, TerminalHostMethods, ShellMethods, TranscriptMethods, ConfigMethods, GuideMethods, NoteMethods, LinkMethods, SessionMethods, SetupMethods, TicketMethods, WorkspaceMethods {}
+applyParts(VaultTerminalPlugin, AgentMethods, ClaudeModMethods, TerminalHostMethods, ShellMethods, TranscriptMethods, ConfigMethods, GuideMethods, NoteMethods, LinkMethods, SessionMethods, SetupMethods, TicketMethods, WorkspaceMethods);
 export { VaultTerminalPlugin };
 export type { AgentManagerPlugin };

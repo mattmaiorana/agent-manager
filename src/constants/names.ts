@@ -18,6 +18,8 @@ const MAIN_SESSION_PROPERTY = "main-session";
 const SOURCE_PROPERTY = "source";
 // Today's chat: found and named by this, with {{date}} as YYYY-MM-DD in local time.
 const DEFAULT_DAILY_NAME = "Daily Chat - {{date}}";
+// Set up this vault's session, found again by this name (plugin/guides.ts).
+const SETUP_SESSION_NAME = "Vault setup";
 // Folders outside the vault that every session is given with --add-dir (a setting,
 // pluginData.addedFolders). Empty by default.
 const DEFAULT_ADDED_FOLDERS: string[] = [];
@@ -46,8 +48,8 @@ const OPENING_LABELS: Record<OpeningKey, [string, string]> = {
   folder: ["Session from a folder", "Sent first to a session started from a folder. {{path}} is the folder's full path."],
   ticket: ["Session from a ticket", "Sent first to a session started from a ticket, while tickets are on. {{path}} is the ticket's full path."],
   agent: ["Agent profile", "Sent first of all to a session that has an agent profile. {{profile}} is its name, {{instructions}} its instructions note's full path."],
-  overviews: ["Overviews", "Sent before the rest to a session started from a note or a folder with overviews above it, while overviews are on. {{overviews}} lists their full paths."],
-  repo: ["Repo", "Sent after the overviews when one of them names a repo in its repo property. {{repo}} is the repo's full path."],
+  overviews: ["Project overviews", "Sent before the rest to a session started from a note or a folder with project overviews above it, while project overviews are on. {{overviews}} lists their full paths."],
+  repo: ["Repo", "Sent after the project overviews when one of them names a repo in its repo property. {{repo}} is the repo's full path."],
 };
 // What the strip's Wrap button types (a setting; empty hides the button). A message that
 // invokes a skill, "/wrap", is typed as Codex invokes one, "$wrap " (wrapLine).
@@ -77,6 +79,10 @@ const SESSION_NAME_PROMPT_SUFFIX = "\"";
 // The marker, with a token unique to this launch after it, so a fresh Codex or
 // Antigravity session finds its own transcript even when another session with the same
 // name started at the same moment (both "Untitled", say).
+// A session's name as one plain line: no control characters, double quotes, or
+// backticks (the marker above ends at the first quote, so one in the name would cut it
+// short), and runs of spaces as one.
+const plainSessionName = (name: string): string => [...name].map((c) => (c.charCodeAt(0) < 32 || c.charCodeAt(0) === 127 || c === "\"" || c === "`" ? " " : c)).join("").replace(/\s+/g, " ").trim();
 const sessionNamePrompt = (title: string, token?: string | null): string => `${SESSION_NAME_PROMPT_PREFIX}${title}${SESSION_NAME_PROMPT_SUFFIX}${token ? ` (launch ${token}).` : "."}`;
-export { DEFAULT_WRAP_MESSAGE, wrapLine, DEFAULT_ADDED_FOLDERS, DEFAULT_DAILY_NAME, DEFAULT_OVERVIEW_NAME, DEFAULT_TICKET_TEMPLATE, DEFAULT_NAMES, MAIN_SESSION_PROPERTY, SOURCE_PROPERTY, DEFAULT_OPENING, NAME_LABELS, OPENING_LABELS, OPENING_LEAD, SESSION_NAME_PROMPT_PREFIX, SESSION_NAME_PROMPT_SUFFIX, sessionNamePrompt };
+export { DEFAULT_WRAP_MESSAGE, wrapLine, DEFAULT_ADDED_FOLDERS, DEFAULT_DAILY_NAME, SETUP_SESSION_NAME, DEFAULT_OVERVIEW_NAME, DEFAULT_TICKET_TEMPLATE, DEFAULT_NAMES, MAIN_SESSION_PROPERTY, SOURCE_PROPERTY, DEFAULT_OPENING, NAME_LABELS, OPENING_LABELS, OPENING_LEAD, SESSION_NAME_PROMPT_PREFIX, SESSION_NAME_PROMPT_SUFFIX, plainSessionName, sessionNamePrompt };
 export type { NameKey, OpeningKey };

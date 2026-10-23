@@ -131,9 +131,11 @@ class TranscriptMethods {
     const id = String(sessionId);
     const ends = [`(${tc.noteIdKey(id)}).md`, `(${tc.noteIdKey(id, true)}).md`];
     const root = this.app.vault.getAbstractFileByPath(this.folderOf("transcriptsFolder"));
-    if (!(root instanceof import_obsidian.TFolder)) return null;
-    const children = [...(root.children || [])];
-    for (const c of root.children || []) if (c instanceof import_obsidian.TFolder) children.push(...c.children);
+    // With no transcripts folder, the search below still runs: the note may have been moved
+    // out before the folder went.
+    const top = root instanceof import_obsidian.TFolder ? root.children : [];
+    const children = [...top];
+    for (const c of top) if (c instanceof import_obsidian.TFolder) children.push(...c.children);
     for (const child of children) {
       if (!(child instanceof import_obsidian.TFile) || !ends.some((e) => child.name.endsWith(e))) continue;
       const fm = this.app.metadataCache.getFileCache(child)?.frontmatter;
@@ -143,7 +145,16 @@ class TranscriptMethods {
         if (tc.noteSessionId(readFileHead(path.join(this.getVaultPath(), child.path), 4096)) === id) return child;
       } catch { /* best effort */ }
     }
-    return null;
+    // Renamed or moved out of the transcripts folder by the user: found by the id in its
+    // frontmatter, anywhere in the vault, so the writer keeps appending to it rather than
+    // starting a second note. Where it was last found is kept, to skip the search.
+    const moved = this._movedTranscriptNotes || (this._movedTranscriptNotes = new Map<string, string>());
+    const ownsId = (f: unknown): f is TFile => f instanceof import_obsidian.TFile && String(this.app.metadataCache.getFileCache(f)?.frontmatter?.session_id || "") === id;
+    const last = this.app.vault.getAbstractFileByPath(moved.get(id) || "");
+    if (ownsId(last)) return last;
+    const found = this.app.vault.getMarkdownFiles().find(ownsId) || null;
+    if (found) moved.set(id, found.path); else moved.delete(id);
+    return found;
   }
 }
 export { TranscriptMethods };

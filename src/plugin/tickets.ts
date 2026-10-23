@@ -8,7 +8,7 @@ import { import_obsidian } from "../externals.js";
 import { MAIN_SESSION_PROPERTY } from "../constants/names.js";
 import { OVERVIEW_TEMPLATE, TICKET_TEMPLATE, TICKETS_BASE_NAME, ticketsBase } from "../constants/tickets.js";
 import { isTicket } from "../context/launch-context.js";
-import { errorMessage, stringOf } from "../util/guards.js";
+import { errorMessage, stringOf, withinVault } from "../util/guards.js";
 import { ChoicePickerModal } from "../ui/modals.js";
 import type { AgentManagerPlugin } from "./main.js";
 class TicketMethods {
@@ -97,7 +97,7 @@ class TicketMethods {
   // note, unless the plugin's own rule is set (a folder path; "./" at its start means
   // beside the note). Its folder is made if it's missing.
   async sentFileDestination(this: AgentManagerPlugin, fileName: string, sourcePath: string): Promise<string> {
-    const own = this.pluginData.sentFiles === "own" ? stringOf(this.pluginData.sentFilesFolder ?? "").trim() || "./Files" : "";
+    const own = this.pluginData.sentFiles === "own" ? withinVault(stringOf(this.pluginData.sentFilesFolder ?? "").trim()) || "./Files" : "";
     let dest: string;
     if (!own) {
       dest = await this.app.fileManager.getAvailablePathForAttachment(fileName, sourcePath);
@@ -123,7 +123,7 @@ class TicketMethods {
   }
   // The note the Tickets button opens: the setting, else the tickets base.
   ticketsNotePath(this: AgentManagerPlugin): string {
-    const v = stringOf(this.pluginData.ticketsNote ?? "").trim().replace(/^\/+/, "");
+    const v = withinVault(stringOf(this.pluginData.ticketsNote ?? "").trim().replace(/^\/+/, ""));
     return v ? (0, import_obsidian.normalizePath)(v) : this.ticketsBasePath();
   }
   async openTicketsNote(this: AgentManagerPlugin): Promise<void> {
@@ -189,7 +189,7 @@ class TicketMethods {
       const file = await this.app.vault.create(p, text);
       await this.app.workspace.getLeaf(false).openFile(file);
     } catch (e) {
-      new import_obsidian.Notice(`Agent Manager: couldn't make the overview: ${stringOf(errorMessage(e))}`);
+      new import_obsidian.Notice(`Agent Manager: couldn't make the project overview: ${stringOf(errorMessage(e))}`);
     }
   }
   // ---- Filing a new ticket ----
@@ -232,11 +232,17 @@ class TicketMethods {
         if (f instanceof import_obsidian.TFile && f.extension === "md") { fresh.add(f.path); this.scheduleTimeout(() => fresh.delete(f.path), 60000); }
       }));
     });
-    this.registerEvent(this.app.metadataCache.on("changed", (f) => {
+    // Only the note the user is working in: notes that arrive another way (an agent
+    // writing them, sync, a git checkout) would each open a picker, stacked. One that
+    // isn't open yet stays watched, and is offered when it's opened (within the minute).
+    const offer = (f: TFile) => {
       if (!fresh.has(f.path) || !this.isTicketNote(f.path)) return;
+      if (this.app.workspace.getActiveFile()?.path !== f.path) return;
       fresh.delete(f.path);
       void this.offerToFileTicket(f);
-    }));
+    };
+    this.registerEvent(this.app.metadataCache.on("changed", (f) => offer(f)));
+    this.registerEvent(this.app.workspace.on("file-open", (f) => { if (f) offer(f); }));
     this.addCommand({
       id: "new-ticket",
       name: "New ticket",
@@ -268,7 +274,7 @@ class TicketMethods {
       }
       if (this.overviewsOn() && file.name !== "Tickets" && !this.app.vault.getAbstractFileByPath(this.overviewPathOf(file))) {
         menu.addItem((item) => item
-          .setTitle("Add an overview to this folder")
+          .setTitle("Add a project overview to this folder")
           .setIcon("file-plus")
           .setSection("action")
           .onClick(() => { void this.newOverview(file); }));

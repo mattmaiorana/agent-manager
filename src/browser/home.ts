@@ -47,7 +47,9 @@ class BrowserMethods {
       if (dateEl) {
         let mtime = Number(row.dataset.sessionMtime) || 0;
         const file = row.dataset.sessionFile;
-        if (file) {
+        // Only rows on show: Recent builds a row for every session and hides all but a
+        // page, and a stat per hidden row on every tab switch adds up.
+        if (file && row.style.display !== "none") {
           try { mtime = fs.statSync(file).mtimeMs; row.dataset.sessionMtime = String(mtime); } catch { /* best effort */ }
         }
         dateEl.setText(this.plugin.shortDate(mtime));
@@ -147,19 +149,17 @@ class BrowserMethods {
     });
     if (agentsMissing && !startGone) this.renderAgentsRow(note);
   }
-  // The AGENTS.md row: the starting folder has none, so offer to create a short one.
+  // The AGENTS.md row: the starting folder has none, so offer to set the vault up with an
+  // agent (plugin/guides.ts), or dismiss. The same button stays in settings and the
+  // command palette once this is gone.
   renderAgentsRow(this: Browser, note: HTMLElement): void {
     const folder = this.plugin.startFolder();
-    note.createDiv({ cls: "agent-manager-setup-title", text: "No AGENTS.md" });
-    note.createDiv({ text: `Claude Code, Codex, and Antigravity read AGENTS.md for how to work in ${folder ? `“${folder}”` : "this vault"}. Create a short one to start from, or dismiss this.` });
+    const title = note.createDiv({ cls: "agent-manager-setup-title", text: "No AGENTS.md" });
+    title.createSpan({ cls: "agent-manager-badge", text: "Experimental" });
+    note.createDiv({ text: `Claude Code, Codex, and Antigravity read AGENTS.md for how to work in ${folder ? `“${folder}”` : "this vault"}. An agent can set one up with you, and more if you'd like: step by step, or on its own and reporting back. It asks before changing anything already here. An AI does the work, so results vary with the CLI and model.` });
     const buttons = note.createDiv({ cls: "agent-manager-setup-buttons" });
-    const create = buttons.createEl("button", { text: "Create AGENTS.md", cls: "mod-cta" });
-    create.addEventListener("click", () => { void (async () => {
-      create.disabled = true;
-      const file = await this.plugin.createAgentsFile();
-      if (file) await this.app.workspace.getLeaf("tab").openFile(file);
-      this.renderBrowser();
-    })(); });
+    const setup = buttons.createEl("button", { text: "Set up this vault", cls: "mod-cta" });
+    setup.addEventListener("click", () => { void this.plugin.openVaultSetup(this); });
     const dismiss = buttons.createEl("button", { text: "Dismiss" });
     dismiss.addEventListener("click", () => { void (async () => {
       await this.plugin.dismissAgentsFile();
@@ -667,8 +667,8 @@ class BrowserMethods {
     const named = id && this.plugin.pluginData.sessionNames?.[id] != null;
     // `named` found the rename in sessionNames.
     if (named) delete (this.plugin.pluginData.sessionNames as Record<string, string>)[id];
-    // And its agent records.
-    if (id) { delete this.plugin.pluginData.sessionAgents?.[id]; delete this.plugin.pluginData.sessionLaunchAgents?.[id]; }
+    // And its agent and side-chat records.
+    if (id) { delete this.plugin.pluginData.sessionAgents?.[id]; delete this.plugin.pluginData.sessionLaunchAgents?.[id]; delete this.plugin.pluginData.sideChats?.[id]; }
     // A session with a file is a store record, which has its id (IndexRecord).
     if (session.backend === "antigravity") this.plugin.forgetAntigravitySession(id as string);
     await this.plugin.savePluginData();

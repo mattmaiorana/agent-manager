@@ -30,13 +30,16 @@ export function readAgents(raw: unknown): AgentDef[] {
     const r = e as Record<string, unknown>;
     const id = typeof r.id === "string" ? r.id : "";
     const name = typeof r.name === "string" ? r.name.trim() : "";
-    if (!id || !name || seen.has(id)) continue;
+    // The name is a folder in the transcripts folder, so one that's a path (only a
+    // hand-edited data.json can hold one) doesn't load.
+    if (!id || !name || seen.has(id) || /[\\/]/.test(name) || name.startsWith(".")) continue;
     seen.add(id);
+    const inside = (v: unknown): string => (typeof v === "string" && !v.split(/[\\/]/).includes("..") ? v : "");
     out.push({
       id,
       name,
-      instructions: typeof r.instructions === "string" ? r.instructions.trim() : "",
-      home: typeof r.home === "string" ? r.home : null,
+      instructions: inside(r.instructions).trim(),
+      home: typeof r.home === "string" && inside(r.home) === r.home ? r.home : null,
       dailyName: typeof r.dailyName === "string" ? r.dailyName : "",
       enabled: r.enabled !== false,
     });

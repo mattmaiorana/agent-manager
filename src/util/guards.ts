@@ -20,4 +20,9 @@ function stringOf(value: unknown): string {
   const given = value as Stringable;
   return String(given);
 }
-export { errorMessage, hasError, isArray, stringOf };
+// A vault path from a setting, or "" when it would reach outside the vault (a ".."
+// part). Settings are checked as they're typed; this covers a data.json edited by hand.
+function withinVault(value: string): string {
+  return value.split(/[\\/]/).includes("..") ? "" : value;
+}
+export { errorMessage, hasError, isArray, stringOf, withinVault };

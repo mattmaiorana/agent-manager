@@ -1,32 +1,14 @@
 // What this machine has: Python 3 (the terminal's helper runs on it) and which agent
-// CLIs are installed; and whether the starting folder has an AGENTS.md. Found in the background once per load, the way the terminal
+// CLIs are installed; and whether the starting folder has an AGENTS.md (the sidebar then
+// offers setup, plugin/guides.ts). Found in the background once per load, the way the terminal
 // itself finds them (its settings' Command and Location, then the login shell's PATH).
 
-import type { TFile } from "obsidian";
-import { import_obsidian } from "../externals.js";
 import { REAL_BACKENDS } from "../constants/backends.js";
 import type { BackendKey } from "../constants/backends.js";
 import type { SetupStatus } from "../types.js";
-import { errorMessage, hasError, isArray, stringOf } from "../util/guards.js";
+import { hasError, isArray } from "../util/guards.js";
 import type { VaultTerminal } from "../vault-terminal/core";
 import type { AgentManagerPlugin } from "./main.js";
-// The AGENTS.md the setup check offers to create: short, plain, and the user's to fill in.
-const STARTER_AGENTS_MD = `# AGENTS.md
-
-How AI agents should work here. Claude Code, Codex, and Antigravity read this file at the start of every session. Keep it short, since it's read every time.
-
-## This vault
-
-- It's an Obsidian vault: notes are Markdown files, linked with [[wikilinks]].
-- What the vault is for, and how its folders are organized: (fill this in)
-
-## How to work here
-
-- Read a note before changing it, and keep its properties (the frontmatter) intact.
-- Ask before deleting, moving, or renaming notes.
-- Save a file next to the work it belongs to: in a \`Files/\` folder beside its note.
-- Anything else every session should know: (fill this in)
-`;
 class SetupMethods {
   // The last check's result, or null before the first one finishes:
   // { python: boolean, installed: { claude: boolean, codex: boolean, antigravity: boolean } }.
@@ -64,18 +46,6 @@ class SetupMethods {
     if (this.app.vault.getAbstractFileByPath(path)) return false;
     const dismissed = isArray(this.pluginData.agentsFileDismissed) ? this.pluginData.agentsFileDismissed : [];
     return !dismissed.includes(this.startFolder());
-  }
-  // Create the starter AGENTS.md in the starting folder; the file, or null.
-  async createAgentsFile(this: AgentManagerPlugin): Promise<TFile | null> {
-    const path = this.agentsFilePath();
-    const existing = this.app.vault.getAbstractFileByPath(path);
-    if (existing) return existing instanceof import_obsidian.TFile ? existing : null;
-    try {
-      return await this.app.vault.create(path, STARTER_AGENTS_MD);
-    } catch (e) {
-      new import_obsidian.Notice(`Agent Manager: couldn't create ${path}: ${stringOf(errorMessage(e))}`);
-      return null;
-    }
   }
   // Stop offering an AGENTS.md for this starting folder.
   async dismissAgentsFile(this: AgentManagerPlugin): Promise<void> {

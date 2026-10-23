@@ -1,11 +1,11 @@
 // Names and the opening a session is sent: settings with defaults, read in one place.
 
 import { fs, import_obsidian, os, path } from "../externals.js";
-import { DEFAULT_WRAP_MESSAGE, DEFAULT_ADDED_FOLDERS, DEFAULT_DAILY_NAME, DEFAULT_NAMES, DEFAULT_OPENING, DEFAULT_OVERVIEW_NAME, DEFAULT_TICKET_TEMPLATE } from "../constants/names.js";
+import { DEFAULT_WRAP_MESSAGE, DEFAULT_ADDED_FOLDERS, DEFAULT_DAILY_NAME, DEFAULT_NAMES, DEFAULT_OPENING, DEFAULT_OVERVIEW_NAME, DEFAULT_TICKET_TEMPLATE, plainSessionName } from "../constants/names.js";
 import { composeOpening, launchContext } from "../context/launch-context.js";
 import type { ContextVault, LaunchContext, LaunchFrom } from "../context/launch-context.js";
 import type { NameKey, OpeningKey } from "../constants/names.js";
-import { isArray, stringOf } from "../util/guards.js";
+import { isArray, stringOf, withinVault } from "../util/guards.js";
 import type { AgentManagerPlugin } from "./main.js";
 class ConfigMethods {
   // A folder or property name: the setting, else its default.
@@ -100,7 +100,8 @@ class ConfigMethods {
     if (agent) return this.agentDailyName(agent);
     const v = this.pluginData.dailyChatName;
     const template = typeof v === "string" && v.trim() ? v.trim() : DEFAULT_DAILY_NAME;
-    return template.replace(/\{\{date\}\}/g, this.todayString());
+    // As a launch names it (plainSessionName), so the lookups find the session it started.
+    return plainSessionName(template.replace(/\{\{date\}\}/g, this.todayString()));
   }
   // What the Wrap button types: the setting, else the default; "" when it's turned off.
   wrapMessage(this: AgentManagerPlugin): string {
@@ -123,7 +124,7 @@ class ConfigMethods {
   }
   // The ticket template's vault path: the setting, else Templates/Ticket.md.
   ticketTemplatePath(this: AgentManagerPlugin): string {
-    const v = stringOf(this.pluginData.ticketTemplate ?? "").trim().replace(/^\/+/, "");
+    const v = withinVault(stringOf(this.pluginData.ticketTemplate ?? "").trim().replace(/^\/+/, ""));
     return (0, import_obsidian.normalizePath)(v || DEFAULT_TICKET_TEMPLATE);
   }
   // What launchContext reads: notes and their frontmatter, from Obsidian's cache.

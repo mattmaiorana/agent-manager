@@ -1,0 +1,8 @@
+interface:
+  display_name: "Wrap"
+  short_description: "Wrap up the current session"
+  default_prompt: "Use $wrap to wrap this session."
+
+policy:
+  # Wrapping is the user's call: $wrap only, never started by the agent.
+  allow_implicit_invocation: false

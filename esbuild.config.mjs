@@ -54,8 +54,52 @@ const claudeMod = {
   },
 };
 
+// The guides (guides/), bundled as text: `import guides from "guide-files"` gives
+// { "vault-setup.md": "...", ... }. The plugin writes them into its own folder at load
+// (src/plugin/guides.ts), where a session it starts reads one. The repo's README goes with
+// them, so the setup session answers questions about the plugin from it, not from memory.
+const GUIDES_ROOT = "guides";
+const guideFiles = {
+  name: "guide-files",
+  setup(build) {
+    build.onResolve({ filter: /^guide-files$/ }, () => ({ path: "guide-files", namespace: "guides" }));
+    build.onLoad({ filter: /.*/, namespace: "guides" }, () => {
+      const files = readdirSync(GUIDES_ROOT).sort().filter((n) => n.endsWith(".md")).map((n) => join(GUIDES_ROOT, n));
+      const map = Object.fromEntries(files.map((f) => [relative(GUIDES_ROOT, f), readFileSync(f, "utf8")]));
+      map["README.md"] = readFileSync("README.md", "utf8");
+      return { contents: `export default ${JSON.stringify(map)};`, loader: "js", watchFiles: [...files, "README.md"], watchDirs: [GUIDES_ROOT] };
+    });
+  },
+};
+
+// The starter skills (skills/), bundled as text the same way: `import skills from
+// "skill-files"` gives { "wrap/SKILL.md": "...", "wrap/agents/openai.yaml": "...", ... }.
+// Written beside the guides, for the setup session to offer to copy (src/plugin/guides.ts).
+const SKILLS_ROOT = "skills";
+function skillFiles(dir = SKILLS_ROOT) {
+  const out = [];
+  for (const name of readdirSync(dir).sort()) {
+    if (name === ".DS_Store") continue;
+    const path = join(dir, name);
+    if (statSync(path).isDirectory()) out.push(...skillFiles(path));
+    else out.push(path);
+  }
+  return out;
+}
+const starterSkills = {
+  name: "skill-files",
+  setup(build) {
+    build.onResolve({ filter: /^skill-files$/ }, () => ({ path: "skill-files", namespace: "skills" }));
+    build.onLoad({ filter: /.*/, namespace: "skills" }, () => {
+      const files = skillFiles();
+      const map = Object.fromEntries(files.map((f) => [relative(SKILLS_ROOT, f), readFileSync(f, "utf8")]));
+      return { contents: `export default ${JSON.stringify(map)};`, loader: "js", watchFiles: files, watchDirs: [SKILLS_ROOT] };
+    });
+  },
+};
+
 export const options = withVaultTerminal({
-  plugins: [claudeMod],
+  plugins: [claudeMod, guideFiles, starterSkills],
   // "use strict" first: an ES module is strict, but the CommonJS output esbuild writes
   // from it is not unless the file says so.
   // Then the bundled packages' licenses, since an install gets only the built files.

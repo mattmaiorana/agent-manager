@@ -110,6 +110,16 @@ async function main(): Promise<void> {
     check("paths: parentheses inside a name", paths2("saved /tmp/report(final).md") === "6:/tmp/report(final).md", paths2("saved /tmp/report(final).md"));
     check("paths: parentheses around a path", paths2("(see note.md)") === "5:note.md", paths2("(see note.md)"));
     check("paths: names in other scripts", paths2("open café.md") === "5:café.md", paths2("open café.md"));
+    const apos = new Set(["Projects/Sam's Project/Overview.md", "Sam's notes.md", "README.md", "/etc/hosts"]);
+    const paths3 = (t: string) => findPaths(t, (p) => apos.has(p)).map((l) => `${l.start}:${l.path}`).join(" | ");
+    check("paths: an apostrophe inside a name", paths3("open Projects/Sam's Project/Overview.md now") === "5:Projects/Sam's Project/Overview.md", paths3("open Projects/Sam's Project/Overview.md now"));
+    check("paths: a bare name with an apostrophe", paths3("Wrote Sam's notes.md.") === "6:Sam's notes.md", paths3("Wrote Sam's notes.md."));
+    check("paths: single quotes around a path", paths3("see 'README.md' and '/etc/hosts'") === "5:README.md | 21:/etc/hosts", paths3("see 'README.md' and '/etc/hosts'"));
+    check("paths: a possessive isn't part of a path", paths3("README.md's first line") === "0:README.md", paths3("README.md's first line"));
+    check("paths: an apostrophe in ordinary text", paths3("it's in README.md, isn't it") === "8:README.md", paths3("it's in README.md, isn't it"));
+    check("paths: a quoted path glued to code", paths3("open('README.md') x='/etc/hosts' --file='README.md',") === "6:README.md | 21:/etc/hosts | 41:README.md", paths3("open('README.md') x='/etc/hosts' --file='README.md',"));
+    check("paths: quoted paths side by side", paths3("'README.md''/etc/hosts'") === "1:README.md | 12:/etc/hosts", paths3("'README.md''/etc/hosts'"));
+    check("paths: curly quotes and a curly possessive", paths3("‘README.md’ and README.md’s end") === "1:README.md | 16:README.md", paths3("‘README.md’ and README.md’s end"));
     check("paths: a path in its own parentheses", paths2("(note.md) and (/tmp/report(final).md)") === "1:note.md | 15:/tmp/report(final).md", paths2("(note.md) and (/tmp/report(final).md)"));
   }
 

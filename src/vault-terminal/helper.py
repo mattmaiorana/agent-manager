@@ -757,8 +757,6 @@ def main():
     except (ValueError, IndexError) as e:
         log("bad arguments: %s" % e)
         return 2
-    if "--ctl-out" not in sys.argv:
-        opts["ctl_out"] = CTL_IN
     return Helper(opts).run()
 
 

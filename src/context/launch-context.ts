@@ -117,7 +117,9 @@ export function composeOpening(template: (key: OpeningPartKey) => string, ctx: L
   const fill = (key: OpeningPartKey) => template(key)
     .replace(/\s*\n\s*/g, " ")
     .trim()
-    .replace(/\{\{(\w+)\}\}/g, (whole, k: string) => (k in all ? all[k] : whole));
+    // A value is one line too: a newline in one (a multi-line repo: property, say) would
+    // reach the terminal as Enter and send the opening early.
+    .replace(/\{\{(\w+)\}\}/g, (whole, k: string) => (k in all ? all[k].replace(/\s*\n\s*/g, " ") : whole));
   const parts: string[] = [];
   if (agent) parts.push(fill("agent"));
   if (ctx.overviews.length) parts.push(fill("overviews"));

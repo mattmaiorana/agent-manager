@@ -108,6 +108,31 @@ class ConfirmModal extends import_obsidian.Modal {
     this.contentEl.empty();
   }
 }
+// Set up this vault, when a setup session ran before: resume it, or start a fresh one that
+// looks around first and offers only what's left.
+class SetupChoiceModal extends import_obsidian.Modal {
+  declare _onResume: () => void;
+  declare _onFresh: () => void;
+  constructor(app: App, onResume: () => void, onFresh: () => void) {
+    super(app);
+    this._onResume = onResume;
+    this._onFresh = onFresh;
+  }
+  override onOpen(): void {
+    this.titleEl.setText("Set up this vault");
+    this.contentEl.createEl("p", { text: "You've started setting up this vault before. Pick up where that session left off, or start a fresh one, which looks at what's already done and offers only the rest." });
+    const buttons = this.contentEl.createDiv({ cls: "modal-button-container" });
+    const cancel = buttons.createEl("button", { text: "Cancel" });
+    cancel.addEventListener("click", () => this.close());
+    const fresh = buttons.createEl("button", { text: "Start fresh" });
+    fresh.addEventListener("click", () => { this.close(); this._onFresh(); });
+    const resume = buttons.createEl("button", { text: "Resume", cls: "mod-cta" });
+    resume.addEventListener("click", () => { this.close(); this._onResume(); });
+  }
+  override onClose(): void {
+    this.contentEl.empty();
+  }
+}
 // Path autocomplete for a setting's text field, on Obsidian's own suggestion popup
 // (AbstractInputSuggest: its position, keys, and closing are Obsidian's), the way Calendar
 // Plus does it: every match, alphabetical, plain text, at most 200 so a large vault stays
@@ -195,5 +220,5 @@ class AgentModal extends import_obsidian.Modal {
     this.contentEl.empty();
   }
 }
-export { AgentModal, FileSuggest, FolderSuggest, ChoicePickerModal, ConfirmModal, SessionSwitcherModal };
+export { AgentModal, FileSuggest, FolderSuggest, ChoicePickerModal, ConfirmModal, SessionSwitcherModal, SetupChoiceModal };
 export type { NewAgentFields };

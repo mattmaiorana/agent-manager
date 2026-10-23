@@ -254,7 +254,12 @@ class ViewTranscriptMethods {
           const copy = await this.app.vault.createBinary(dest, data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength) as ArrayBuffer);
           const link = this.app.metadataCache.fileToLinktext(copy, notePath, false);
           try {
-            await this.plugin._tc().withTranscriptLock(notePath, () => adapter.append(notePath, `\n![[${link}]]\n${marker}\n`));
+            const tc = this.plugin._tc();
+            const id = this._ownSessionId();
+            const lock = id ? tc.transcriptLockKey(this.plugin.folderOf("transcriptsFolder"), id) : notePath;
+            // The note's path as it is once the lock is held: a move between agents'
+            // folders, under the same lock, may have just moved it.
+            await tc.withTranscriptLock(lock, () => adapter.append((id && this.plugin.findTranscriptNoteBySessionId(id)?.path) || notePath, `\n![[${link}]]\n${marker}\n`));
           } catch (e) {
             // Not embedded, so not done: the copy goes too, or the retry would make another.
             try { await this.app.fileManager.trashFile(copy); } catch { /* best effort */ }

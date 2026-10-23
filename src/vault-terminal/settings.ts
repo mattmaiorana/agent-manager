@@ -336,7 +336,7 @@ export const appearanceSettings: Section = (containerEl, core) => {
 
   new Setting(containerEl)
     .setName("Programs can copy to the clipboard")
-    .setDesc("A program in a terminal can put text on the clipboard, as tmux, vim and ssh sessions do to copy for you. Turn this off if you'd rather nothing printed in a terminal could change what Cmd+V pastes. Programs can never read the clipboard.")
+    .setDesc("A program in a terminal can put text on the clipboard, as tmux, vim and ssh sessions do to copy for you, and a notice shows what it copied. Turn this off if you'd rather nothing printed in a terminal could change what Cmd+V pastes. Programs can never read the clipboard.")
     .addToggle((t) =>
       t.setValue(s.programClipboard).onChange(async (v) => {
         s.programClipboard = v;

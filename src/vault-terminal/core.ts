@@ -3,7 +3,7 @@
 // starting terminals, links, notifications, the Dock badge, and the guards
 // that ask before closing a busy one. Everything a host doesn't decide.
 
-import { FileSystemAdapter, Modal, Notice, TFile, normalizePath, type App, type WorkspaceLeaf } from "obsidian";
+import { FileSystemAdapter, Modal, Notice, TFile, TFolder, normalizePath, type App, type WorkspaceLeaf } from "obsidian";
 import { homedir } from "os";
 import { delimiter, isAbsolute, join, relative } from "path";
 import { execFile } from "child_process";
@@ -412,13 +412,23 @@ export class VaultTerminal {
     return this.settings.linkClick === "click" || event.metaKey;
   }
 
-  /** Cmd+click on a path: a file in the vault opens in Obsidian (at the line, if given); anything else is shown in Finder. */
+  /**
+   * Cmd+click on a path: a file in the vault opens in Obsidian (at the line, if given), a
+   * folder in the vault is shown in Obsidian's file explorer, and anything else (outside
+   * the vault, or a folder Obsidian doesn't list, such as .claude/) is shown in Finder.
+   */
   openPath(abs: string, line?: number): void {
     const rel = relative(this.vaultFolder(), abs);
     if (rel && !rel.startsWith("..") && !isAbsolute(rel)) {
       const file = this.app.vault.getAbstractFileByPath(normalizePath(rel));
       if (file instanceof TFile) {
         void this.openNote(file, line);
+        return;
+      }
+      // The file explorer's reveal is an internal API; without it, Finder.
+      const explorer = (this.app as unknown as { internalPlugins?: { getEnabledPluginById?(id: string): { revealInFolder?(f: TFolder): void } | null } }).internalPlugins?.getEnabledPluginById?.("file-explorer");
+      if (file instanceof TFolder && explorer?.revealInFolder) {
+        explorer.revealInFolder(file);
         return;
       }
     }

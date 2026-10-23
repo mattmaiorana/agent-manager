@@ -45,10 +45,26 @@ function core(term: Terminal): Core | null {
   return c && typeof c === "object" ? c : null;
 }
 
-// CoreMouseButton.WHEEL, and CoreMouseAction.UP and DOWN, in xterm's common/Types.ts.
+// CoreMouseButton.LEFT and WHEEL, and CoreMouseAction.UP, DOWN and MOVE, in xterm's common/Types.ts.
+const LEFT = 0;
 const WHEEL = 4;
 const WHEEL_UP = 0;
 const WHEEL_DOWN = 1;
+const BUTTON_UP = 0;
+const BUTTON_DOWN = 1;
+const BUTTON_MOVE = 32;
+
+/**
+ * Sends one left-button report at a cell (0-based): a press, a drag to it, or
+ * the release, in the program's own mouse encoding, as sendWheelReport does.
+ * False if xterm wouldn't send it, null if the internals have moved.
+ */
+export function sendButtonReport(term: Terminal, col: number, row: number, action: "down" | "move" | "up", px: { x: number; y: number }): boolean | null {
+  const service = core(term)?.coreMouseService;
+  if (typeof service?.triggerMouseEvent !== "function") return null;
+  const code = action === "down" ? BUTTON_DOWN : action === "move" ? BUTTON_MOVE : BUTTON_UP;
+  return service.triggerMouseEvent({ col, row, x: px.x, y: px.y, button: LEFT, action: code, ctrl: false, alt: false, shift: false });
+}
 
 /**
  * Sends one wheel report at a cell (0-based), in the program's own mouse

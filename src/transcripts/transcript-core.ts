@@ -232,6 +232,12 @@ function deriveSessionId(file: string, backend: string): string {
 // `long`, those and the last four. Codex ids are time-ordered, so two Codex sessions
 // started within a minute or so share their first eight; the second one's note then
 // takes the long form.
+// The lock a session's transcript note is written under: the transcripts folder and the
+// id's short key. Every write to the note takes it (the writer, a move between agents'
+// folders, the files a session sent), so none of them interleave.
+function transcriptLockKey(lockDir: string, sessionId: string): string {
+  return lockDir + "\n" + noteIdKey(sessionId);
+}
 function noteIdKey(sessionId: string | null | undefined, long = false): string {
   const id = String(sessionId || "");
   return long ? id.slice(0, 8) + "-" + id.slice(-4) : id.slice(0, 8);
@@ -369,7 +375,7 @@ async function writeDurableTranscript(io: TranscriptIO, opts: TranscriptWriteOpt
   // transcripts folder and the id's short key, not the full id: two sessions whose ids
   // share their first eight characters would otherwise both find no note and pick one
   // name for it.
-  return withTranscriptLock((opts.lockDir || dir) + "\n" + noteIdKey(fullId), async () => {
+  return withTranscriptLock(transcriptLockKey(opts.lockDir || dir, fullId), async () => {
     let names: string[] = [];
     try { names = (await io.list(dir)) || []; } catch { /* best effort */ }
     let relPath: string | null = null;
@@ -414,6 +420,7 @@ export {
   transcriptHeader,
   transcriptBasename,
   noteIdKey,
+  transcriptLockKey,
   noteSessionId,
   withTranscriptLock,
   deriveSessionId,

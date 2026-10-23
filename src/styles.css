@@ -777,6 +777,36 @@ body.agent-manager-show-tab-title .workspace-tab-header[data-type="agent-manager
 	color: var(--text-normal);
 }
 
+/* Settings buttons (Set up, Add an agent profile): Obsidian's own hover barely shows on a
+   plain button, so the color moves toward the text color, as the terminal's confirm
+   dialogs do (src/vault-terminal/styles.css). */
+.agent-manager-button {
+	--agent-manager-hover-toward: var(--text-normal);
+	--agent-manager-hover-amount: 20%;
+}
+.theme-dark .agent-manager-button {
+	--agent-manager-hover-toward: white;
+	--agent-manager-hover-amount: 28%;
+}
+@media (hover: hover) {
+	.agent-manager-button:hover {
+		background-color: color-mix(in srgb, var(--interactive-normal), var(--agent-manager-hover-toward) var(--agent-manager-hover-amount));
+	}
+}
+
+/* "Experimental", beside the setup note's title and the setup setting's name. */
+.agent-manager-badge {
+	display: inline-block;
+	margin-left: 6px;
+	padding: 0 6px;
+	border-radius: var(--radius-s);
+	border: 1px solid var(--background-modifier-border);
+	font-size: var(--font-ui-smaller);
+	font-weight: 500;
+	color: var(--text-muted);
+	vertical-align: middle;
+}
+
 .agent-manager-setup-cli {
 	margin-top: 4px;
 	color: var(--text-normal);

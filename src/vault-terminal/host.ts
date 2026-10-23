@@ -87,6 +87,10 @@ export interface TerminalController {
   output?(text: string): void;
   /** The user typed or pasted this (every path that reaches the program: keys, paste, drops, the menu). The host's own writes (view.write) aren't here. */
   input?(data: string): void;
+  /** The terminal emptied the program's input itself (Cmd+A, then Backspace, in claude): no draft is left. */
+  inputCleared?(): void;
+  /** Whether the program is asking a question (a permission dialog, a menu), so nothing should act on its input box. */
+  dialogShowing?(): boolean;
   /** The program's state changed (status.ts). */
   stateChange?(state: ProgramState | null): void;
   /** The program started; its pid. */

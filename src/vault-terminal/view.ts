@@ -17,13 +17,13 @@ import type { CloseReason } from "./close";
 import type { TerminalController } from "./host";
 import { afterExitKey, ctrlCCopies } from "./keys";
 import { HelperSession, validSize, type ExitInfo, type Foreground, type StartError } from "./session";
-import { findPaths, findUrls } from "./links";
+import { findPaths, findUrls, type FoundPath } from "./links";
 import { clipboardHasOnlyImage, clipboardText, copyText } from "./clipboard";
 import { StatusTracker, type Attention, type ProgramState } from "./status";
 import { agentById, agentFor, agentForProgram, type AgentProfile } from "./agents";
 import { readLook } from "./theme";
 import { ReportQueue, WheelCounter, scrollSpeed } from "./wheel";
-import { cellSize, resyncViewport, scrollBuffer, sendWheelReport } from "./xterm-internals";
+import { cellSize, resyncViewport, scrollBuffer, sendButtonReport, sendWheelReport } from "./xterm-internals";
 import { PictureLayer } from "./pictures";
 import { GraphicsFilter, PICTURE_LINK, findPattern, withoutPlaceholders } from "./kitty";
 
@@ -88,6 +88,17 @@ const RESET_ROWS = 5;
 const MODIFIER_KEYS = new Set(["Shift", "Control", "Alt", "Meta", "CapsLock", "Fn"]);
 // OSC 52 payloads past this are ignored rather than decoded.
 const CLIPBOARD_WRITE_LIMIT = 8 * 1024 * 1024;
+/** How far from the cursor Cmd+A looks for the borders of claude's input box. */
+const PROMPT_ROWS = 80;
+/** The gap between the reports of Cmd+A's drag over claude's input. */
+const DRAG_STEP_MS = 20;
+/** The gap between the keys that clear claude's input, so each is read as a key, not a paste. */
+const CLEAR_KEY_GAP_MS = 15;
+/** How much of copied text the notice shows, and for how long. */
+const COPIED_SHOWN = 80;
+const COPIED_NOTICE_MS = 5000;
+/** How long a line's file paths are kept before its files are checked again. */
+const PATHS_KEPT_MS = 2000;
 
 // Each state's tab icon, first choice first: icon names vary between the
 // Lucide versions Obsidian has shipped.
@@ -153,6 +164,16 @@ export class TerminalView extends ItemView {
   private startDir = homedir();
   /** The shell's current folder, once it reports one (OSC 7); then relative paths are from here. */
   private currentDir: string | null = null;
+  /** The file paths last found in a line, for a moment (linksOn). */
+  private pathsKept: { text: string; dir: string; at: number; found: FoundPath[] } | null = null;
+  /** The last selection Cmd+A made of claude's input, and its rows' indent (selectPrompt). */
+  private promptSelection: { text: string; indent: number; col: number; row: number; length: number } | null = null;
+  /** What Cmd+A's drag and its Backspace still have to send (later, cancelPending). */
+  private pendingSends = new Set<number>();
+  /** The notice that says a program copied to the clipboard, while it shows. */
+  private copiedNotice: Notice | null = null;
+  /** Undoes guardClose's hold on the leaf's detach. */
+  private unguardClose: (() => void) | null = null;
   /** Where each prompt started (OSC 133;A), for Cmd+Up and Cmd+Down. */
   private promptMarks: IMarker[] = [];
   private search = new SearchAddon();
@@ -469,8 +490,10 @@ export class TerminalView extends ItemView {
       return true;
     }));
     // OSC 52, a program setting or reading the clipboard: setting is
-    // allowed; reading is refused, so nothing on the clipboard ever goes
-    // back to a program without the user pasting it.
+    // allowed, and said in a notice with the start of what was copied, so
+    // text that turns up on a paste is never a surprise; reading is
+    // refused, so nothing on the clipboard ever goes back to a program
+    // without the user pasting it.
     term.parser.registerOscHandler(52, this.guarded(true, (data: string) => {
       if (!this.core.settings.programClipboard) return true;
       const semi = data.indexOf(";");
@@ -478,7 +501,9 @@ export class TerminalView extends ItemView {
       if (!payload || payload === "?" || payload.length > CLIPBOARD_WRITE_LIMIT) return true;
       // Base64 only: Node's decoder never fails, so anything else would be copied as garbage.
       if (!/^[A-Za-z0-9+/]*={0,2}$/.test(payload)) return true;
-      copyText(Buffer.from(payload, "base64").toString("utf8"));
+      const text = Buffer.from(payload, "base64").toString("utf8");
+      copyText(text);
+      this.saidCopied(text, true);
       return true;
     }));
     // Which Option key is down, before xterm sees the key it modifies.
@@ -508,7 +533,10 @@ export class TerminalView extends ItemView {
     // so a program never sees a press without its release.
     let rightHeld = false;
     this.registerDomEvent(this.pane, "mousedown", (e) => {
-      if (e.button !== 2) return;
+      if (e.button !== 2) {
+        this.promptSelection = null;
+        return;
+      }
       rightHeld = !e.shiftKey && term.modes.mouseTrackingMode !== "none";
       if (rightHeld) e.stopPropagation();
     }, { capture: true });
@@ -590,6 +618,8 @@ export class TerminalView extends ItemView {
 
   protected override async onClose(): Promise<void> {
     this.core.liveViews.delete(this);
+    this.unguardClose?.();
+    this.unguardClose = null;
     try {
       this.controller?.closed?.();
     } catch (e) {
@@ -618,6 +648,145 @@ export class TerminalView extends ItemView {
     this.status = null;
     // Once this view is gone from the workspace, it no longer counts.
     window.setTimeout(() => this.core.updateBadge(), 0);
+  }
+
+  /**
+   * Selects what's typed in claude's input box, so Cmd+C copies it: the
+   * cells after its prompt mark (❯ and a no-break space) through the last
+   * written cell before the box's lower border. The box is the rows between
+   * the two borders (rows starting with a run of ─, the top one with the
+   * session's name in it) around the cursor, which is always in it. An empty box, or one showing only its dim placeholder, selects
+   * nothing. False when there's no box to find. Read from the screen, so
+   * it's checked at every step: anything it doesn't recognize is no box.
+   */
+  private selectPrompt(): boolean {
+    const term = this.term;
+    if (!term) return false;
+    const buf = term.buffer.active;
+    const text = (y: number) => buf.getLine(y)?.translateToString(true) ?? "";
+    // A border starts with a run of ─ and spans the width (the top one can
+    // carry the session's name in it), so a rule pasted into the input isn't one.
+    const border = (y: number) => {
+      const row = text(y);
+      return /^\s*─{8,}/.test(row) && row.length >= term.cols - 2;
+    };
+    this.promptSelection = null;
+    // A question claude is asking (a permission dialog, a menu) is no input box.
+    if (this.controller?.dialogShowing?.()) return false;
+    const cursor = buf.baseY + buf.cursorY;
+    let top = -1;
+    let bottom = -1;
+    for (let y = cursor; y >= Math.max(0, cursor - PROMPT_ROWS); y--) if (border(y)) { top = y; break; }
+    for (let y = cursor; y < Math.min(buf.length, cursor + PROMPT_ROWS); y++) if (border(y)) { bottom = y; break; }
+    if (top < 0 || bottom <= top + 1) return false;
+    const cell = buf.getNullCell();
+    const first = buf.getLine(top + 1);
+    if (!first) return false;
+    // The prompt mark's column, read by cell, since a wide character takes two.
+    let mark = -1;
+    for (let x = 0; x < term.cols && x < 4; x++) {
+      if (first.getCell(x, cell)?.getChars() === "❯") { mark = x; break; }
+    }
+    if (mark < 0) return false;
+    // A menu's chosen option ("❯ 1. Yes") is marked the same way.
+    if (/^\s*❯\s*\d+\./.test(text(top + 1))) return false;
+    const start = mark + 2;
+    // The last row of the box with text written in it, and that text's last column.
+    const lastCol = (y: number): number => {
+      const line = buf.getLine(y);
+      if (!line) return -1;
+      for (let x = term.cols - 1; x >= (y === top + 1 ? start : 0); x--) {
+        const c = line.getCell(x, cell);
+        const ch = c?.getChars() ?? "";
+        if (ch && ch.trim()) return x + Math.max(1, c?.getWidth() ?? 1) - 1;
+      }
+      return -1;
+    };
+    let last = bottom - 1;
+    while (last > top + 1 && lastCol(last) < 0) last--;
+    const end = lastCol(last);
+    term.clearSelection();
+    if (end < 0) return true;
+    // Only the dim placeholder claude shows in an empty box: nothing to select.
+    if (last === top + 1 && first.getCell(start, cell)?.isDim()) return true;
+    const length = (last - top - 1) * term.cols + end + 1 - start;
+    // With the mouse claude's (its full screen), it's claude's own selection,
+    // made as a drag would be: a press at the first character, a drag to the
+    // last, a release. That's the selection a drag by hand makes, in claude's
+    // colors, which Backspace deletes and Cmd+C copies as claude does.
+    if (term.modes.mouseTrackingMode !== "none" && this.dragInClaude(start, top + 1, end, last, bottom)) return true;
+    term.select(start, top + 1, length);
+    // claude lines each later row up under the first by indenting it as far as
+    // the prompt mark: a copy of this selection drops that indent.
+    this.promptSelection = { text: term.getSelection(), indent: start, col: start, row: top + 1, length };
+    return true;
+  }
+
+  /**
+   * Drags over claude's input with mouse reports, from the first character
+   * (buffer column and row, 0-based) to the last: press, drag, release, each
+   * its own report a moment apart, as a hand would. False when the reports
+   * can't be sent (xterm's internals moved), for the terminal's own selection.
+   * `below`: the box's lower border row. Each report goes only to the
+   * program the drag began in, and any key cancels what's left of it.
+   */
+  private dragInClaude(col: number, row: number, endCol: number, endRow: number, below: number): boolean {
+    const term = this.term;
+    const cell = term && cellSize(term);
+    if (!term || !cell) return false;
+    const top = term.buffer.active.viewportY;
+    const at = (c: number, r: number) => ({ col: c, row: r - top, px: { x: Math.round((c + 0.5) * cell.width), y: Math.round((r - top + 0.5) * cell.height) } });
+    // The release lands just past the last character, so it's in the selection:
+    // for text that fills its row, at the start of the next row inside the box.
+    const from = at(col, row);
+    const to = endCol + 1 < term.cols ? at(endCol + 1, endRow) : endRow + 1 < below ? at(0, endRow + 1) : at(term.cols - 1, endRow);
+    if (from.row < 0 || to.row >= term.rows) return false;
+    this.cancelPending();
+    const session = this.session;
+    if (sendButtonReport(term, from.col, from.row, "down", from.px) === null) return false;
+    term.clearSelection();
+    this.later(() => { if (this.term === term && this.session === session) sendButtonReport(term, to.col, to.row, "move", to.px); }, DRAG_STEP_MS);
+    this.later(() => { if (this.term === term && this.session === session) sendButtonReport(term, to.col, to.row, "up", to.px); }, 2 * DRAG_STEP_MS);
+    return true;
+  }
+
+  /** Runs `fn` after `ms` unless cancelPending runs first (a key, the program stopping, the tab closing). */
+  private later(fn: () => void, ms: number): void {
+    const win = this.pane.win;
+    const id = win.setTimeout(() => {
+      this.pendingSends.delete(id);
+      fn();
+    }, ms);
+    this.pendingSends.add(id);
+  }
+
+  /** Drops what Cmd+A and its Backspace still had to send. */
+  private cancelPending(): void {
+    for (const id of this.pendingSends) this.pane.win.clearTimeout(id);
+    this.pendingSends.clear();
+  }
+
+  /** Copies the terminal's selection, and says so. Cmd+A's selection of claude's input drops the indent claude lines later rows up with. */
+  private copySelection(): void {
+    const term = this.term;
+    if (!term) return;
+    let text = term.getSelection();
+    const prompt = this.promptSelection;
+    if (prompt && prompt.text === text) text = text.replace(new RegExp(`\n {1,${prompt.indent}}`, "g"), "\n");
+    const copied = withoutPlaceholders(text);
+    copyText(copied);
+    this.saidCopied(copied, false);
+  }
+
+  /** Says text went on the clipboard, with its first words: every copy, the user's or a program's, so the notice never shows only sometimes. */
+  private saidCopied(text: string, byProgram: boolean): void {
+    const flat = text.replace(/\s+/g, " ").trim();
+    const shown = flat.length > COPIED_SHOWN ? `${flat.slice(0, COPIED_SHOWN)}…` : flat;
+    const message = `${byProgram ? `${this.getDisplayText()} copied` : "Copied"} to the clipboard: “${shown}”`;
+    // A fresh notice each time, so its timer starts again; the last one goes, so a
+    // burst never stacks them.
+    this.copiedNotice?.hide();
+    this.copiedNotice = new Notice(message, COPIED_NOTICE_MS);
   }
 
   /** For the dev self-test. */
@@ -695,6 +864,7 @@ export class TerminalView extends ItemView {
 
   /** Ends the program and everything it started; used on plugin unload. */
   stopSession(withFallback = true): void {
+    this.cancelPending();
     const s = this.session;
     this.session = null;
     if (!s) return;
@@ -1086,7 +1256,10 @@ export class TerminalView extends ItemView {
     if (e.isComposing || e.key === "Process" || e.key === "Dead") return true;
     const cmd = e.metaKey && !e.ctrlKey && !e.altKey;
     if (e.type !== "keydown") return !e.metaKey;
-    if (!MODIFIER_KEYS.has(e.key)) this.cancelReset();
+    if (!MODIFIER_KEYS.has(e.key)) {
+      this.cancelReset();
+      this.cancelPending();
+    }
     const send = (data: string) => {
       e.preventDefault();
       this.onInput(data);
@@ -1098,6 +1271,31 @@ export class TerminalView extends ItemView {
     if (e.key === "Escape" && plain && !e.shiftKey && term.hasSelection()) {
       e.preventDefault();
       term.clearSelection();
+      return false;
+    }
+    // Backspace or Delete on what Cmd+A selected in claude's input box clears
+    // the input, as in a text field, with claude's line-editing keys, which
+    // never interrupt a turn (Escape would): Ctrl+K deletes to the end of the
+    // line (and, at the end, joins the next), Ctrl+U to the start, which
+    // claude's docs say clears across lines when repeated. One of each per row
+    // the input takes, and one more, each its own write a moment apart, so
+    // claude reads keys rather than a paste.
+    if ((e.key === "Backspace" || e.key === "Delete") && plain && !e.shiftKey && this.promptSelection && term.hasSelection() && term.getSelection() === this.promptSelection.text) {
+      e.preventDefault();
+      if (this.controller?.dialogShowing?.()) return false;
+      const rows = Math.ceil((this.promptSelection.col + this.promptSelection.length) / term.cols) + 1;
+      this.promptSelection = null;
+      term.clearSelection();
+      const keys = [...Array<string>(rows).fill("\x0b"), ...Array<string>(rows).fill("\x15")];
+      // Each only to the program this began in; any key cancels the rest. Once
+      // all are sent the input is empty, which the host's draft tracking can't
+      // tell from the keys alone (inputCleared).
+      const session = this.session;
+      keys.forEach((k, i) => this.later(() => {
+        if (this.session !== session) return;
+        this.onInput(k);
+        if (i === keys.length - 1) this.controller?.inputCleared?.();
+      }, i * CLEAR_KEY_GAP_MS));
       return false;
     }
     // Page Up and Page Down (Fn+Up, Fn+Down) page the scrollback in a normal
@@ -1121,10 +1319,13 @@ export class TerminalView extends ItemView {
       // With Caps Lock on, Cmd+K comes as "K".
       switch (e.key.length === 1 ? e.key.toLowerCase() : e.key) {
         case "a":
-          // Selects all the terminal's text, the scrollback with it; the
-          // program reads nothing. The find bar's own Cmd+A isn't here.
+          // In claude, selects what's typed in its input box (selectPrompt),
+          // as Cmd+A does in a text field. Anywhere else, or with no box found,
+          // nothing: selecting the whole terminal on a reflex Cmd+A only
+          // confuses; it's Select all in the right-click
+          // menu. The program reads nothing. The find bar's own Cmd+A isn't here.
           e.preventDefault();
-          term.selectAll();
+          if (this.isClaude()) this.selectPrompt();
           return false;
         case "c":
           // Cmd+C never interrupts; Ctrl+C is the interrupt.
@@ -1164,8 +1365,9 @@ export class TerminalView extends ItemView {
         case "k":
           e.preventDefault();
           // The full-screen buffer has no scrollback, and the program owns its
-          // screen; claude there is asked to redraw instead (Ctrl+L, 68), so
-          // Cmd+K does something without blanking it.
+          // screen; claude there is asked to redraw instead (Ctrl+L, which its
+          // docs say redraws and keeps the input), so Cmd+K does something
+          // without blanking it.
           if (term.buffer.active.type === "normal") {
             term.clear();
             // Pictures deleted while the cleared lines showed them can go now.
@@ -1200,7 +1402,7 @@ export class TerminalView extends ItemView {
     // Ctrl+C copies a selection, unless the setting says it always interrupts (keys.ts).
     if (ctrlCCopies(e, term.hasSelection(), !!this.core.settings.ctrlCInterrupts)) {
       e.preventDefault();
-      copyText(withoutPlaceholders(term.getSelection()));
+      this.copySelection();
       return false;
     }
     // Obsidian's (the scope above runs its hotkey); xterm would send a Tab.
@@ -1301,7 +1503,7 @@ export class TerminalView extends ItemView {
     const term = this.term;
     if (!term) return;
     // A picture's placeholder cells are no text.
-    if (term.hasSelection()) copyText(withoutPlaceholders(term.getSelection()));
+    if (term.hasSelection()) this.copySelection();
     else if (this.programCopies()) this.onInput("\x1b[99;9u");
   }
 
@@ -1446,8 +1648,16 @@ export class TerminalView extends ItemView {
    */
   private guardClose(): void {
     const leaf = this.leaf as WorkspaceLeaf & { detach(): void };
+    const own = Object.prototype.hasOwnProperty.call(leaf, "detach");
     const detach = leaf.detach.bind(leaf);
-    leaf.detach = () => {
+    // Put back when this view closes: the leaf can outlive it (another view
+    // type opened in it), and must not keep calling into a closed terminal.
+    this.unguardClose = () => {
+      if (leaf.detach !== guarded) return;
+      if (own) leaf.detach = detach;
+      else delete (leaf as { detach?: () => void }).detach;
+    };
+    const guarded = () => {
       const why = this.core.closingAllowed || this.core.confirmedWindows.has(this.pane.win) ? null : this.closeReason();
       if (!why) return detach();
       // In the terminal's own window: closing a popout detaches its tabs
@@ -1470,6 +1680,7 @@ export class TerminalView extends ItemView {
         }, 100);
       }, win);
     };
+    leaf.detach = guarded;
   }
 
   /** Whether the program is claude: the terminal's own, or recognized by its questions (claudeKeys). */
@@ -1549,13 +1760,14 @@ export class TerminalView extends ItemView {
     this.term.paste(`${paths.map(shellQuote).join(" ")} `);
   }
 
-  /** Right-click: Copy and Paste. */
+  /** Right-click: Copy, Paste, and Select all (the whole terminal, scrollback with it). */
   private showMenu(e: MouseEvent): void {
     if (!this.term) return;
     e.preventDefault();
     const items = [
       { title: "Copy", icon: "copy", disabled: !this.term.hasSelection() && !this.programCopies(), run: () => this.copy() },
       { title: "Paste", icon: "clipboard-paste", disabled: false, run: () => this.pasteFromMenu() },
+      { title: "Select all", icon: "text-select", disabled: false, run: () => this.term?.selectAll() },
     ];
     const menu = new Menu();
     for (const item of items) menu.addItem((i) => i.setTitle(item.title).setIcon(item.icon).setDisabled(item.disabled).onClick(item.run));
@@ -1677,7 +1889,14 @@ export class TerminalView extends ItemView {
     );
     // File paths that exist, from the folder the program started in,
     // or a note in the vault by its vault path or its name alone. A :line after the path opens a note at that line.
-    const paths = findPaths(text, (p) => exists(this.resolve(p)) || !!this.core.vaultNote(p)).map(
+    // xterm asks once per row the pointer enters, and a line's search costs
+    // a stat per candidate, so a line's answer is kept for a moment: moving
+    // across a wrapped line's rows, or back to it, searches it once.
+    const now = Date.now();
+    const kept = this.pathsKept;
+    const found = kept && kept.text === text && kept.dir === this.folder && now - kept.at < PATHS_KEPT_MS ? kept.found : findPaths(text, (p) => exists(this.resolve(p)) || !!this.core.vaultNote(p));
+    if (found !== kept?.found) this.pathsKept = { text, dir: this.folder, at: now, found };
+    const paths = found.map(
       (l): ILink => ({
         text: l.path,
         range: { start: cells[l.start], end: cells[l.end - 1] },
@@ -1914,9 +2133,10 @@ export class TerminalView extends ItemView {
     if (this.controller?.exit?.(info)) return;
     // An agent that failed at once with the terminal's additions is started
     // again once without them, before anything else is decided (the
-    // shell after an agent waits for this). What it printed stays.
+    // shell after an agent waits for this). What it printed stays. A code
+    // of 128 or more is a signal (Ctrl+C is 130): the user stopped it.
     const l = this.launch;
-    if (l && this.ranProgram && l.added.length && !l.plain && typeof info.code === "number" && info.code !== 0 && !info.closed && (info.ran !== undefined ? info.ran * 1000 : Date.now() - l.at) < RETRY_WITHIN_MS) {
+    if (l && this.ranProgram && l.added.length && !l.plain && typeof info.code === "number" && info.code !== 0 && info.code < 128 && !info.closed && (info.ran !== undefined ? info.ran * 1000 : Date.now() - l.at) < RETRY_WITHIN_MS) {
       this.retryPlain(l);
       return;
     }
@@ -2292,7 +2512,6 @@ function filePath(file: File): string {
   return (file as File & { path?: string }).path ?? "";
 }
 
-/** A line's first row of text, for recognizing it again after a reflow. */
 /**
  * A line's whole text from its first row, the rows it wraps onto joined.
  * Each row ends at its last written cell: a wide character that didn't fit

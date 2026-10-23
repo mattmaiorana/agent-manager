@@ -28,7 +28,7 @@ repo:
 
 # {{name}}
 
-What this is, who it's for, and what done looks like. Sessions started from anything in this folder read this first, while overviews are on. If the work has a code repository, put its path in the repo property.
+What this is, who it's for, and what done looks like. Sessions started from anything in this folder read this first, while project overviews are on. If the work has a code repository, put its path in the repo property.
 `;
 
 // A YAML single-quoted scalar: '' is the only escape.

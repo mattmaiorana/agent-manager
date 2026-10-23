@@ -2,7 +2,7 @@
 
 Run Claude Code, Codex, or Antigravity in a tab in Obsidian. Every session is listed in a sidebar, picks up where it left off, and is saved as a note in your vault. Any note can start a session about itself. There's no special setup or folder layout.
 
-macOS only, for now.
+Desktop and macOS only, for now.
 
 ![Agent Manager: the session sidebar beside a note and a Claude Code session](assets/screenshot.png)
 
@@ -14,9 +14,10 @@ macOS only, for now.
 - **Start from any note or folder.** The session is named for it and told to read it, and a note gets a link back to the session in its properties.
 - **Transcripts as notes.** Each session is saved as a Markdown note in one folder (`Agent Transcripts` by default), turn by turn, so you can search, link, and quote it, and it outlasts the CLI's own history.
 - **Three CLIs, one way of working.** Claude Code, Codex, and Antigravity all start, list, resume, and save the same way. Pick a default, or choose per session.
+- **Attach a session to a ticket**, from its tab's menu: "Attach to a ticket" lists the session in the ticket, and "Attach to a ticket as its main session" also makes the ticket's Resume open it, which happens only when you pick it.
 - **Continue Session.** From any session, start a new one that picks up from it, on any CLI. A session started from a note offers a side session, which leaves the note's main session alone, or a new main session, which takes its place. Then choose what it gets: on the same CLI, a copy of the whole conversation (the CLI's own fork) or a fresh start; on another CLI, the transcript to read or a fresh start. A fresh start reads the ticket or the note, or with neither, only the last message, and is told where the transcript is.
 - **Safe to close.** Closing a tab asks first when the agent is working or you have text you haven't sent. When a CLI exits, its tab keeps what it printed, and Enter resumes the session.
-- **Agent profiles, if you need a wall.** Most vaults don't: one session can do any kind of work, and overviews organize it by project. A profile is for keeping things apart, such as work and personal, when each needs its own instructions and its own reference files, not one per role. Turn on Use agent profiles in settings, add one (a name, a note with its instructions, and a home folder), and sessions start with it: Claude Code and Codex get the instructions when the session starts, and every CLI is told about them first thing. A session started from a note in a profile's home folder starts with that profile; a switch at the top of the sidebar picks the profile other sessions start with, and lists only its sessions. Each profile gets its own Daily Chat and its own transcripts folder. Every session is an agent either way: a profile is only who it starts as, and a session with no agent profile can do everything.
+- **Agent profiles, if you need a wall.** Most vaults don't: one session can do any kind of work, and overviews organize it by project. A profile is for keeping things apart, such as work and personal, when each needs its own instructions and its own reference files, not one per role. It isn't access control: every session can still read the same files. Turn on Use agent profiles in settings, add one (a name, a note with its instructions, and a home folder), and sessions start with it: Claude Code and Codex get the instructions when the session starts, and every CLI is told about them first thing. A session started from a note in a profile's home folder starts with that profile; a switch at the top of the sidebar picks the profile other sessions start with, and lists only its sessions. Each profile gets its own Daily Chat and its own transcripts folder. Every session is an agent either way: a profile is only who it starts as, and a session with no agent profile can do everything.
 - **It follows a session that moves.** When Claude's Remote Control or a compaction continues a conversation under a new id, the tab, its pin, its name, and its transcript follow it.
 
 ## Requirements
@@ -42,11 +43,30 @@ To update, replace the three files with the newer release's and reload Obsidian.
 
 ## Your first session
 
-1. Click the robot icon in the ribbon. The sidebar opens. If Python or every CLI is missing, it says what to install. If your vault has no `AGENTS.md`, it offers to create a short one: Claude Code, Codex, and Antigravity all read it for how to work in your vault.
-2. Click **Daily Chat**, or click **New Session**, give the session a name (or leave it blank), pick a CLI, and click Start.
-3. Type to the agent. It works in your vault's folder.
+1. Click the robot icon in the ribbon. The sidebar opens. If Python or every CLI is missing, it says what to install.
+2. If your vault has no `AGENTS.md`, the sidebar offers **Set up this vault** (below). Claude Code, Codex, and Antigravity all read `AGENTS.md` for how to work in your vault. Or dismiss it and start right away.
+3. Click **Daily Chat**, or click **New Session**, give the session a name (or leave it blank), pick a CLI, and click Start.
+4. Type to the agent. It works in your vault's folder.
 
 Close the tab when you're done. The session stays in Recent; click it to pick up where you left off.
+
+## Setting up your vault (experimental)
+
+**Set up this vault** starts a session, named "Vault setup", on your default CLI, that helps you set the vault up for agents. It asks what the vault is for and what's off limits, then offers git, explained plainly (a hidden folder that keeps a copy each time a session saves its work, so anything saved can be rolled back; nothing goes online). Then it asks how you'd like to work: step by step, or on its own. It looks around and tells you what it found, then sets up what's missing: an `AGENTS.md`, a commit rule if you're using git, and a rule for where files go, then, if you'd like them, an example project to show how projects and tickets work, recommendations for which of your own folders could be projects, tickets with a first ticket, a rule to write things down as they happen, a skills folder, the starter skills (below), agent profiles, and a folder for your conventions. Step by step, it asks about each one in turn and makes a change only when you say yes. On its own, it asks you to turn on tickets, then makes the basics, the example project with a sample ticket, a ticket for the setup itself (you make the setup session its main session with one click, so it ends as a real finished ticket you can resume), and the starter wrap skill as new files, then reports back with any change it would make to files you already had, and everything it left out. Either way, it asks before deleting, moving, or changing anything already in your vault, before installing git or making its first commit, and before bringing in anyone else's code, and settings stay yours to change. Close it whenever you like and resume it later; run it again and it offers only what's left.
+
+It's in the sidebar while your vault has no `AGENTS.md`, under **Advanced & experimental** in settings, and in the command palette. It stays experimental: an AI agent does the work, so results vary with the CLI and model you use. Its instructions are a file the plugin keeps in its own folder, [`guides/vault-setup.md`](guides/vault-setup.md), which you can also read, or paste into any session yourself.
+
+## Starter skills
+
+Two skills you can copy into your own skills folder and change however you like, in [`skills/`](skills/): **wrap**, which ends a session with a summary of what was done and what's open (and files it in the session's ticket), and **second-opinion**, which has another company's CLI review a draft or a plan, as close to read-only as each CLI allows. Each runs only when you ask for it (`/wrap` in Claude Code and Antigravity, `$wrap` in Codex). Set up this vault offers to copy them; the plugin keeps the originals in its own folder (`.obsidian/plugins/agent-manager/skills/`, rewritten on each update) and never touches a copy. The second opinion sends what its reviewer reads to that reviewer's company, and its `SKILL.md` says what each CLI's reviewer can and can't be kept from. A newer version doesn't reach a copy you've already made, so check here for one. Also recommended: [obsidian-skills](https://github.com/kepano/obsidian-skills) by Steph Ango (kepano), Obsidian's CEO, which teach agents Obsidian's own formats (Bases, Canvas, Obsidian-flavored Markdown) and its command line. Install them by their own instructions.
+
+## Tips for each CLI
+
+A few of each CLI's own commands worth knowing. They change the CLI's settings, not your vault, and they move between releases, so check each one's `/help`.
+
+- **All three:** `/usage` shows how much of your plan's limits is left (Codex's needs a ChatGPT sign-in), and `/statusline` chooses what the line under the prompt shows.
+- **Claude Code:** `/config` is the settings panel. "Enable Remote Control for all sessions" there lets you follow and continue any session from the Claude app (it needs a claude.ai subscription). `/focus` shows only your last prompt, a one-line summary of what was done, and the final answer; `/focus` again turns it off.
+- **Codex:** its settings live in `~/.codex/config.toml`. `/permissions` chooses what Codex may do without asking, `/theme` picks a color theme, and `/experimental` lists features you can switch on.
 
 ## Where sessions start
 
@@ -77,11 +97,11 @@ Agent Manager runs on your computer and reads and runs a few things outside the 
 
 **Your sign-in and plan:** Agent Manager starts the real CLI, so sign-in, models, and billing stay with the CLI, and a Claude or ChatGPT subscription works as it does in your terminal. It never asks for an API key. By default it keeps the API keys and provider settings in your shell's startup files (such as `ANTHROPIC_API_KEY` and `OPENAI_API_KEY`) away from agents, so nothing moves you onto per-token billing by accident. That list is a setting.
 
-**Your vault:** it writes the picture mod's files into its own plugin folder (above), transcript notes into one folder, copies of files Claude sends you (above), the `main-session` property into a note you start a session from, and an `AGENTS.md` only when you click Create. With tickets on, it also writes `## Session Links` and `## Transcripts` into tickets, and `Tickets.base` and a ticket template where they're missing.
+**Your vault:** it writes the picture mod's files, the setup guide (with a copy of this README, for the setup session's answers), and the starter skills into its own plugin folder (above, `guides/`, and `skills/`), transcript notes into one folder, copies of files Claude sends you (above), the `main-session` property into a note you start a session from, or a ticket you make a session the main session of. It creates no `AGENTS.md` itself: Set up this vault's session writes one only after you've said yes, or chosen to let it set things up on its own. With tickets on, it also writes `## Session Links` and `## Transcripts` into tickets, and `Tickets.base` and a ticket template where they're missing.
 
 ## Known limits
 
-- macOS only. The terminal's helper reads the process table through macOS's own library.
+- Desktop and macOS only. It runs the CLIs on your computer, which Obsidian's mobile apps can't, and the terminal's helper reads the process table through macOS's own library.
 - Antigravity has no way to take an agent profile's instructions when it starts, so it gets them only in the session's first message.
 - A session keeps the agent profile it started with. Move to agent profile… files it under another, but the conversation itself doesn't change.
 

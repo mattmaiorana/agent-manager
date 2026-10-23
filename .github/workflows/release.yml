@@ -65,6 +65,12 @@ jobs:
       - name: Type check
         run: npm run typecheck
 
+      - name: Plugin tests
+        run: npm run test:plugin
+
+      - name: Obsidian review lint
+        run: npm run lint
+
       - name: Build plugin
         run: npm run build
 

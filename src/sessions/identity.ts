@@ -21,6 +21,8 @@ class IdentityMethods {
     this._modelFile = null;
     this._durableReconciledSize = undefined;
     this._durableCaughtUp = false;
+    this._durableMisses = 0;
+    this._durableRetryAt = 0;
     this._forkScanDirMtime = undefined;
     this._modelRefreshedAt = 0;
     this._rehostedFrom = null;
@@ -254,7 +256,9 @@ class IdentityMethods {
   // last message. Runs on the poll's working-to-idle edge; the cheap path (a cached
   // title scan) finds nothing almost always.
   async _detectRehostedSession(this: Session): Promise<boolean> {
-    if (!this.sessionTitle) return false;
+    // Claude only: the direction check reads Claude's message timestamps, so for Codex
+    // and Antigravity a candidate could never pass, and the scan would be wasted.
+    if (!this.sessionTitle || this.getBackendKey() !== "claude") return false;
     const cur = await this._transcriptFile();
     if (!cur) return false;
     const backend = this.getBackendKey();

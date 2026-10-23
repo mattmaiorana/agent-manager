@@ -62,7 +62,9 @@ try {
 // ---- 3. Tests --------------------------------------------------------------------------
 {
   // Each through scripts/run-test.mjs, which bundles it so its source can be JavaScript or TypeScript.
-  for (const file of ["scripts/test-draft.mjs", "scripts/test-transcript-core.mjs", "scripts/test-dialogs.mjs", "scripts/test-follow.mjs", "scripts/test-note-writeback.mjs"]) {
+  // Every scripts/test-*.mjs, so a new test is never left out.
+  const tests = fs.readdirSync("scripts").filter((f) => /^test-.*\.mjs$/.test(f)).sort().map((f) => `scripts/${f}`);
+  for (const file of tests) {
     const r = spawnSync(process.execPath, ["scripts/run-test.mjs", file], { encoding: "utf8" });
     const out = (r.stdout + r.stderr).trim().split("\n");
     r.status === 0 ? pass(`test ${path.basename(file)}`, out[out.length - 1]) : fail(`test ${path.basename(file)}`, out.filter((l) => /FAIL|Error/.test(l)).slice(0, 3).join(" | ") || `exit ${r.status}`);

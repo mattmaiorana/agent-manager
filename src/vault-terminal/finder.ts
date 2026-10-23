@@ -218,8 +218,17 @@ export function probeLoginEnv(shell: string, env: NodeJS.ProcessEnv, signal?: Ab
   });
 }
 
-/** A PATH that works before the login shell has answered: path_helper's plus the usual folders. */
+/**
+ * A PATH that works before the login shell has answered: path_helper's plus
+ * the usual folders. Asked once per load, since every launch and every
+ * host call merges it in and it doesn't change while Obsidian runs.
+ */
+let fallbackPathOnce: Promise<string> | null = null;
 export function fallbackPath(): Promise<string> {
+  return (fallbackPathOnce ??= readFallbackPath());
+}
+
+function readFallbackPath(): Promise<string> {
   const home = homedir();
   const extra = [
     join(home, ".local/bin"),

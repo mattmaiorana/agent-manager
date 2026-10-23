@@ -7,15 +7,16 @@
 
 import { import_obsidian } from "../externals.js";
 import { CLI_BACKENDS, SIDE_SUFFIX_RE } from "../constants/backends.js";
+import { MAIN_SESSION_PROPERTY } from "../constants/names.js";
 import { isLinkFor, keptKind, listsSession, mainSessionIdIn, relabelSessionLinks, SESSION_LINKS, sessionLinkText, transcriptTarget, TRANSCRIPTS, upsertSectionLine } from "../tickets/session-links.js";
 import type { LinkKind } from "../tickets/session-links.js";
 import type { App, Menu, TFile } from "obsidian";
 import type { Session } from "../sessions/controller.js";
 // A fuzzy picker over tickets: each by its name, with its folder below.
 class TicketPickerModal extends import_obsidian.FuzzySuggestModal<TFile> {
-  constructor(app: App, private tickets: TFile[], private onPick: (f: TFile) => void) {
+  constructor(app: App, private tickets: TFile[], private onPick: (f: TFile) => void, placeholder: string) {
     super(app);
-    this.setPlaceholder("Attach this session to a ticket…");
+    this.setPlaceholder(placeholder);
   }
   getItems(): TFile[] { return this.tickets; }
   getItemText(f: TFile): string { return `${f.basename}  ${f.parent?.path ?? ""}`; }
@@ -87,28 +88,52 @@ class ViewTicketMethods {
       this._ticketWriting = false;
     }
   }
-  // The tab's menu: attach this session to a ticket, while tickets are on.
+  // The tab's menu, while tickets are on: attach this session to a ticket, or make it a
+  // ticket's main session. The second is its own item, so a session never becomes a
+  // ticket's main session without being asked to by name.
   paneMenu(this: Session, menu: Menu): void {
     if (!this.plugin.ticketsOn() || !this.sessionTitle || this._inert) return;
-    menu.addItem((i) => i.setTitle("Attach to a ticket").setIcon("ticket").setSection("action").onClick(() => this.pickTicketToAttach()));
+    menu.addItem((i) => i.setTitle("Attach to a ticket").setIcon("ticket").setSection("action").onClick(() => this.pickTicketToAttach(false)));
+    menu.addItem((i) => i.setTitle("Attach to a ticket as its main session").setIcon("ticket").setSection("action").onClick(() => this.pickTicketToAttach(true)));
   }
   // A picker over every ticket (fuzzy, by name and folder), but the ones this session
-  // already writes to.
-  pickTicketToAttach(this: Session): void {
-    const have = new Set(this._ticketTargets().map((t) => t.path));
-    const tickets = this.app.vault.getMarkdownFiles().filter((f) => !have.has(f.path) && this.plugin.isTicketNote(f.path));
+  // already writes to; as main, but the one it was started from and those it's already
+  // the main session of (one it's only Linked to can be picked, and moves up to Main).
+  pickTicketToAttach(this: Session, asMain: boolean): void {
+    const id = this._ownSessionId();
+    if (asMain && (!id || !ID_RE.test(id))) { new import_obsidian.Notice("This session can become a ticket's main session once it has started. Try again after its first turn."); return; }
+    const have = new Set(asMain ? [this._notePath || ""] : this._ticketTargets().map((t) => t.path));
+    const tickets = this.app.vault.getMarkdownFiles().filter((f) => !have.has(f.path) && this.plugin.isTicketNote(f.path) && !(asMain && this.plugin.mainSessionIdOf(f.path) === id));
     if (!tickets.length) { new import_obsidian.Notice("No other tickets to attach this session to."); return; }
-    new TicketPickerModal(this.app, tickets, (f) => { void this.attachToTicket(f.path); }).open();
+    const placeholder = asMain ? "Make this session the main session of which ticket…" : "Attach this session to a ticket…";
+    new TicketPickerModal(this.app, tickets, (f) => { void this.attachToTicket(f.path, asMain); }, placeholder).open();
   }
-  // Attach: its lines go on that ticket as Linked, kept current while it's open. Never
-  // the ticket's main-session. A session can be attached to several.
-  async attachToTicket(this: Session, path: string): Promise<void> {
-    (this._ticketLinks || (this._ticketLinks = {}))[path] = "Linked";
+  // Attach: its lines go on that ticket as Linked, kept current while it's open. A
+  // session can be attached to several. As main (only when asked for by name): the
+  // ticket's main-session is set to this session's resume link, so the base's Chat
+  // column resumes it and its line reads Main; a main session the ticket had becomes
+  // Previous main. A later launch from the ticket takes main back, as any launch does.
+  async attachToTicket(this: Session, path: string, asMain = false): Promise<void> {
+    if (asMain) {
+      const id = this._ownSessionId();
+      const file = this.app.vault.getAbstractFileByPath(path);
+      if (!id || !ID_RE.test(id) || !(file instanceof import_obsidian.TFile)) { new import_obsidian.Notice("Couldn't make this session the ticket's main session."); return; }
+      try {
+        const url = this.plugin.buildResumeLink({ sessionId: id });
+        await this.app.fileManager.processFrontMatter(file, (fm: Record<string, unknown>) => { fm[MAIN_SESSION_PROPERTY] = url; });
+      } catch {
+        new import_obsidian.Notice("Couldn't make this session the ticket's main session.");
+        return;
+      }
+    }
+    // As main, no kind of its own: the line's kind is worked out from main-session.
+    (this._ticketLinks || (this._ticketLinks = {}))[path] = asMain ? null : "Linked";
     this.resetTicketWriteback();
     this._showNoteIcon();
     this.app.workspace.requestSaveLayout();
     await this.maybeWriteTicketBack();
-    new import_obsidian.Notice(this._ownSessionId() ? `Attached to “${path.replace(/^.*\//, "").replace(/\.md$/, "")}”.` : "Attached. Its link goes on the ticket once the session has an id.");
+    const name = path.replace(/^.*\//, "").replace(/\.md$/, "");
+    new import_obsidian.Notice(asMain ? `This session is now the main session of “${name}”.` : this._ownSessionId() ? `Attached to “${name}”.` : "Attached. Its link goes on the ticket once the session has an id.");
   }
   // Forget what was written, so the next poll writes again (a rename, a new id).
   resetTicketWriteback(this: Session): void {

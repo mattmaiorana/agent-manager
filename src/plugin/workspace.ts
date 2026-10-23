@@ -202,10 +202,19 @@ class WorkspaceMethods {
       }
       // One reconcile per tick. The note write-back below doesn't wait for it: it needs
       // only the session's id.
-      if (edge || !v._durableCaughtUp || grew) {
+      // Until there's a file, a tick tries again, but less often as it goes on: a miss
+      // can look across every store folder, and a tab can wait a long time with no file
+      // (a dialog before the first message, a CLI that failed to start).
+      const retryDue = !v._durableCaughtUp && nowMs >= (v._durableRetryAt || 0);
+      if (edge || retryDue || grew) {
         void v.updateDurableTranscript?.();
-        // Caught up only once there's a file to catch up with; until then, every tick tries.
+        // Caught up only once there's a file to catch up with.
         v._durableCaughtUp = !!v._modelFile;
+        if (v._durableCaughtUp) v._durableMisses = 0;
+        else {
+          const misses = (v._durableMisses = (v._durableMisses || 0) + 1);
+          v._durableRetryAt = nowMs + (misses < 15 ? 0 : misses < 40 ? 3000 : 15000);
+        }
       }
       // The note write-back: on each completed turn, and every few seconds until the link
       // is written, so a fresh Codex or Antigravity session's link lands as soon as its

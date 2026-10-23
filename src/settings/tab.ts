@@ -1,4 +1,4 @@
-// The plugin's settings tab: general settings first, then the openings, each CLI, the terminal, and the rarely changed ones under Advanced.
+// The plugin's settings tab: general settings first, then the openings, each CLI, the terminal, and under "Advanced & experimental" the rarely changed ones and Set up this vault.
 
 import { import_obsidian } from "../externals.js";
 import { CLI_BACKENDS, REAL_BACKENDS, isBackendKey } from "../constants/backends.js";
@@ -182,21 +182,22 @@ class AgentManagerSettingsTab extends import_obsidian.PluginSettingTab {
     new import_obsidian.Setting(containerEl)
       .setName("Added folders")
       .setDesc("Folders outside the vault that every session can read and write, one per line, such as a code repository. A leading ~ is your home folder. A folder that isn't on this machine is skipped. Applies to new sessions.")
-      .addTextArea((text) => text
-        .setPlaceholder("~/Code/my-project")
-        .setValue(this.plugin.addedFolderSetting().join("\n"))
-        .onChange(async (value) => {
-          this.plugin.pluginData.addedFolders = value.split("\n").map((l) => l.trim()).filter(Boolean);
+      .addTextArea((text) => {
+        text.setPlaceholder("~/Code/my-project").setValue(this.plugin.addedFolderSetting().join("\n"));
+        // Saved when the field is left, as the other fields are, not on every keystroke.
+        text.inputEl.addEventListener("change", () => { void (async () => {
+          this.plugin.pluginData.addedFolders = String(text.inputEl.value || "").split("\n").map((l) => l.trim()).filter(Boolean);
           await this.save();
-        }));
+        })(); });
+      });
   }
-  // Overviews and tickets: both off until switched on, and each one's own settings shown
+  // Project overviews and tickets: both off until switched on, and each one's own settings shown
   // only while it's on.
   displayContext(containerEl: HTMLElement): void {
-    new import_obsidian.Setting(containerEl).setName("Overviews").setHeading();
+    new import_obsidian.Setting(containerEl).setName("Project overviews").setHeading();
     new import_obsidian.Setting(containerEl)
-      .setName("Use overviews")
-      .setDesc("A folder with an overview note is a project. A session started from a note or a folder is first told to read every overview from the AGENTS.md folder down to it, broadest first, and the repo the nearest one names in its repo property.")
+      .setName("Use project overviews")
+      .setDesc("A folder with a project overview note is a project. A session started from a note or a folder is first told to read every project overview from the AGENTS.md folder down to it, broadest first, and the repo the nearest one names in its repo property. Tickets build on them, so turning tickets on turns these on too.")
       .addToggle((toggle) => toggle
         .setValue(this.plugin.overviewsOn())
         .onChange(async (value) => {
@@ -205,17 +206,18 @@ class AgentManagerSettingsTab extends import_obsidian.PluginSettingTab {
           this.drawSettings();
         }));
     if (this.plugin.overviewsOn()) {
-      this.textSetting(containerEl, "overviewName", "Overview file name", "The note in a folder that describes it.", DEFAULT_OVERVIEW_NAME);
-      this.pathSetting(containerEl, "overviewTemplate", "Overview template", "The note a new overview is made from (the folder menu's Add an overview). {{name}} is the folder's name. Empty is a short one built in.", "Built in");
+      this.textSetting(containerEl, "overviewName", "Project overview file name", "The note in a folder that describes its project.", DEFAULT_OVERVIEW_NAME);
+      this.pathSetting(containerEl, "overviewTemplate", "Project overview template", "The note a new project overview is made from (the folder menu's Add a project overview). {{name}} is the folder's name. Empty is a short one built in.", "Built in");
     }
     new import_obsidian.Setting(containerEl).setName("Tickets").setHeading();
     new import_obsidian.Setting(containerEl)
       .setName("Use tickets")
-      .setDesc("A note with type: ticket in its properties is a ticket: a session started from it is told it's a ticket, and its sessions are listed in it. Turning this on creates a tickets base in the AGENTS.md folder and the ticket template, where they're missing.")
+      .setDesc("A note with type: ticket in its properties is a ticket: a session started from it is told it's a ticket, and its sessions are listed in it. Turning this on also turns on project overviews, since a ticket's session reads its project's overview, and creates a tickets base in the AGENTS.md folder and the ticket template, where they're missing.")
       .addToggle((toggle) => toggle
         .setValue(this.plugin.ticketsOn())
         .onChange(async (value) => {
           this.plugin.pluginData.useTickets = value;
+          if (value) this.plugin.pluginData.useOverviews = true;
           await this.save();
           if (value) await this.plugin.ensureTicketFiles();
           this.rerenderSidebars();
@@ -244,7 +246,7 @@ class AgentManagerSettingsTab extends import_obsidian.PluginSettingTab {
     new import_obsidian.Setting(containerEl).setName("Agent profiles").setHeading();
     new import_obsidian.Setting(containerEl)
       .setName("Use agent profiles")
-      .setDesc("Every session is an agent; a profile is who it starts as. Most vaults need none: one session can do any kind of work, and overviews organize it by project. Profiles are for walling things off, such as work and personal, when each needs its own instructions and its own reference files, not one per role. Turned off, the profiles are kept.")
+      .setDesc("Every session is an agent; a profile is who it starts as. Most vaults need none: one session can do any kind of work, and project overviews organize it by project. Profiles are for walling things off, such as work and personal, when each needs its own instructions and its own reference files, not one per role. Turned off, any added profiles are kept.")
       .addToggle((toggle) => toggle
         .setValue(this.plugin.agentsOn())
         .onChange(async (value) => {
@@ -262,7 +264,7 @@ class AgentManagerSettingsTab extends import_obsidian.PluginSettingTab {
     };
     new import_obsidian.Setting(containerEl)
       .setName("Add an agent profile")
-      .addButton((b) => b.setButtonText("Add").onClick(() => {
+      .addButton((b) => b.setButtonText("Add").setClass("agent-manager-button").onClick(() => {
         new AgentModal(this.app, (name) => agentNameProblem(name, this.plugin.allAgents().map((a) => a.name)), async (f) => {
           const home = parseHome(f.home);
           const list = this.plugin.allAgents();
@@ -503,7 +505,15 @@ class AgentManagerSettingsTab extends import_obsidian.PluginSettingTab {
     return (isArray(stored) && stored.length ? stored : REAL_BACKENDS).filter((k) => isBackendKey(k));
   }
   displayAdvanced(containerEl: HTMLElement): void {
-    new import_obsidian.Setting(containerEl).setName("Advanced").setHeading();
+    new import_obsidian.Setting(containerEl).setName("Advanced & experimental").setHeading();
+    const setupName = createFragment((f) => {
+      f.appendText("Set up this vault");
+      f.createSpan({ cls: "agent-manager-badge", text: "Experimental" });
+    });
+    new import_obsidian.Setting(containerEl)
+      .setName(setupName)
+      .setDesc("Starts a session that helps you set this vault up for agents: an AGENTS.md, where files go, and more if you'd like. You choose whether it asks before each change or sets things up itself and reports back; either way, it asks before changing anything already in the vault. You can close it and resume it later. An AI does the work, so results vary with the CLI and model.")
+      .addButton((b) => b.setButtonText("Set up").setClass("agent-manager-button").onClick(() => { void this.plugin.openVaultSetup(); }));
     if (this.plugin.terminal) pythonSettings(containerEl, this.plugin.terminal);
     new import_obsidian.Setting(containerEl)
       .setName("Load every session tab on restart")

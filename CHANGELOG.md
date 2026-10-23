@@ -4,6 +4,53 @@ All notable changes to Agent Manager are recorded here, in [Keep a Changelog](ht
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-10-23
+
+Onboarding: Set up this vault, with starter skills.
+
+### Added
+
+- **Set up this vault (experimental).** A session, named "Vault setup", that helps you set the vault up for agents: it asks what the vault is for and what's off limits, looks around, and offers an `AGENTS.md`, a rule for where files go, and optional extras (projects, skills, a wrap skill, tickets, agent profiles), each written only when you say yes. It reads its instructions from a guide the plugin keeps in its own folder (`guides/vault-setup.md`), so the opening is short. In the sidebar while there's no `AGENTS.md`, under Advanced & experimental in settings, and in the command palette; when a setup session ran before, it offers to resume it or start fresh. Rather than only describe projects and tickets, it offers an example project (an overview, a decisions note, a sample ticket its overview lists, and a ticket for the setup itself, with the setup session as its main session), ends its report with what to open and try first and an offer to answer questions (from the README, which ships beside the guide), keeps what it says short for people new to all this, and recommends which of your own folders could be projects. It opens with a short welcome, offers git first (explained for people who've never used it), and asks whether to go step by step or set things up on its own and report back; either way it asks before changing anything already in the vault. It stays experimental: an AI does the work, so results vary with the CLI and model.
+- **Starter skills**, `wrap` and `second-opinion`, in `skills/`: written into the plugin's folder, offered by Set up this vault, and copied into your skills folder only when you say yes. Once copied they're yours; the plugin never changes a copy. Both run only when asked. The second opinion's commands keep each reviewer as close to read-only as its CLI allows (tested on Claude Code, Codex, and Antigravity).
+- **Tips for each CLI** in the README.
+- **Attach to a ticket as its main session**, in a session tab's menu: the ticket's Resume opens this session, and a main session it had becomes Previous main. Only when asked; a plain attach still never takes main.
+
+### Changed
+
+- The settings' Advanced section is now **Advanced & experimental**.
+- **Overviews are now Project overviews**, in settings and the folder menu (**Add a project overview to this folder**), so it's clear what they are.
+- **Turning tickets on turns project overviews on too**, since a ticket's session reads its project's overview. Project overviews can still be turned off on their own.
+- **A link that starts a session asks first**, since a link can come from a web page or a note someone else wrote. Starting from a ticket (the tickets board's Launch) doesn't ask. A resume link asks only when the session ran outside this vault.
+- **Cmd+A in Claude Code selects what you've typed** in its input box. In its full-screen mode it's Claude Code's own selection, made as a drag would make it, so Backspace deletes it and Cmd+C copies it as they do after a drag; otherwise the terminal selects it, and Backspace or Delete clears the input without interrupting Claude Code. Elsewhere Cmd+A no longer selects the whole terminal; that's **Select all** in the terminal's right-click menu.
+- **Every copy in the terminal shows a notice** with the start of what was copied: yours (Cmd+C, Ctrl+C, Copy in the menu) and a program's, so text you didn't copy yourself is never a surprise on a paste.
+- The README and the plugin's description say desktop and macOS only, for now.
+- **Set up** and **Add** (an agent profile) in settings show a clear hover, as the terminal's confirm buttons do; Obsidian's own barely shows on a plain button.
+
+### Removed
+
+- **Create AGENTS.md**, the sidebar's starter file, replaced by Set up this vault.
+
+### Fixed
+
+- Cmd+clicking a folder inside the vault shows it in Obsidian's file explorer, not Finder.
+- A path with an apostrophe in a name (`Projects/Sam's Project/Overview.md`) can be Cmd+clicked; a path after a possessive (`README.md's`) links without the `'s`.
+- Hovering a long line in the terminal no longer checks the same file paths again for every row: a line's paths are found once and kept for a moment.
+- The terminal reads macOS's default PATH once per load, not on every launch.
+- An agent stopped with Ctrl+C right after it starts is no longer started again without the terminal's additions.
+- A closed terminal tab no longer stays hooked into its tab's close.
+- The session list stays fast with thousands of Codex sessions: it no longer reads every session file again once there are more than 4,096.
+- A session still waiting for its transcript looks for it less often as time goes on, rather than searching every CLI's sessions several times a second.
+- Renaming or moving a transcript note no longer starts a second one: the session keeps writing to it wherever it is.
+- Renaming the transcripts folder, or the folder for sent files, in the file explorer updates the setting, so new transcripts don't go to a new copy of the old folder.
+- A ticket that appears without you making it (an agent writing it, sync, git) no longer opens a "which project?" picker; only one you're working in does.
+- Resuming a Claude session with an agent profile reads only the end of a long transcript.
+- A double quote in a session's name no longer cuts the name short for Codex and Antigravity.
+- A line break in a value an opening fills in (a multi-line `repo:` property) no longer sends the opening early.
+- Added folders saves when you leave the field, not on every keystroke.
+- A transcript note written to by the session and by its transcript view at once no longer loses one of the writes: both take the same lock.
+- A folder setting (the ticket template, the sent-files folder, the tickets note) that points outside the vault is ignored rather than followed.
+- A session id that isn't a well-formed id is never passed to the CLI on a resume or a fork.
+
 ## [1.2.0] - 2026-10-22
 
 Agent profiles.

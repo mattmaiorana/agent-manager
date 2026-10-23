@@ -1,9 +1,10 @@
 // obsidian:// links: resuming a session, and starting one.
 
 import type { ObsidianProtocolData } from "obsidian";
-import { import_obsidian } from "../externals.js";
+import { fs, import_obsidian, path } from "../externals.js";
 import { CLI_BACKENDS, REAL_BACKENDS } from "../constants/backends.js";
 import type { BackendKey } from "../constants/backends.js";
+import { plainSessionName } from "../constants/names.js";
 import type { AgentManagerPlugin } from "./main.js";
 class LinkMethods {
   //   obsidian://agent-manager?vault=<vault>&op=resume&session=<id>
@@ -13,6 +14,10 @@ class LinkMethods {
   // file menu does, named for it unless the link gives a title.
   // op=resume finds its session by id alone. The operation is `op`, never `action`:
   // Obsidian overwrites a query parameter named `action`.
+  // A link can come from anywhere (a web page, a clipped or shared note), so starting a
+  // session from one asks first, unless it starts from a ticket (the tickets base's
+  // Launch): a web page can't make a note a ticket, since a clipped note's properties come
+  // from the user's template. A resume asks only when the session ran outside this vault.
   async handleProtocolLink(this: AgentManagerPlugin, params: ObsidianProtocolData): Promise<void> {
     // The link can arrive during a cold start, before the workspace can open a leaf.
     await this.whenLayoutReady();
@@ -24,12 +29,7 @@ class LinkMethods {
       // A link's title becomes the session's name, and Codex and Antigravity get it in their
       // first message, so it's kept to one plain line: no control characters or quotes,
       // at most 100 characters.
-      const plain = [...String(params.title || "")].map((c) => (c.charCodeAt(0) < 32 || c.charCodeAt(0) === 127 || c === "\"" || c === "`" ? " " : c)).join("");
-      const title = plain.replace(/\s+/g, " ").trim().slice(0, 100).trim();
-      // A link can come from anywhere (a web page, a shared note). One that names its own
-      // session asks first; a link from a note (a Bases board's Start) doesn't, since what
-      // it sends is the plugin's own opening for that note.
-      if (title && !(await this.askConfirm("Start a session from a link?", `A link asks to start “${title}”${backendOverride ? ` on ${CLI_BACKENDS[backendOverride].label}` : ""}. Start it only if you made or trust the link.`, "Start"))) return;
+      const title = plainSessionName(String(params.title || "")).slice(0, 100).trim();
       const from = String(params.note || "").trim();
       if (from) {
         const file = this.app.vault.getAbstractFileByPath((0, import_obsidian.normalizePath)(from));
@@ -37,17 +37,39 @@ class LinkMethods {
         const isNote = file instanceof import_obsidian.TFile;
         // A ticket's backend property picks its CLI when the link names none.
         if (!backendOverride && isNote) backendOverride = this.ticketBackend(file.path);
+        const on = CLI_BACKENDS[backendOverride || this.defaultLaunchBackend()].label;
+        // Only the base's own link is exempt: a ticket, and nothing else in the link.
+        // One that also names a title or a CLI says more than the base's does, so it asks.
+        const fromBoard = isNote && this.isTicketNote(file.path) && !title && !params.backend;
+        if (!fromBoard && !(await this.askConfirm("Start a session from a link?", `A link asks to start a ${on} session ${isNote ? "about the note" : "in the folder"} “${file.path}”${title ? `, named “${title}”` : ""}. Start it only if you made or trust the link.`, "Start"))) return;
         await this.startSession(title || (isNote ? file.basename : file.name), null, { backendOverride, ...(isNote ? { notePath: file.path } : { folderPath: file.path }) });
         return;
       }
+      const on = CLI_BACKENDS[backendOverride || this.defaultLaunchBackend()].label;
+      if (!(await this.askConfirm("Start a session from a link?", `A link asks to start a ${on} session${title ? ` named “${title}”` : ""}. Start it only if you made or trust the link.`, "Start"))) return;
       await this.startSession(title, null, { backendOverride });
       return;
     }
     await this.revealBrowser();
     const sessionId = params.session;
     if (!sessionId) { say("that link names no session."); return; }
+    // A fresh index, so a session that just started is found as this vault's.
+    this.invalidateSessionIndex();
     const session = await this.findSessionById(sessionId);
     if (session && !this.placeMissing(session)) {
+      // Found outside this vault's sessions (another folder on this machine): resuming
+      // would run an agent there, and list that folder here from then on, so it asks.
+      // Listed isn't proof for Claude: its store names a folder by its path with every
+      // other character as "-", so "My Vault" and "My-Vault" share one; the folder the
+      // transcript itself records decides.
+      // A Claude transcript that records no folder (in the part read) can't prove it.
+      const claude = session.backend === "claude";
+      const recorded = claude && session.file ? this.parseClaudeHead(session.file).cwd : null;
+      const real = (dir: string) => { try { return fs.realpathSync(dir); } catch { return path.resolve(dir); } };
+      const cwds = this.sessionCwds();
+      const listed = (await this.sessionIndex()).some((r) => r.sessionId === session.sessionId && r.listed);
+      const here = listed && (!claude || (!!recorded && (cwds.has(path.resolve(recorded)) || cwds.has(real(recorded)))));
+      if (!here && !(await this.askConfirm("Resume a session from outside this vault?", `A link asks to resume “${session.displayName || session.title || String(sessionId).slice(0, 8)}”, a session that ran in ${recorded || session.cwd || "another folder"}, not in this vault. Resuming runs the agent there. Resume it only if you made or trust the link.`, "Resume"))) return;
       // Already open in a tab? Focus it rather than open a second one.
       const leaf = this.getLeafForSession(session.title, session.backend, session.sessionId);
       if (leaf) {

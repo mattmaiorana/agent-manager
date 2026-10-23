@@ -57,8 +57,14 @@ export interface FoundPath {
 }
 
 // Words that could be a path: no spaces, quotes, or brackets other than
-// parentheses, which file names can contain ("report (final).md").
-const WORD_RE = /[^\s"'`<>[\]{}|]+/g;
+// parentheses, which file names can contain ("report (final).md"). An
+// apostrophe between two letters or digits is part of a name ("Sam's
+// notes.md"); anywhere else it's a quote, as in open('a.md') or x='a.md'.
+// Curly quotes count the same way. Known misses, left as rare: a quote right
+// after a letter, as in Python's f'a.md', and a.md'b.md, read as one name.
+const WORD_RE = /(?:[^\s"'`‘’“”<>[\]{}|]|(?<=[\p{L}\p{N}])['’](?=[\p{L}\p{N}]))+/gu;
+// Where a run of words can't be joined: a quote, a bracket, or a tab.
+const NO_JOIN = /["`‘“”<>[\]{}|\t]|(?<![\p{L}\p{N}])['’]|['’](?![\p{L}\p{N}])/u;
 // A path that runs on past a space: at most this many more words. A note's vault
 // path in nested folders runs to a dozen.
 const MAX_SPACES = 24;
@@ -106,6 +112,13 @@ function looksLikePath(path: string): boolean {
  */
 export function findPaths(text: string, exists: (path: string) => boolean): FoundPath[] {
   const found: FoundPath[] = [];
+  // Each candidate is checked once: trimming makes different runs the same path.
+  const checked = new Map<string, boolean>();
+  const has = (path: string): boolean => {
+    let yes = checked.get(path);
+    if (yes === undefined) checked.set(path, (yes = exists(path)));
+    return yes;
+  };
   const words = [...text.matchAll(WORD_RE)].map((m) => ({ start: m.index, end: m.index + m[0].length, text: m[0] }));
   for (let i = 0; i < words.length; i++) {
     const w = words[i];
@@ -115,9 +128,16 @@ export function findPaths(text: string, exists: (path: string) => boolean): Foun
     for (let j = Math.min(words.length - 1, i + MAX_SPACES); j >= i && !best; j--) {
       const run = text.slice(w.start, words[j].end);
       // Joined only across spaces, never across quotes, brackets or tabs.
-      if (/["'`<>[\]{}|\t]/.test(run)) continue;
+      if (NO_JOIN.test(run)) continue;
       const { path, lead } = trimPath(run);
-      if (path && path !== "/" && looksLikePath(path) && exists(path)) best = { start: w.start + lead, end: w.start + lead + path.length, path };
+      // A possessive after a path (README.md's) isn't part of it, unless a
+      // file by the whole name exists.
+      for (const p of /['’]s$/i.test(path) ? [path, path.slice(0, -2)] : [path]) {
+        if (p && p !== "/" && looksLikePath(p) && has(p)) {
+          best = { start: w.start + lead, end: w.start + lead + p.length, path: p };
+          break;
+        }
+      }
     }
     if (!best) continue;
     found.push(best);

@@ -9,6 +9,8 @@
 import { fs, import_obsidian, path } from "../externals.js";
 import { DEFAULT_AGENT_DAILY_NAME, agentArgs, listedAgent, readAgents, shownUnder } from "../context/agents.js";
 import type { AgentDef } from "../context/agents.js";
+import { readFileTail } from "../sessions/transcript-files.js";
+import { plainSessionName } from "../constants/names.js";
 import type { TFile, WorkspaceLeaf } from "obsidian";
 import type { AgentManagerPlugin } from "./main.js";
 
@@ -155,13 +157,21 @@ class AgentMethods {
   claudeAgentSetting(this: AgentManagerPlugin, sessionId: string): string | null {
     const rec = this.readStore("claude", null, sessionId)[0];
     if (!rec) return null;
-    try {
-      const text = fs.readFileSync(rec.file, "utf8");
+    // From the end, reading more only when the last part doesn't have it: this runs on
+    // the UI thread at every Claude resume, and a long transcript runs to tens of MB.
+    let size = 0;
+    try { size = fs.statSync(rec.file).size; } catch { return null; }
+    for (const n of [262144, 4194304, Infinity]) {
+      let text: string;
+      try { text = n >= size ? fs.readFileSync(rec.file, "utf8") : readFileTail(rec.file, n); } catch { return null; }
       const at = text.lastIndexOf('"agentSetting":"');
-      if (at === -1) return null;
-      const m = text.slice(at).match(/^"agentSetting":"([a-z0-9-]+)"/);
-      return m ? m[1] : null;
-    } catch { return null; }
+      if (at !== -1) {
+        const m = text.slice(at).match(/^"agentSetting":"([a-z0-9-]+)"/);
+        return m ? m[1] : null;
+      }
+      if (n >= size) return null;
+    }
+    return null;
   }
   // A session followed to a new id (a re-host, a compaction, a restore that picked the
   // continuation) takes its agent records with it, unless the new id has its own.
@@ -189,7 +199,8 @@ class AgentMethods {
   // default), with {{profile}} and {{date}} filled in.
   agentDailyName(this: AgentManagerPlugin, agent: AgentDef): string {
     const t = agent.dailyName.trim() || DEFAULT_AGENT_DAILY_NAME;
-    return t.replace(/\{\{profile\}\}/g, agent.name).replace(/\{\{date\}\}/g, this.todayString());
+    // As a launch names it (plainSessionName), so the lookups find the session it started.
+    return plainSessionName(t.replace(/\{\{profile\}\}/g, agent.name).replace(/\{\{date\}\}/g, this.todayString()));
   }
   // Move a session to another agent: its record, its transcript note (into that agent's
   // folder, with its agent property), which list shows it, and the agent a side chat or
@@ -210,7 +221,7 @@ class AgentMethods {
   async moveTranscriptNote(this: AgentManagerPlugin, note: TFile, dir: string, agentName: string | null): Promise<void> {
     const tc = this._tc();
     const id = String(this.app.metadataCache.getFileCache(note)?.frontmatter?.session_id || "");
-    const key = this.folderOf("transcriptsFolder") + "\n" + (id ? tc.noteIdKey(id) : note.path);
+    const key = id ? tc.transcriptLockKey(this.folderOf("transcriptsFolder"), id) : note.path;
     await tc.withTranscriptLock(key, async () => {
       await this.app.fileManager.processFrontMatter(note, (fm: Record<string, unknown>) => {
         if (agentName) fm.agent = agentName; else delete fm.agent;
