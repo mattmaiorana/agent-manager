@@ -20,7 +20,7 @@ class LinkMethods {
     const say = (text: string) => new import_obsidian.Notice(`Agent Manager: ${text}`, 10000);
     if (op === "new") {
       await this.revealBrowser();
-      const backendOverride = this.backendFromName(params.backend);
+      let backendOverride = this.backendFromName(params.backend);
       // A link's title becomes the session's name, and Codex and Antigravity get it in their
       // first message, so it's kept to one plain line: no control characters or quotes,
       // at most 100 characters.
@@ -35,6 +35,8 @@ class LinkMethods {
         const file = this.app.vault.getAbstractFileByPath((0, import_obsidian.normalizePath)(from));
         if (!file || !this.canStartFrom(file)) { say(`there's no note or folder at “${from}” in this vault.`); return; }
         const isNote = file instanceof import_obsidian.TFile;
+        // A ticket's backend property picks its CLI when the link names none.
+        if (!backendOverride && isNote) backendOverride = this.ticketBackend(file.path);
         await this.startSession(title || (isNote ? file.basename : file.name), null, { backendOverride, ...(isNote ? { notePath: file.path } : { folderPath: file.path }) });
         return;
       }

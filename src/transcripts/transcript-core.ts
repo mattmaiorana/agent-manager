@@ -203,8 +203,8 @@ function sanitizeTranscriptName(name: string | null | undefined): string {
     .trim()
     .slice(0, 120) || "Untitled";
 }
-// `source`: a link to the note the session was started from (a wikilink, written as
-// given), or nothing.
+// `source`: a link to the note the session was started from (a wikilink), or the
+// folder's vault path with a trailing slash, written as given, or nothing.
 function transcriptHeader(title: string | null | undefined, sessionId: string | null | undefined, backend: string | null | undefined, source: string | null = null): string {
   const t = title || "Untitled session";
   return [

@@ -15,6 +15,7 @@ import { IdentityMethods } from "./identity.js";
 import { StripMethods } from "./strip.js";
 import { SessionActionMethods } from "./session-actions.js";
 import { ViewNoteMethods } from "../notes/view-note.js";
+import { ViewTicketMethods } from "../notes/view-ticket.js";
 import { ViewTranscriptMethods } from "../transcripts/view-transcripts.js";
 import { DraftTracker } from "./draft.js";
 import { readFileHead } from "./transcript-files.js";
@@ -22,7 +23,8 @@ import { applyParts } from "../util/apply-parts.js";
 import { stringOf } from "../util/guards.js";
 import type { BackendKey, CliBackend } from "../constants/backends.js";
 import type { AgentManagerPlugin } from "../plugin/main.js";
-import type { ForkFrom, IndexRecord, RehostedFrom, SavedSessionState, SessionRecord } from "../types.js";
+import type { LinkKind } from "../tickets/session-links.js";
+import type { ForkFrom, HandoffMode, IndexRecord, RehostedFrom, SavedSessionState, SessionRecord } from "../types.js";
 import type { CloseReason } from "../vault-terminal/close";
 import type { HostLaunch, TerminalController } from "../vault-terminal/host";
 import type { ExitInfo } from "../vault-terminal/session";
@@ -95,6 +97,7 @@ class SessionController implements TerminalController {
   declare _handoffNote: string | null | undefined;
   declare _handoffFromBackend: string | null | undefined;
   declare _handoffIntent: string | null | undefined;
+  declare _handoffMode: HandoffMode | null | undefined;
   declare _daily: boolean | undefined;
   declare _forkFrom: ForkFrom | null | undefined;
   declare _noteSupport: boolean | undefined;
@@ -108,10 +111,25 @@ class SessionController implements TerminalController {
   declare _noteGen: number | undefined;
   declare _noteWriting: boolean | undefined;
   declare _notePriorIds: Set<string> | undefined;
+  // The ticket write-back (notes/view-ticket.ts): tickets this session writes to besides
+  // the one it was started from, each with the kind its line takes (null: its own, or
+  // none yet), what was last written to each, and whether every line is in.
+  declare _ticketLinks: Record<string, LinkKind | null> | undefined;
+  declare _ticketWritten: Record<string, string> | undefined;
+  declare _ticketDone: boolean | undefined;
+  declare _ticketWriting: boolean | undefined;
+  declare _ticketTriedAt: number | undefined;
+  declare _ticketGen: number | undefined;
+  // Continue Session's new main session: it takes main-session only once it has run.
+  declare _noteReplaces: boolean | undefined;
   // Which transcript this is (identity.ts).
   declare _modelFile: string | null | undefined;
   declare _durableReconciledSize: number | undefined;
   declare _durableCaughtUp: boolean | undefined;
+  // Sent files (transcripts/view-transcripts.ts, saveSentFiles): a pass running, and one still to copy.
+  declare _sentFilesSaving: boolean | undefined;
+  declare _sentFilesPending: boolean | undefined;
+  declare _sentFilesScanned: number | null | undefined;
   declare _forkScanDirMtime: number | undefined;
   declare _modelRefreshedAt: number | undefined;
   declare _rehostedFrom: RehostedFrom | null | undefined;
@@ -219,8 +237,10 @@ class SessionController implements TerminalController {
     if (this._noteSupport) state.noteSupport = true;
     if (this._noteClaim) state.noteClaim = true;
     if (this._noteLaunchAt) state.noteLaunchAt = this._noteLaunchAt;
+    if (this._noteReplaces) state.noteReplaces = true;
     if (this._forkFrom) state.forkFrom = this._forkFrom;
     if (this._daily) state.daily = true;
+    if (this._ticketLinks && Object.keys(this._ticketLinks).length) state.ticketLinks = this._ticketLinks;
     // Took a turn: its transcript was found, or it was a resume. A restore that finds no
     // transcript for a tab that never did starts it afresh rather than failing.
     if (this._modelFile || this.resumeSessionId || this._started) state.started = true;
@@ -245,11 +265,13 @@ class SessionController implements TerminalController {
     if (state.noteSupport) this._noteSupport = true;
     if (state.noteClaim) this._noteClaim = true;
     if (typeof state.noteLaunchAt === "number") this._noteLaunchAt = state.noteLaunchAt;
+    if (state.noteReplaces) this._noteReplaces = true;
     // A side chat saved before it learned its id: restore can't tell its fork from
     // another, so it fails rather than guess (_pickRestoreRecord).
     if (state.forkFrom && typeof state.forkFrom === "object") this._forkFrom = state.forkFrom;
     if (typeof state.launchToken === "string") this._launchToken = state.launchToken;
     if (state.daily) this._daily = true;
+    if (state.ticketLinks && typeof state.ticketLinks === "object") this._ticketLinks = { ...state.ticketLinks };
     if (state.started) this._started = true;
     if (state.rehostedFrom && typeof state.rehostedFrom === "object") this._rehostedFrom = state.rehostedFrom;
     if (typeof state.sessionTitle === "string" && state.sessionTitle) {
@@ -477,6 +499,7 @@ class SessionController implements TerminalController {
     this._claimedResumeId = null;
     this._notePath = null;
     this._folderPath = null;
+    this._ticketLinks = {};
     this._rehostedFrom = null;
     this.rebuildStrip();
     this.view.print(message);
@@ -517,7 +540,12 @@ class SessionController implements TerminalController {
     if (this.workingDir) this.plugin.rememberSessionFolder(this.workingDir).catch(() => {});
     // A Claude side chat's id is minted here, so it's recorded as one at once.
     if (fork && backendKey === "claude") this.plugin.adoptSideChat(this.launchSessionId, null, fork.id).catch(() => {});
-    this._opening = fork ? null : this.plugin.buildOpening({ notePath: this._notePath || null, folderPath: this._folderPath || null, daily: !!this._daily });
+    // A session continuing another with nothing to start from is told only to read what
+    // it's handed and wait; the plain opening would tell it to read nothing.
+    const continuing = !!this._handoffMode && this._handoffMode !== "side-chat";
+    this._opening = fork ? null
+      : continuing && !this._notePath && !this._folderPath ? "Then wait for instructions."
+      : this.plugin.buildOpening({ notePath: this._notePath || null, folderPath: this._folderPath || null, daily: !!this._daily });
     this._go();
     if (!fork) void this.sendOpening(title);
     else if (backendKey === "antigravity") void this._sendFork();
@@ -587,7 +615,9 @@ class SessionController implements TerminalController {
     // Close this tab first: it holds the source conversation open.
     this._closeQuietly = true;
     this.leaf?.detach();
-    if (source) void source.pointerSideChat?.(true);
+    // A new main session continues as one, reading the transcript; a side chat as before.
+    if (source && this._noteReplaces) void source.continueSession(this.getBackendKey(), "main", true, true);
+    else if (source) void source.pointerSideChat?.(true);
     else new import_obsidian.Notice("Agent Manager: Antigravity couldn't fork this conversation, and its session isn't open to start a side chat from.", INPUT_GUARD_NOTICE_MS);
   }
   // Resume a session from its record. A resume sends nothing.
@@ -608,14 +638,17 @@ class SessionController implements TerminalController {
     const startOrRoot = path.resolve(start) === path.resolve(this.plugin.getVaultPath()) ? null : start;
     this.workingDir = session.cwd || (this.backendKey === "antigravity" ? startOrRoot : null);
     if (this.workingDir) this.plugin.rememberSessionFolder(this.workingDir).catch(() => {});
-    // A session started from a note keeps that note when resumed: its transcript note
-    // says which (`source`), so its strip icon and its side chats' links come back. A
-    // resume never claims the note's main-session; it rewrites it only while it names
+    // A session started from a note or a folder keeps it when resumed: its transcript
+    // note says which (`source`), so its strip icon and its side chats' links come back.
+    // A resume never claims the note's main-session; it rewrites it only while it names
     // this session.
     if (!this._notePath && !this._folderPath && this.resumeSessionId) {
-      const note = this.plugin.sourceNoteOf(this.resumeSessionId);
-      if (note) { this._notePath = note; this._noteClaim = false; }
+      const src = this.plugin.sourceOf(this.resumeSessionId);
+      if (src && "notePath" in src) { this._notePath = src.notePath; this._noteClaim = false; }
+      else if (src) this._folderPath = src.folderPath;
     }
+    // The tickets that know this session, its own included when its source isn't one.
+    void this._rebindTickets();
     if (this.backendKey === "antigravity" && this.resumeSessionId) this.plugin.rememberAntigravitySession(this.resumeSessionId).catch(() => {});
     this._go();
   }
@@ -687,7 +720,9 @@ class SessionController implements TerminalController {
     const parts = [this._opening, marked ? sessionNamePrompt(title as string, this._launchToken) : ""].filter(Boolean);
     const handoff = this._handoffOpeningSuffix();
     if (parts.length || handoff) {
-      const line = `${OPENING_LEAD} ${parts.join(" ")}${handoff}`;
+      // A continuing session hears where it comes from first; a side chat's note follows.
+      const continuing = !!this._handoffMode && this._handoffMode !== "side-chat";
+      const line = continuing ? `${OPENING_LEAD}${handoff} ${parts.join(" ")}` : `${OPENING_LEAD} ${parts.join(" ")}${handoff}`;
       let sent = false;
       // A dialog that shows as the opening goes in holds it back: once the dialog is
       // answered, whatever of the opening reached the prompt is cleared and it's sent again.
@@ -714,6 +749,7 @@ class SessionController implements TerminalController {
     this._handoffNote = null;
     this._handoffFromBackend = null;
     this._handoffIntent = null;
+    this._handoffMode = null;
   }
   _handoffOpeningSuffix(): string {
     if (!this._handoffNote) return "";
@@ -723,6 +759,11 @@ class SessionController implements TerminalController {
     const fromLabel = (isBackendKey(this._handoffFromBackend) && CLI_BACKENDS[this._handoffFromBackend].label)
       || this._handoffFromBackend || "another backend";
     const intent = this._handoffIntent ? ` In progress: ${this._handoffIntent}.` : "";
+    // Continue Session: the earlier session's transcript, to read in full, only its end,
+    // or only if what this session was given doesn't say enough.
+    if (this._handoffMode === "transcript") return ` This session continues work from an earlier ${fromLabel} session, and shares no memory with it. Its full transcript is saved at "${abs}". Read it for the context before anything else.`;
+    if (this._handoffMode === "last") return ` This session continues work from an earlier ${fromLabel} session, and shares no memory with it. Its transcript is saved at "${abs}": read only its last message, at the end of the note, unless you need more.`;
+    if (this._handoffMode === "pointer") return ` This session continues work from an earlier ${fromLabel} session. If what you've been given doesn't say enough, its transcript is saved at "${abs}".`;
     return ` You are a side chat, started alongside work already underway in a ${fromLabel} session,`
       + ` so we share no conversation memory. The full transcript of that work to date is saved at "${abs}".`
       + ` Read that note for the context, then wait for me to say what this session is for (helping,`
@@ -929,8 +970,8 @@ class SessionController implements TerminalController {
 }
 // A session's type: the class, and every part's methods, which applyParts puts on the
 // class's prototype below. Made from the parts themselves, so it can't drift from them.
-interface Session extends SessionController, ViewTranscriptMethods, StripMethods, ViewNoteMethods, IdentityMethods, SessionActionMethods {}
-applyParts(SessionController, ViewTranscriptMethods, StripMethods, ViewNoteMethods, IdentityMethods, SessionActionMethods);
+interface Session extends SessionController, ViewTranscriptMethods, StripMethods, ViewNoteMethods, ViewTicketMethods, IdentityMethods, SessionActionMethods {}
+applyParts(SessionController, ViewTranscriptMethods, StripMethods, ViewNoteMethods, ViewTicketMethods, IdentityMethods, SessionActionMethods);
 // Is this a session? instanceof finds the class; applyParts above gave every instance the
 // parts, which is what Session adds.
 function isSession(x: unknown): x is Session {

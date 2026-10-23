@@ -5,6 +5,7 @@
 import type { WorkspaceLeaf } from "obsidian";
 import type { Browser } from "./browser/view.js";
 import type { BackendKey } from "./constants/backends.js";
+import type { LinkKind } from "./tickets/session-links.js";
 import type { Session } from "./sessions/controller.js";
 import type { TerminalSettings } from "./vault-terminal/settings";
 import type { VaultTerminalState } from "./vault-terminal/host";
@@ -32,6 +33,27 @@ export interface PluginData {
   sessionFolders?: unknown;
   // Today's chat's name template.
   dailyChatName?: unknown;
+  // Read the overviews above a note or folder a session starts from (off by default).
+  useOverviews?: unknown;
+  // Treat notes with `type: ticket` as tickets (off by default).
+  useTickets?: unknown;
+  // An overview's file name; unset for Overview.md.
+  overviewName?: unknown;
+  // The ticket template's vault path; unset for Templates/Ticket.md.
+  ticketTemplate?: unknown;
+  // What the strip's Wrap button types; "" hides it, unset is the default.
+  wrapMessage?: unknown;
+  // Files a session sends: "off", "own" (sentFilesFolder), else Obsidian's attachment rule.
+  sentFiles?: unknown;
+  // The plugin's own rule: a folder, "./" at its start for beside the note.
+  sentFilesFolder?: unknown;
+  // Show the Tickets button while tickets are on (on unless false), and its name.
+  ticketsButton?: unknown;
+  ticketsButtonName?: unknown;
+  // The note the Tickets button opens, a vault path; unset for the tickets base.
+  ticketsNote?: unknown;
+  // The note a new overview is made from, a vault path; unset for the built-in one.
+  overviewTemplate?: unknown;
   // Starting folders whose AGENTS.md offer was dismissed.
   agentsFileDismissed?: unknown;
   // Renames, by session id.
@@ -118,12 +140,15 @@ export type SavedSessionState = {
   noteSupport?: boolean;
   noteClaim?: boolean;
   noteLaunchAt?: number;
+  noteReplaces?: boolean;
   forkFrom?: ForkFrom;
   daily?: boolean;
   started?: boolean;
   launchToken?: string;
   rehostedFrom?: RehostedFrom;
   sessionId?: string;
+  // Tickets the session writes its lines to besides its source, with each one's kind.
+  ticketLinks?: Record<string, LinkKind | null>;
   // Never saved: set by openSessionLeaf for a tab its caller launches.
   awaitLaunch?: boolean;
 };
@@ -155,7 +180,15 @@ export interface LaunchOptions {
   handoffNote?: string | null;
   handoffFromBackend?: string | null;
   handoffIntent?: string | null;
+  // How the new session is told about the handoff note (controller.ts, _handoffOpeningSuffix):
+  // a side chat that couldn't fork, read the transcript in full, read only its last
+  // message, or just know where it is.
+  handoffMode?: HandoffMode | null;
+  // Continue Session's new main session: it takes the note's main-session over from the
+  // one it continues, so a ticket's one-main check lets it start.
+  newMain?: boolean;
 }
+export type HandoffMode = "side-chat" | "transcript" | "last" | "pointer";
 
 // ---- The session controller (sessions/controller.ts) ----
 

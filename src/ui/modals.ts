@@ -2,7 +2,7 @@
 // a folder or a note typed into a field.
 
 import { import_obsidian } from "../externals.js";
-import type { App, TFolder } from "obsidian";
+import type { App, TAbstractFile, TFile, TFolder } from "obsidian";
 import type { AgentManagerPlugin } from "../plugin/main.js";
 import type { SessionRecord } from "../types.js";
 
@@ -108,31 +108,46 @@ class ConfirmModal extends import_obsidian.Modal {
     this.contentEl.empty();
   }
 }
-// Suggests vault folders for a setting's text field, as the user types: up to 50 whose
-// path contains what's typed, shortest paths first. Folders only, asked of Obsidian as
-// folders (getAllFolders), so no file in the vault is listed to find them.
-class FolderSuggest extends import_obsidian.AbstractInputSuggest<TFolder> {
+// Path autocomplete for a setting's text field, on Obsidian's own suggestion popup
+// (AbstractInputSuggest: its position, keys, and closing are Obsidian's), the way Calendar
+// Plus does it: every match, alphabetical, plain text, at most 200 so a large vault stays
+// fast. Picking one writes it in and fires input and change, so the field saves.
+const MAX_SUGGESTIONS = 200;
+abstract class PathSuggest<T extends TAbstractFile> extends import_obsidian.AbstractInputSuggest<T> {
   declare inputEl: HTMLInputElement;
   constructor(app: App, inputEl: HTMLInputElement) {
     super(app, inputEl);
     this.inputEl = inputEl;
   }
-  getSuggestions(query: string): TFolder[] {
+  abstract candidates(): T[];
+  getSuggestions(query: string): T[] {
     const q = String(query || "").toLowerCase();
-    const out = this.app.vault.getAllFolders(false).filter((f) => !q || f.path.toLowerCase().includes(q));
-    out.sort((a, b) => a.path.length - b.path.length || a.path.localeCompare(b.path));
-    return out.slice(0, 50);
+    return this.candidates()
+      .filter((f) => f.path.toLowerCase().includes(q))
+      .sort((a, b) => a.path.localeCompare(b.path))
+      .slice(0, MAX_SUGGESTIONS);
   }
-  renderSuggestion(folder: TFolder, el: HTMLElement): void {
-    const row = el.createDiv({ cls: "agent-manager-suggest-path" });
-    import_obsidian.setIcon(row.createSpan({ cls: "agent-manager-suggest-icon" }), "folder");
-    row.createSpan({ text: folder.path });
+  renderSuggestion(f: T, el: HTMLElement): void {
+    el.setText(f.path);
   }
-  override selectSuggestion(folder: TFolder): void {
-    this.inputEl.value = folder.path;
+  override selectSuggestion(f: T): void {
+    this.setValue(f.path);
     this.inputEl.trigger("input");
     this.inputEl.trigger("change");
     this.close();
   }
 }
-export { FolderSuggest, ChoicePickerModal, ConfirmModal, SessionSwitcherModal };
+// Folders (asked of Obsidian as folders, so no file is listed to find them), the root aside.
+class FolderSuggest extends PathSuggest<TFolder> {
+  candidates(): TFolder[] { return this.app.vault.getAllFolders(false); }
+}
+// Notes, or with `extensions`, any of those kinds of file (a base, say).
+class FileSuggest extends PathSuggest<TFile> {
+  declare extensions: string[];
+  constructor(app: App, inputEl: HTMLInputElement, extensions: string[] = ["md"]) {
+    super(app, inputEl);
+    this.extensions = extensions;
+  }
+  candidates(): TFile[] { return this.app.vault.getFiles().filter((f) => this.extensions.includes(f.extension)); }
+}
+export { FileSuggest, FolderSuggest, ChoicePickerModal, ConfirmModal, SessionSwitcherModal };

@@ -100,6 +100,7 @@ class BrowserMethods {
       this.renderBrowser();
     });
     if (cardOpen) this.renderNewSessionForm(wrap);
+    this.renderTicketsRow(wrap);
     this.renderTodayRow(wrap);
     this.renderSetupNote(wrap);
     // Let the header paint before the transcript scan, which is synchronous disk I/O.
@@ -179,6 +180,18 @@ class BrowserMethods {
     row.addEventListener("click", go);
     row.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); go(); } });
     this.refreshTodayDot(row);
+  }
+  // The Tickets button, above Daily Chat while tickets and the button are on: it opens
+  // the tickets base, or the note set in settings, under the name set there.
+  renderTicketsRow(this: Browser, wrap: HTMLElement): void {
+    if (!this.plugin.ticketsOn() || this.plugin.pluginData.ticketsButton === false) return;
+    const name = this.plugin.ticketsButtonName();
+    const row = wrap.createDiv({ cls: "agent-manager-tickets", attr: { role: "button", tabindex: "0", "aria-label": `Open ${name}` } });
+    import_obsidian.setIcon(row.createSpan({ cls: "agent-manager-tickets-icon" }), "ticket");
+    row.createDiv({ cls: "agent-manager-today-title", text: name });
+    const go = () => { void this.plugin.openTicketsNote(); };
+    row.addEventListener("click", go);
+    row.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); go(); } });
   }
   // The row's sun: grey until today's chat has run, yellow once it has and is closed, and
   // green while it has a tab (one Obsidian hasn't loaded yet after a reload included).

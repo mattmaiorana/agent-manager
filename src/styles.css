@@ -666,22 +666,6 @@ body.agent-manager-show-tab-title .workspace-tab-header[data-type="agent-manager
 	justify-content: flex-end;
 }
 
-.agent-manager-suggest-path {
-	display: flex;
-	align-items: center;
-	gap: 6px;
-}
-
-.agent-manager-suggest-icon {
-	display: flex;
-	color: var(--text-muted);
-}
-
-.agent-manager-suggest-icon svg {
-	width: 14px;
-	height: 14px;
-}
-
 /* Daily Chat: one row under the header that opens, resumes, or starts the day's chat. */
 .agent-manager-today {
 	display: flex;
@@ -696,6 +680,37 @@ body.agent-manager-show-tab-title .workspace-tab-header[data-type="agent-manager
 
 .agent-manager-today:hover {
 	background-color: var(--background-modifier-hover);
+}
+
+/* The Tickets button, above Daily Chat while tickets are on: the same row, with Daily
+   Chat closer under it. */
+.agent-manager-tickets + .agent-manager-today {
+	margin-top: 8px;
+}
+
+.agent-manager-tickets {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	margin: 18px 0 0;
+	padding: 8px 10px;
+	border-radius: 8px;
+	border: 1px solid var(--background-modifier-border);
+	cursor: pointer;
+}
+
+.agent-manager-tickets:hover {
+	background-color: var(--background-modifier-hover);
+}
+
+.agent-manager-tickets-icon {
+	display: flex;
+	color: var(--text-muted);
+}
+
+.agent-manager-tickets-icon svg {
+	width: 16px;
+	height: 16px;
 }
 
 /* The sun is grey until the day's chat has run, yellow once it has and is closed, and

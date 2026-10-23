@@ -4,7 +4,7 @@
 // from its own onload and onunload, and keeps the settings. One
 // VaultTerminal per plugin load.
 
-import type { Plugin, TFile } from "obsidian";
+import type { Menu, Plugin, TFile } from "obsidian";
 import type { TerminalSettings } from "./settings";
 import type { CloseReason } from "./close";
 import type { ExitInfo } from "./session";
@@ -105,6 +105,8 @@ export interface TerminalController {
   icon?(): string | null;
   /** Why closing asks first: the terminal's own reason (null when it wouldn't ask) given, the host's returned. Used by the tab's and the window's guard alike. */
   closeReason?(own: CloseReason | null): CloseReason | null;
+  /** The tab's menu (right-click on its tab, or its More options): the host adds its own items. */
+  paneMenu?(menu: Menu, source: string): void;
   /** What the host saves in the view's state, and gets back on restore. */
   getState?(): Record<string, unknown>;
   setState?(state: Record<string, unknown>): void;

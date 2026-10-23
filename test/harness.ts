@@ -765,7 +765,7 @@ async function main(): Promise<void> {
   // and here ps, not the tests' own cleanup code, looks for it afterward.
   {
     const leftovers = (tag: string) =>
-      execFileSync("/bin/ps", ["-axE", "-ww", "-o", "pid=,command="], { encoding: "utf8" })
+      execFileSync("/bin/ps", ["-axE", "-ww", "-o", "pid=,command="], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 })
         .split("\n")
         .filter((l) => l.includes(`VAULT_TERMINAL_TEST_RUN=${tag}`) && !l.includes("/bin/ps"))
         .map((l) => l.trim().split(/\s+/)[0]);

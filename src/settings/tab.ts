@@ -2,8 +2,8 @@
 
 import { import_obsidian } from "../externals.js";
 import { CLI_BACKENDS, REAL_BACKENDS, isBackendKey } from "../constants/backends.js";
-import { DEFAULT_DAILY_NAME, DEFAULT_NAMES, DEFAULT_OPENING, NAME_LABELS, OPENING_LABELS } from "../constants/names.js";
-import { FolderSuggest } from "../ui/modals.js";
+import { DEFAULT_DAILY_NAME, DEFAULT_NAMES, DEFAULT_OPENING, DEFAULT_OVERVIEW_NAME, DEFAULT_TICKET_TEMPLATE, NAME_LABELS, OPENING_LABELS } from "../constants/names.js";
+import { FileSuggest, FolderSuggest } from "../ui/modals.js";
 import { AGENTS } from "../vault-terminal/agents";
 import { agentSettings, agentVariableSettings, appearanceSettings, linkSettings, pythonSettings } from "../vault-terminal/settings";
 import { isArray, stringOf } from "../util/guards.js";
@@ -23,10 +23,16 @@ class AgentManagerSettingsTab extends import_obsidian.PluginSettingTab {
   override display(): void {
     this.drawSettings();
   }
+  // A redraw (a switch that shows or hides settings) keeps the scroll position, so the
+  // page doesn't jump to the top under the click.
   drawSettings(): void {
     const { containerEl } = this;
+    const scroller = containerEl.closest<HTMLElement>(".vertical-tab-content-container") ?? containerEl;
+    const top = scroller.scrollTop;
+    const own = containerEl.scrollTop;
     containerEl.empty();
     this.displayGeneral(containerEl);
+    this.displayContext(containerEl);
     this.displayNotes(containerEl);
     this.displayAgents(containerEl);
     const core = this.plugin.terminal;
@@ -36,6 +42,8 @@ class AgentManagerSettingsTab extends import_obsidian.PluginSettingTab {
       linkSettings(containerEl, core);
     }
     this.displayAdvanced(containerEl);
+    scroller.scrollTop = top;
+    containerEl.scrollTop = own;
   }
   async save(): Promise<void> {
     await this.plugin.savePluginData();
@@ -54,6 +62,7 @@ class AgentManagerSettingsTab extends import_obsidian.PluginSettingTab {
       .setDesc(desc)
       .addText((text) => {
         text.setPlaceholder(DEFAULT_NAMES[key]).setValue(stringOf(this.plugin.pluginData.names?.[key] || ""));
+        new FolderSuggest(this.app, text.inputEl);
         text.inputEl.addEventListener("change", () => { void (async () => {
           const d = this.plugin.pluginData;
           d.names = d.names || {};
@@ -109,6 +118,54 @@ class AgentManagerSettingsTab extends import_obsidian.PluginSettingTab {
         })(); });
       });
     new import_obsidian.Setting(containerEl)
+      .setName("Wrap message")
+      .setDesc("Exactly what the wrap button types into the session. To run a skill instead, put its command here, such as /wrap for a skill named wrap. In Codex sessions the plugin rewrites /wrap as $wrap, the form Codex needs. Empty hides the button.")
+      .addTextArea((text) => {
+        text.setValue(this.plugin.wrapMessage());
+        text.inputEl.rows = 2;
+        text.inputEl.addEventListener("change", () => { void (async () => {
+          this.plugin.pluginData.wrapMessage = text.inputEl.value.trim();
+          await this.save();
+        })(); });
+      })
+      .addExtraButton((btn) => btn
+        .setIcon("rotate-ccw")
+        .setTooltip("Restore the default")
+        .onClick(async () => {
+          delete this.plugin.pluginData.wrapMessage;
+          await this.save();
+          this.drawSettings();
+        }));
+    new import_obsidian.Setting(containerEl)
+      .setName("Save generated files")
+      .setDesc("A file a Claude Code session sends you (with its send-file tool) is copied into the vault and shown in the session's transcript note. By default it goes where Obsidian puts a new attachment for the note the session was started from, as set in Obsidian's own settings. Codex and Antigravity have no such tool; a file they make is written where you ask for it.")
+      .addDropdown((drop) => {
+        drop.addOption("obsidian", "Where Obsidian puts attachments");
+        drop.addOption("own", "In a folder set here");
+        drop.addOption("off", "Don't save them");
+        const v = this.plugin.pluginData.sentFiles;
+        drop.setValue(v === "own" || v === "off" ? v : "obsidian");
+        drop.onChange(async (value) => {
+          if (value === "obsidian") delete this.plugin.pluginData.sentFiles; else this.plugin.pluginData.sentFiles = value;
+          await this.save();
+          this.drawSettings();
+        });
+      });
+    if (this.plugin.pluginData.sentFiles === "own") {
+      new import_obsidian.Setting(containerEl)
+        .setName("Folder for sent files")
+        .setDesc("A folder in the vault. Start it with ./ to put it beside the note the session was started from.")
+        .addText((text) => {
+          text.setPlaceholder("./Files").setValue(stringOf(this.plugin.pluginData.sentFilesFolder || ""));
+          new FolderSuggest(this.app, text.inputEl);
+          text.inputEl.addEventListener("change", () => { void (async () => {
+            const v = String(text.inputEl.value || "").trim();
+            if (v) this.plugin.pluginData.sentFilesFolder = v; else delete this.plugin.pluginData.sentFilesFolder;
+            await this.save();
+          })(); });
+        });
+    }
+    new import_obsidian.Setting(containerEl)
       .setName("Keep sessions in their own split")
       .setDesc("Session tabs open in a tab group of their own on the right, and notes never open there.")
       .addToggle((toggle) => toggle
@@ -127,6 +184,84 @@ class AgentManagerSettingsTab extends import_obsidian.PluginSettingTab {
           this.plugin.pluginData.addedFolders = value.split("\n").map((l) => l.trim()).filter(Boolean);
           await this.save();
         }));
+  }
+  // Overviews and tickets: both off until switched on, and each one's own settings shown
+  // only while it's on.
+  displayContext(containerEl: HTMLElement): void {
+    new import_obsidian.Setting(containerEl).setName("Overviews").setHeading();
+    new import_obsidian.Setting(containerEl)
+      .setName("Use overviews")
+      .setDesc("A folder with an overview note is a project. A session started from a note or a folder is first told to read every overview from the AGENTS.md folder down to it, broadest first, and the repo the nearest one names in its repo property.")
+      .addToggle((toggle) => toggle
+        .setValue(this.plugin.overviewsOn())
+        .onChange(async (value) => {
+          this.plugin.pluginData.useOverviews = value;
+          await this.save();
+          this.drawSettings();
+        }));
+    if (this.plugin.overviewsOn()) {
+      this.textSetting(containerEl, "overviewName", "Overview file name", "The note in a folder that describes it.", DEFAULT_OVERVIEW_NAME);
+      this.pathSetting(containerEl, "overviewTemplate", "Overview template", "The note a new overview is made from (the folder menu's Add an overview). {{name}} is the folder's name. Empty is a short one built in.", "Built in");
+    }
+    new import_obsidian.Setting(containerEl).setName("Tickets").setHeading();
+    new import_obsidian.Setting(containerEl)
+      .setName("Use tickets")
+      .setDesc("A note with type: ticket in its properties is a ticket: a session started from it is told it's a ticket, and its sessions are listed in it. Turning this on creates a tickets base in the AGENTS.md folder and the ticket template, where they're missing.")
+      .addToggle((toggle) => toggle
+        .setValue(this.plugin.ticketsOn())
+        .onChange(async (value) => {
+          this.plugin.pluginData.useTickets = value;
+          await this.save();
+          if (value) await this.plugin.ensureTicketFiles();
+          this.rerenderSidebars();
+          this.drawSettings();
+        }));
+    if (!this.plugin.ticketsOn()) return;
+    this.pathSetting(containerEl, "ticketTemplate", "Ticket template", "The note a new ticket is made from. It's never counted as a ticket itself.", DEFAULT_TICKET_TEMPLATE);
+    new import_obsidian.Setting(containerEl)
+      .setName("Show the tickets button")
+      .setDesc("A button at the top of the sidebar that opens your tickets.")
+      .addToggle((toggle) => toggle
+        .setValue(this.plugin.pluginData.ticketsButton !== false)
+        .onChange(async (value) => {
+          if (value) delete this.plugin.pluginData.ticketsButton; else this.plugin.pluginData.ticketsButton = false;
+          await this.save();
+          this.rerenderSidebars();
+          this.drawSettings();
+        }));
+    if (this.plugin.pluginData.ticketsButton === false) return;
+    this.textSetting(containerEl, "ticketsButtonName", "Tickets button name", "What the button says.", "Tickets", () => this.rerenderSidebars());
+    this.pathSetting(containerEl, "ticketsNote", "Tickets button opens", "The note or base the button opens, such as a dashboard that embeds the tickets base. Empty is the tickets base in the AGENTS.md folder.", "Tickets.base");
+  }
+  // A text setting, saved on change (blur or Enter); empty removes it, for its default.
+  textSetting(containerEl: HTMLElement, key: "overviewName" | "ticketsButtonName", name: string, desc: string, placeholder: string, after?: () => void): void {
+    new import_obsidian.Setting(containerEl)
+      .setName(name)
+      .setDesc(desc)
+      .addText((text) => {
+        text.setPlaceholder(placeholder).setValue(stringOf(this.plugin.pluginData[key] || ""));
+        text.inputEl.addEventListener("change", () => { void (async () => {
+          const v = String(text.inputEl.value || "").trim();
+          if (v && v !== placeholder) this.plugin.pluginData[key] = v; else delete this.plugin.pluginData[key];
+          await this.save();
+          after?.();
+        })(); });
+      });
+  }
+  // A vault path setting, saved on change (blur or Enter); empty removes it, for its default.
+  pathSetting(containerEl: HTMLElement, key: "ticketsNote" | "overviewTemplate" | "ticketTemplate", name: string, desc: string, placeholder: string): void {
+    new import_obsidian.Setting(containerEl)
+      .setName(name)
+      .setDesc(desc)
+      .addText((text) => {
+        text.setPlaceholder(placeholder).setValue(stringOf(this.plugin.pluginData[key] || ""));
+        new FileSuggest(this.app, text.inputEl, key === "ticketsNote" ? ["md", "base"] : ["md"]);
+        text.inputEl.addEventListener("change", () => { void (async () => {
+          const v = String(text.inputEl.value || "").trim();
+          if (v) this.plugin.pluginData[key] = (0, import_obsidian.normalizePath)(v); else delete this.plugin.pluginData[key];
+          await this.save();
+        })(); });
+      });
   }
   // What a new session is told first.
   displayNotes(containerEl: HTMLElement): void {
@@ -193,6 +328,7 @@ class AgentManagerSettingsTab extends import_obsidian.PluginSettingTab {
             this.plugin.pluginData.browserBackends = list;
             await this.save();
             this.rerenderSidebars();
+            this.drawSettings();
           }));
       if (status && !status.installed[key]) {
         offer.addExtraButton((btn) => btn
@@ -203,6 +339,8 @@ class AgentManagerSettingsTab extends import_obsidian.PluginSettingTab {
             this.drawSettings();
           }));
       }
+      // A CLI's own settings show only while it's offered.
+      if (!this.storedBackends().includes(key)) continue;
       const agent = AGENTS.find((a) => a.id === key);
       if (core && agent) agentSettings(containerEl, core, agent);
       if (key === "codex") {

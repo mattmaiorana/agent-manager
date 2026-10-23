@@ -12,6 +12,7 @@ import { SetupMethods } from "./setup.js";
 import { ShellMethods } from "./shell.js";
 import { WorkspaceMethods } from "./workspace.js";
 import { TerminalHostMethods } from "./terminal-host.js";
+import { TicketMethods } from "./tickets.js";
 import { AgentManagerSettingsTab } from "../settings/tab.js";
 import { BrowserView } from "../browser/view.js";
 import { BROWSER_VIEW_TYPE, SESSION_VIEW_TYPE } from "../sessions/constants.js";
@@ -19,10 +20,9 @@ import { sessionLinkLabels } from "../notes/link-pills.js";
 import { TranscriptMethods } from "../transcripts/plugin-transcripts.js";
 import { ConfirmModal } from "../ui/modals.js";
 import { applyParts } from "../util/apply-parts.js";
-import { isArray } from "../util/guards.js";
+import { isArray, stringOf } from "../util/guards.js";
 import type { PluginData, SavedSessionState, SessionRecord, SetupStatus } from "../types.js";
 import type { VaultTerminal } from "../vault-terminal/core";
-import type { WorkspaceInternals } from "../obsidian-internals.js";
 // The class Obsidian loads. Its full type, with every part's methods, is AgentManagerPlugin
 // (below): the parts and every method here that calls one take `this` as that.
 class VaultTerminalPlugin extends import_obsidian.Plugin {
@@ -50,6 +50,8 @@ class VaultTerminalPlugin extends import_obsidian.Plugin {
   declare _sessionIndex: { at: number; records: Promise<SessionRecord[]> } | null | undefined;
   declare _lastActivityCache: Map<string, { mtime: number | null | undefined; at: number }> | undefined;
   declare _noteLaunches: Map<string, number | null> | undefined;
+  // Tickets whose main session is being started, until its tab exists (startSession).
+  declare _ticketLaunching: Set<string> | undefined;
   declare _openingToday: boolean | undefined;
   declare _resuming: Set<string> | undefined;
   // The workspace (workspace.ts).
@@ -143,6 +145,11 @@ class VaultTerminalPlugin extends import_obsidian.Plugin {
           const note = moved(v._notePath), folder = moved(v._folderPath);
           if (note) { v._notePath = note; changed = true; }
           if (folder) { v._folderPath = folder; changed = true; }
+          // The tickets it's attached to.
+          for (const [p, kind] of Object.entries(v._ticketLinks || {})) {
+            const to = moved(p);
+            if (to && v._ticketLinks) { delete v._ticketLinks[p]; v._ticketLinks[to] = kind; v.resetTicketWriteback(); changed = true; }
+          }
           continue;
         }
         // A tab Obsidian hasn't loaded yet: its saved fields, so it restores bound.
@@ -150,13 +157,25 @@ class VaultTerminalPlugin extends import_obsidian.Plugin {
           const note = moved(fields.notePath), folder = moved(fields.folderPath);
           if (note) fields.notePath = note;
           if (folder) fields.folderPath = folder;
-          return !!(note || folder);
+          let linked = false;
+          for (const [p, kind] of Object.entries(fields.ticketLinks || {})) {
+            const to = moved(p);
+            if (to && fields.ticketLinks) { delete fields.ticketLinks[p]; fields.ticketLinks[to] = kind; linked = true; }
+          }
+          return !!(note || folder || linked);
         }).catch(() => {});
       }
       if (changed) this.app.workspace.requestSaveLayout(); // the path persists in view state
       // The AGENTS.md folder follows its folder's rename.
       const start = moved(this.pluginData.startFolder ? this.startFolder() : null);
-      if (start) { this.pluginData.startFolder = start; this.savePluginData().catch(() => {}); }
+      if (start) this.pluginData.startFolder = start;
+      // So do the notes the settings name: the Tickets button's, and the templates.
+      let named = false;
+      for (const key of ["ticketsNote", "ticketTemplate", "overviewTemplate"] as const) {
+        const to = moved(stringOf(this.pluginData[key] ?? "") || null);
+        if (to) { this.pluginData[key] = to; named = true; }
+      }
+      if (start || named) this.savePluginData().catch(() => {});
     }));
     // Track the most recently focused session tab, and keep the browser's active-row
     // highlight in sync. ANY focus change can change which session is active (or move
@@ -218,8 +237,7 @@ class VaultTerminalPlugin extends import_obsidian.Plugin {
       id: "close-session-tab",
       name: "Close session tab",
       checkCallback: (checking) => {
-        const wsi: WorkspaceInternals = this.app.workspace;
-        const session = this.sessionOf(wsi.activeLeaf);
+        const session = this.sessionOf(this.activeLeaf());
         if (session) {
           // Through the tab's own guard: it asks first when the agent is working or there's unsent text.
           if (!checking) session.leaf.detach();
@@ -242,12 +260,12 @@ class VaultTerminalPlugin extends import_obsidian.Plugin {
         console.error("[Agent Manager] protocol link failed:", e));
     });
     this.registerNoteLaunch();
+    this.registerTickets();
     this.registerEditorExtension(sessionLinkLabels());
     this.addSettingTab(new AgentManagerSettingsTab(this.app, this));
   }
   async toggleFocus(this: AgentManagerPlugin): Promise<void> {
-    const wsi: WorkspaceInternals = this.app.workspace;
-    const activeView = this.sessionOf(wsi.activeLeaf);
+    const activeView = this.sessionOf(this.activeLeaf());
     if (activeView) {
       // Currently in Claude, go to editor — prefer most recent non-pinned leaf
       const leaves = this.app.workspace.getLeavesOfType("markdown");
@@ -343,7 +361,7 @@ class VaultTerminalPlugin extends import_obsidian.Plugin {
 // The plugin's type: the class, and every part's methods, which applyParts puts on the
 // class's prototype below. Made from the parts themselves, so it can't drift from them;
 // a name two parts both define is a type error here, as it's an error in applyParts.
-interface AgentManagerPlugin extends VaultTerminalPlugin, ClaudeModMethods, TerminalHostMethods, ShellMethods, TranscriptMethods, ConfigMethods, NoteMethods, LinkMethods, SessionMethods, SetupMethods, WorkspaceMethods {}
-applyParts(VaultTerminalPlugin, ClaudeModMethods, TerminalHostMethods, ShellMethods, TranscriptMethods, ConfigMethods, NoteMethods, LinkMethods, SessionMethods, SetupMethods, WorkspaceMethods);
+interface AgentManagerPlugin extends VaultTerminalPlugin, ClaudeModMethods, TerminalHostMethods, ShellMethods, TranscriptMethods, ConfigMethods, NoteMethods, LinkMethods, SessionMethods, SetupMethods, TicketMethods, WorkspaceMethods {}
+applyParts(VaultTerminalPlugin, ClaudeModMethods, TerminalHostMethods, ShellMethods, TranscriptMethods, ConfigMethods, NoteMethods, LinkMethods, SessionMethods, SetupMethods, TicketMethods, WorkspaceMethods);
 export { VaultTerminalPlugin };
 export type { AgentManagerPlugin };

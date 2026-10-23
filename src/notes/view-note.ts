@@ -8,16 +8,36 @@ import type { Session } from "../sessions/controller.js";
 const ID_RE = /^[0-9a-fA-F-]{16,}$/;
 const LINK_ID_RE = /session=([0-9a-fA-F-]{16,})/;
 class ViewNoteMethods {
-  // Add the strip's icon once, if this session was started from a note or a folder.
+  // The strip's icon for where this session belongs: a ticket's when it was started from
+  // one or attached to one, else a note's or a folder's. Redrawn when that changes (a
+  // resume finding its ticket, an attach).
   _showNoteIcon(this: Session, strip: HTMLElement | null = this.stripEl): void {
-    if (!strip || !strip.isConnected || !(this._notePath || this._folderPath)) return;
-    if (strip.querySelector(".agent-manager-strip-note")) return;
-    const icon = strip.createSpan({ cls: "agent-manager-strip-note" });
-    this._stripTip(icon, this._notePath ? "Open the note this session was started from" : "Show the folder this session was started from");
-    import_obsidian.setIcon(icon, this._notePath ? "file-text" : "folder");
-    icon.addEventListener("click", () => { void this.openSourceNote(); });
+    if (!strip || !strip.isConnected) return;
+    const fromTicket = !!this._notePath && this.plugin.isTicketNote(this._notePath);
+    const linked = Object.keys(this._ticketLinks || {}).filter((p) => this.plugin.isTicketNote(p));
+    const kind = fromTicket || linked.length ? "ticket" : this._notePath ? "note" : this._folderPath ? "folder" : null;
+    const old = strip.querySelector<HTMLElement>(".agent-manager-strip-note");
+    if (old?.dataset.kind === kind) return;
+    old?.remove();
+    if (!kind) return;
+    const icon = strip.createSpan({ cls: "agent-manager-strip-note", attr: { "data-kind": kind } });
+    this._stripTip(icon, kind === "ticket" ? "Open this session's ticket" : kind === "note" ? "Open the note this session was started from" : "Show the folder this session was started from");
+    import_obsidian.setIcon(icon, kind === "ticket" ? "ticket" : kind === "note" ? "file-text" : "folder");
+    icon.addEventListener("click", (evt) => {
+      // Started from a ticket: that one. Attached to several: a menu of them.
+      if (fromTicket || kind !== "ticket") { void this.openSourceNote(); return; }
+      if (linked.length === 1) { void this.openTicket(linked[0]); return; }
+      const menu = new import_obsidian.Menu();
+      for (const p of linked) menu.addItem((i) => i.setTitle(p.replace(/^.*\//, "").replace(/\.md$/, "")).setIcon("ticket").onClick(() => { void this.openTicket(p); }));
+      menu.showAtMouseEvent(evt);
+    });
     const after = strip.querySelector(".agent-manager-strip-title");
     if (after) strip.insertBefore(icon, after);
+  }
+  async openTicket(this: Session, path: string): Promise<void> {
+    const f = this.app.vault.getAbstractFileByPath(path);
+    if (!(f instanceof import_obsidian.TFile)) { new import_obsidian.Notice("That ticket isn't there anymore."); return; }
+    await this.app.workspace.getLeaf("tab").openFile(f);
   }
   async openSourceNote(this: Session): Promise<void> {
     if (this._folderPath) {
@@ -42,6 +62,9 @@ class ViewNoteMethods {
     if (!this._notePath || this._noteSupport || this._noteWritten || this._noteGone || this._noteWriting) return;
     const id = this._ownSessionId();
     if (!id || !ID_RE.test(id)) return;
+    // Continue Session's new main session takes the link only once it has run (its
+    // transcript exists), so one stuck at a prompt, or closed, never replaces the old.
+    if (this._noteReplaces && !this._modelFile) return;
     // A later launch from the same note holds the link, even if this one is first to
     // learn its id (a Codex launch waiting at a dialog while a newer Claude launch runs).
     if (this._noteClaim && this.plugin.newerLaunchFrom(this._notePath, this._noteLaunchAt, this)) {

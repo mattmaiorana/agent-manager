@@ -2,9 +2,14 @@
 
 import { import_obsidian } from "../externals.js";
 import { CLI_BACKENDS, REAL_BACKENDS, SIDE_SUFFIX_RE, STRIP_COMMANDS } from "../constants/backends.js";
+import { wrapLine } from "../constants/names.js";
 import { modelFromTranscriptTail, prettyModelName, readFileTail } from "../sessions/transcript-files.js";
 import { INPUT_GUARD_NOTICE_MS } from "./constants.js";
 import type { BackendKey, StripCommand } from "../constants/backends.js";
+import type { ForkFrom } from "../types.js";
+import { ChoicePickerModal } from "../ui/modals.js";
+// Continue Session's three: beside a note's main session, in its place, or a new session.
+type ContinueRole = "side" | "main" | "new";
 import type { ModelInfo } from "../sessions/transcript-files.js";
 import type { Session } from "./controller.js";
 // An item of the strip's info menu: a command, or the plugin's own rename.
@@ -70,11 +75,18 @@ class StripMethods {
         menu.showAtMouseEvent(evt);
       });
     }
-    // Side chat: a copy of this conversation in a new tab, made by the CLI's own fork.
+    // Wrap: types the Wrap message setting, as this CLI takes it.
+    if (REAL_BACKENDS.includes(stripBackendKey) && this.plugin.wrapMessage()) {
+      const wrap = strip.createSpan({ cls: "agent-manager-strip-new", text: "Wrap", attr: { role: "button" } });
+      this._stripTip(wrap, "Ask the agent to wrap up the session");
+      wrap.addEventListener("click", () => { void this.sendWrap(); });
+    }
+    // Continue Session: a new session that carries this one on, beside it or in its
+    // place, on any CLI.
     if (REAL_BACKENDS.includes(stripBackendKey)) {
-      const btn = strip.createSpan({ cls: "agent-manager-strip-new", text: "Side chat", attr: { role: "button" } });
-      this._stripTip(btn, "A copy of this conversation so far, in a new tab. This one doesn't change.");
-      btn.addEventListener("click", () => { void this.sideChat(); });
+      const btn = strip.createSpan({ cls: "agent-manager-strip-new", text: "Continue Session", attr: { role: "button" } });
+      this._stripTip(btn, "Start a new session that picks up from this one, beside it or in its place");
+      btn.addEventListener("click", (evt) => this._continueMenu(evt));
     }
     // The backend this session is running, as a badge for orientation.
     this.appendBackendBadge(strip, stripBackendKey);
@@ -140,6 +152,15 @@ class StripMethods {
   }
   // Run a command from the info menu. Guarded like /rename: never on top of an unsent
   // draft. A command that wants an argument is typed into the prompt, not sent.
+  // Type the Wrap message, never over unsent text or into a question the CLI is asking.
+  async sendWrap(this: Session): Promise<void> {
+    const line = wrapLine(this.plugin.wrapMessage(), this.getBackendKey());
+    if (!line) return;
+    if (!this.running) { new import_obsidian.Notice("This session isn't running."); return; }
+    if (this.hasPendingInput()) { new import_obsidian.Notice("Not sent: you have unsent text in the prompt. Clear it, then press Wrap again.", INPUT_GUARD_NOTICE_MS); return; }
+    if (this._dialogShowing()) { new import_obsidian.Notice("Not sent: the session is asking you something. Answer it, then press Wrap again.", INPUT_GUARD_NOTICE_MS); return; }
+    await this.submitLine(line);
+  }
   async _runStripCommand(this: Session, c: StripItem): Promise<void> {
     if (c.action === "rename") { this._startStripRename(this.stripEl?.querySelector<HTMLElement>(".agent-manager-strip-title")); return; } // the plugin's rename, never a bare /rename
     if (!this.running) { new import_obsidian.Notice("This session isn't running."); return; }
@@ -234,6 +255,83 @@ class StripMethods {
       notePath: this._notePath || null,
       folderPath: this._folderPath || null,
       forkFrom: { id, backend, cwd: this.workingDir || null },
+    });
+  }
+  // Continue Session's menu: the CLIs offered, this one first. A session started from a
+  // note lists them twice, under Side Session and New Main Session; any other, once.
+  _continueMenu(this: Session, evt: MouseEvent): void {
+    const here = this.getBackendKey();
+    const offered = this.plugin.getBrowserBackends();
+    const order = [here, ...offered.filter((k) => k !== here)];
+    const menu = new import_obsidian.Menu();
+    const items = (role: ContinueRole) => {
+      for (const key of order) {
+        menu.addItem((i) => i.setTitle(`${CLI_BACKENDS[key].label}${key === here ? " (this backend)" : ""}`).onClick(() => this._continueChoice(key, role)));
+      }
+    };
+    if (this._notePath) {
+      menu.addItem((i) => i.setTitle("Side session").setDisabled(true));
+      items("side");
+      menu.addSeparator();
+      menu.addItem((i) => i.setTitle("New main session").setDisabled(true));
+      items("main");
+    } else {
+      menu.addItem((i) => i.setTitle("New session").setDisabled(true));
+      items("new");
+    }
+    menu.showAtMouseEvent(evt);
+  }
+  // The two choices for what the new session gets: the full one (a copy of this
+  // conversation on the same CLI, else this session's transcript to read), or the light
+  // one (the ticket or the note it was started from, else this session's last message).
+  _continueChoice(this: Session, backend: BackendKey, role: ContinueRole): void {
+    const same = backend === this.getBackendKey();
+    const ticket = !!this._notePath && this.plugin.isTicketNote(this._notePath);
+    const choices: Array<{ full: boolean; label: string; sub: string }> = [
+      same
+        ? { full: true, label: "Keep full context", sub: "A copy of this conversation, made by the CLI." }
+        : { full: false, label: ticket ? "Read the ticket" : this._notePath ? "Read the note" : "Read the last message only", sub: "Told where this session's transcript is, if it needs more." },
+      same
+        ? { full: false, label: ticket ? "Read the ticket" : this._notePath ? "Read the note" : "Read the last message only", sub: "A fresh start, told where this session's transcript is." }
+        : { full: true, label: "Read the transcript", sub: "Reads this session's transcript in full." },
+    ];
+    new ChoicePickerModal(this.app, choices, {
+      placeholder: `${role === "side" ? "Side session" : role === "main" ? "New main session" : "New session"} on ${CLI_BACKENDS[backend].label}: what should it get?`,
+      label: (c) => c.label,
+      sub: (c) => c.sub,
+      onPick: (c) => { void this.continueSession(backend, role, c.full); },
+    }).open();
+  }
+  // Start the session Continue Session asked for. A main one takes the note's
+  // main-session once it has an id, and the old one becomes Previous main only then; if
+  // it doesn't start, nothing moves.
+  async continueSession(this: Session, backend: BackendKey, role: ContinueRole, full: boolean, noFork = false): Promise<void> {
+    const here = this.getBackendKey();
+    // noFork: the fork already failed (Antigravity's /fork), so the transcript instead.
+    const fork = full && backend === here && !noFork;
+    let transcript: string | null = null;
+    try { const res = await this.updateDurableTranscript(); transcript = (res && res.path) || null; } catch { /* best effort */ }
+    let forkFrom: ForkFrom | null = null;
+    if (fork) {
+      const id = this._ownSessionId() || (await this._liveSessionId?.());
+      if (!id || (here === "claude" && !this._modelFile)) { new import_obsidian.Notice("Keeping full context needs this session's first turn to finish, so there's something to copy. Try again after it does.", 8000); return; }
+      forkFrom = { id, backend, cwd: this.workingDir || null };
+    } else if (!transcript) {
+      new import_obsidian.Notice("Agent Manager: this session's transcript isn't written yet. Try again after its first turn finishes.", 8000);
+      return;
+    }
+    const subject = (this.sessionTitle || "").replace(SIDE_SUFFIX_RE, "").trim() || "Untitled";
+    await this.plugin.startSession(role === "side" ? this._sideChatName() : subject, this, {
+      backendOverride: backend,
+      notePath: this._notePath || null,
+      folderPath: this._notePath ? null : this._folderPath || null,
+      sideSession: role === "side",
+      newMain: role === "main",
+      ...(forkFrom ? { forkFrom } : {
+        handoffNote: transcript,
+        handoffFromBackend: here,
+        handoffMode: full ? "transcript" : this._notePath ? "pointer" : "last",
+      }),
     });
   }
   // A side chat's name: this session's, with " (side chat)" once, however deep.

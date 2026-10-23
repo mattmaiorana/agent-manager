@@ -4,6 +4,35 @@ All notable changes to Agent Manager are recorded here, in [Keep a Changelog](ht
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-10-22
+
+Tickets, with overviews to go with them.
+
+### Added
+
+- **Tickets.** Turn on Use tickets and a note with `type: ticket` is a ticket: a session started from it gets the ticket opening, which says to read it for context and wait. The ticket template (`Templates/Ticket.md` by default, a setting) is never one.
+  - Turning tickets on creates `Tickets.base` in the AGENTS.md folder and the ticket template, each only where it's missing. The base lists every ticket in three views (Open, grouped by project; Done; This folder), with Done, Chat (a Launch or Resume pill), Ticket, Project (worked out from its folder), CLI, Created, and Updated.
+  - A ticket has one main session: launching it again while that session is open, or still starting, goes to its tab. Its `backend` property picks the CLI.
+  - Each session started from a ticket, or found in one on a resume, keeps its lines in the ticket: a resume link under `## Session Links`, labeled with its name, its CLI, and its kind (Main, Previous main, Side session, Linked, Re-hosted, or Continued), and a link to its transcript note under `## Transcripts`. Each line is matched by the session's full id, so a rename updates it in place.
+  - **Attach to a ticket**, in a session tab's menu: pick any ticket, and the session's lines go on it as Linked, kept current while it's open. It never takes the ticket's main session, and a session can be attached to several.
+  - A ticket made outside any `Tickets/` folder (the base's New button puts one in the default folder for new notes) gets one question: which project it's for, from the folders with an overview, or leave it where it is. Picking one moves it into that project's `Tickets/` folder, keeping links to it.
+  - A **Tickets** button above Daily Chat opens the tickets base, or a note set in settings, under a name set there. It can be turned off. A note it opens keeps it when renamed.
+  - The strip shows a ticket icon for a session started from a ticket or attached to one; it opens the ticket.
+  - **New ticket** (a command, and "New ticket here" in a folder's menu) makes one from the template in the folder's `Tickets/` folder, with its name ready to type.
+- **Overviews.** Turn on Use overviews and a folder with an `Overview.md` (the name is a setting) is a project: a session started from a note or a folder below it is first told to read every overview from the AGENTS.md folder down, broadest first, and the repo the nearest one names in its `repo` property. Both parts of that opening are settings.
+- **Add an overview to this folder**, in a folder's menu while overviews are on, makes one from a template (a setting, with a short one built in).
+- **Wrap**, on every session's strip: types the Wrap message setting (a request for a summary by default; empty hides the button). A message like `/wrap` runs a skill, and goes to Codex as `$wrap `, the way Codex invokes one.
+- **Continue Session** replaces the strip's Side chat button. On a session started from a note it offers a side session or a new main session, on any CLI; on any other session, a new session. Then two choices: Keep full context (a copy of the conversation, on the same CLI) or Read the transcript (on another), and the light one: Read the ticket, Read the note, or Read the last message only. A new main session takes the note's main session over once it starts.
+- **Files Claude sends you are saved in the vault.** Each file a Claude session sends (its SendUserFile tool) is copied where Obsidian puts a new attachment for the note the session was started from, or into a folder set in settings, and shown in the session's transcript note. A copy never overwrites, and one that fails is tried again on the next turn. It can be turned off.
+
+### Changed
+
+- Every setting that takes a folder or a note suggests them as you type, on Obsidian's own suggestion list, alphabetical.
+- Settings show a section's own settings only while its switch is on: overviews, tickets, the Tickets button, and each CLI's while it's offered, and turning one on or off keeps your place on the page.
+- The plugin no longer reads Obsidian's deprecated `workspace.activeLeaf`: the focused tab comes from the active view (`getActiveViewOfType`), in the main area or a sidebar alike.
+- A session started from a folder records the folder in its transcript note's `source` (as its path with a trailing slash), so a resume knows where it started.
+- The starter AGENTS.md tells agents where files go: in a `Files/` folder beside the note they belong to, since agents don't read Obsidian's attachment setting.
+
 ## [1.0.1] - 2026-10-21
 
 ### Added

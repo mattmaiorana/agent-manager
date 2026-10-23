@@ -24,6 +24,7 @@ How AI agents should work here. Claude Code, Codex, and Antigravity read this fi
 
 - Read a note before changing it, and keep its properties (the frontmatter) intact.
 - Ask before deleting, moving, or renaming notes.
+- Save a file next to the work it belongs to: in a \`Files/\` folder beside its note.
 - Anything else every session should know: (fill this in)
 `;
 class SetupMethods {

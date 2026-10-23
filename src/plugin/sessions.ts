@@ -518,27 +518,48 @@ class SessionMethods {
       // once its id resolves (maybeWriteNoteBack).
       v._notePath = opts?.notePath || null;
       v._folderPath = opts?.folderPath || null;
+      v._ticketLinks = {};
       this.resetNoteWriteback(v);
       v._handoffNote = opts?.handoffNote || null;
       v._handoffFromBackend = opts?.handoffFromBackend || null;
       v._handoffIntent = opts?.handoffIntent || null;
+      v._handoffMode = opts?.handoffMode || (opts?.handoffNote ? "side-chat" : null);
       v._daily = !!opts?.daily;
       v._forkFrom = opts?.forkFrom || null;
       // A side chat never takes over its note's link; a launch from the note does.
       v._noteSupport = !!opts?.sideSession;
       v._noteClaim = !!opts?.notePath && !opts?.sideSession;
+      v._noteReplaces = !!opts?.newMain;
       // Which launch from a note is the latest decides who holds its link, whichever
       // learns its id first (newerLaunchFrom), even after the latest one's tab closes.
       v._noteLaunchAt = v._noteClaim ? Date.now() : null;
       // A claim means a notePath (just above).
       if (v._noteClaim) (this._noteLaunches || (this._noteLaunches = new Map<string, number | null>())).set(opts?.notePath as string, v._noteLaunchAt);
     };
-    this.invalidateSessionIndex();
-    const view = await this.openSessionLeaf("tab");
-    if (!view) return null;
-    prepare(view);
-    view.launchSession(subject);
-    return view;
+    // A ticket has one main session: a second launch while it's open, or still starting,
+    // goes to its tab instead of starting another.
+    const ticket = opts?.notePath && !opts.sideSession && !opts.forkFrom && !opts.newMain && this.isTicketNote(opts.notePath) ? opts.notePath : null;
+    if (ticket) {
+      const launching = this._ticketLaunching || (this._ticketLaunching = new Set<string>());
+      if (launching.has(ticket)) return null;
+      const open = this.ticketMainLeaf(ticket);
+      if (open) {
+        void this.app.workspace.revealLeaf(open);
+        this.app.workspace.setActiveLeaf(open, { focus: true });
+        return this.sessionOf(open);
+      }
+      launching.add(ticket);
+    }
+    try {
+      this.invalidateSessionIndex();
+      const view = await this.openSessionLeaf("tab");
+      if (!view) return null;
+      prepare(view);
+      view.launchSession(subject);
+      return view;
+    } finally {
+      if (ticket) this._ticketLaunching?.delete(ticket);
+    }
   }
   // ---- Today's chat ----
   // Today's chat's tab, loaded or not, or null: a session tab named for today.
@@ -551,15 +572,21 @@ class SessionMethods {
     }
     return null;
   }
-  // The note a session was started from, by the `source` its transcript note records,
-  // or null.
-  sourceNoteOf(this: AgentManagerPlugin, sessionId: string | null | undefined): string | null {
+  // The note or folder a session was started from, by the `source` its transcript note
+  // records, or null.
+  // A folder is recorded as its vault path with a trailing slash (_sourceLink).
+  sourceOf(this: AgentManagerPlugin, sessionId: string | null | undefined): { notePath: string } | { folderPath: string } | null {
     const t = this.findTranscriptNoteBySessionId(sessionId);
     const src: unknown = t && this.app.metadataCache.getFileCache(t)?.frontmatter?.source;
-    const m = typeof src === "string" ? src.match(/^\[\[([^\]|#]+)(?:[#|][^\]]*)?\]\]$/) : null;
+    if (typeof src !== "string") return null;
+    if (src.endsWith("/") && !src.startsWith("[[")) {
+      const dir = this.app.vault.getAbstractFileByPath((0, import_obsidian.normalizePath)(src.slice(0, -1)));
+      return dir instanceof import_obsidian.TFolder && !dir.isRoot() ? { folderPath: dir.path } : null;
+    }
+    const m = src.match(/^\[\[([^\]|#]+)(?:[#|][^\]]*)?\]\]$/);
     // A match means t was found (its frontmatter gave src), so `t &&` changes nothing.
     const note = m && t && this.app.metadataCache.getFirstLinkpathDest(m[1], t.path);
-    return note instanceof import_obsidian.TFile ? note.path : null;
+    return note instanceof import_obsidian.TFile ? { notePath: note.path } : null;
   }
   // Go to today's chat: its tab, else resume it (the newest session by that name), else
   // start it on the default CLI. Never a second one.

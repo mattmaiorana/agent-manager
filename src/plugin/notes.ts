@@ -18,10 +18,12 @@ class NoteMethods {
     view._noteTriedAt = 0;
     // A write that began before this reset (a re-host mid-write) mustn't mark the new id done.
     view._noteGen = (view._noteGen || 0) + 1;
+    // Its ticket lines are written again too.
+    view.resetTicketWriteback?.();
   }
   // Was another session started from this note after `at`? It holds the note's links,
   // even if this one learns its id later. Session tabs Obsidian hasn't loaded count too.
-  newerLaunchFrom(this: AgentManagerPlugin, notePath: string, at: number | null | undefined, self: Session): boolean {
+  newerLaunchFrom(this: AgentManagerPlugin, notePath: string, at: number | null | undefined, self: Session | null): boolean {
     const latest = this._noteLaunches?.get(notePath);
     if (typeof latest === "number" && latest > (at || 0)) return true;
     for (const leaf of this.sessionLeaves()) {
@@ -45,7 +47,9 @@ class NoteMethods {
     const title = isNote ? file.basename : file.name;
     const go = (key: BackendKey) => this.startSession(title, null, { backendOverride: key, ...(isNote ? { notePath: file.path } : { folderPath: file.path }) });
     const offered = this.getBrowserBackends();
-    if (backend || offered.length < 2) { void go(backend || offered[0]); return; }
+    // A ticket's backend property picks its CLI.
+    const named = backend || (isNote ? this.ticketBackend(file.path) : null);
+    if (named || offered.length < 2) { void go(named || offered[0]); return; }
     const def = this.getCurrentBackend();
     const ordered = offered.includes(def) ? [def, ...offered.filter((k) => k !== def)] : offered;
     new ChoicePickerModal(this.app, ordered, {

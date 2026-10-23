@@ -1,7 +1,9 @@
 // Names and the opening a session is sent: settings with defaults, read in one place.
 
 import { fs, import_obsidian, os, path } from "../externals.js";
-import { DEFAULT_ADDED_FOLDERS, DEFAULT_DAILY_NAME, DEFAULT_NAMES, DEFAULT_OPENING } from "../constants/names.js";
+import { DEFAULT_WRAP_MESSAGE, DEFAULT_ADDED_FOLDERS, DEFAULT_DAILY_NAME, DEFAULT_NAMES, DEFAULT_OPENING, DEFAULT_OVERVIEW_NAME, DEFAULT_TICKET_TEMPLATE } from "../constants/names.js";
+import { composeOpening, launchContext } from "../context/launch-context.js";
+import type { ContextVault, LaunchContext, LaunchFrom } from "../context/launch-context.js";
 import type { NameKey, OpeningKey } from "../constants/names.js";
 import { isArray, stringOf } from "../util/guards.js";
 import type { AgentManagerPlugin } from "./main.js";
@@ -97,21 +99,63 @@ class ConfigMethods {
     const template = typeof v === "string" && v.trim() ? v.trim() : DEFAULT_DAILY_NAME;
     return template.replace(/\{\{date\}\}/g, this.todayString());
   }
-  // The opening instruction for a launch, as one line: the note or folder template for
-  // a session started from one, the daily one for today's chat, else the plain one.
-  // Empty when the template is.
+  // What the Wrap button types: the setting, else the default; "" when it's turned off.
+  wrapMessage(this: AgentManagerPlugin): string {
+    const v = this.pluginData.wrapMessage;
+    return typeof v === "string" ? v.trim() : DEFAULT_WRAP_MESSAGE;
+  }
+  // ---- Overviews and tickets ----
+  // Both switches are off until the user turns them on.
+  overviewsOn(this: AgentManagerPlugin): boolean {
+    return this.pluginData.useOverviews === true;
+  }
+  ticketsOn(this: AgentManagerPlugin): boolean {
+    return this.pluginData.useTickets === true;
+  }
+  // An overview's file name: the setting, with ".md" added when it's left off.
+  overviewName(this: AgentManagerPlugin): string {
+    const v = stringOf(this.pluginData.overviewName ?? "").trim().replace(/[\\/]/g, "");
+    if (!v) return DEFAULT_OVERVIEW_NAME;
+    return v.toLowerCase().endsWith(".md") ? v : `${v}.md`;
+  }
+  // The ticket template's vault path: the setting, else Templates/Ticket.md.
+  ticketTemplatePath(this: AgentManagerPlugin): string {
+    const v = stringOf(this.pluginData.ticketTemplate ?? "").trim().replace(/^\/+/, "");
+    return (0, import_obsidian.normalizePath)(v || DEFAULT_TICKET_TEMPLATE);
+  }
+  // What launchContext reads: notes and their frontmatter, from Obsidian's cache.
+  contextVault(this: AgentManagerPlugin): ContextVault {
+    return {
+      isNote: (p) => this.app.vault.getAbstractFileByPath(p) instanceof import_obsidian.TFile,
+      frontmatter: (p) => {
+        const f = this.app.vault.getAbstractFileByPath(p);
+        return f instanceof import_obsidian.TFile ? (this.app.metadataCache.getFileCache(f)?.frontmatter ?? null) : null;
+      },
+    };
+  }
+  // What a session started from this note or folder gets: its ticket, the overviews
+  // above it, and their repo (context/launch-context.ts).
+  launchContext(this: AgentManagerPlugin, from: LaunchFrom): LaunchContext {
+    return launchContext(from, this.contextVault(), {
+      startFolder: this.startFolder(),
+      useOverviews: this.overviewsOn(),
+      useTickets: this.ticketsOn(),
+      overviewName: this.overviewName(),
+      templatePath: this.ticketTemplatePath(),
+      resolvePath: (v) => this.resolveUserPath(v),
+    });
+  }
+  // The opening instruction for a launch, as one line: the context parts that apply
+  // (the overviews, then the repo), then the kind's own template: the ticket template
+  // for a ticket, the note or folder one for a session started from one, the daily one
+  // for today's chat, else the plain one. Empty when every part is.
   buildOpening(this: AgentManagerPlugin, { notePath, folderPath, daily }: { notePath?: string | null; folderPath?: string | null; daily?: boolean } = {}): string {
     const vault = this.getVaultPath();
     const from = notePath || folderPath;
-    const vars: Record<string, string> = {
-      path: from ? path.join(vault, from) : "",
-      vault,
-      date: this.todayString(),
-    };
-    return this.openingPart(notePath ? "note" : folderPath ? "folder" : daily ? "daily" : "plain")
-      .replace(/\s*\n\s*/g, " ")
-      .trim()
-      .replace(/\{\{(\w+)\}\}/g, (whole, k: string) => (k in vars ? vars[k] : whole));
+    const ctx: LaunchContext = from ? this.launchContext({ notePath, folderPath }) : { ticket: null, overviews: [], repo: null };
+    const vars: Record<string, string> = { path: from ? path.join(vault, from) : "", vault, date: this.todayString() };
+    const kind = ctx.ticket ? "ticket" : notePath ? "note" : folderPath ? "folder" : daily ? "daily" : "plain";
+    return composeOpening((key) => this.openingPart(key), ctx, kind, vars, (p) => path.join(vault, p));
   }
   // Where every session's durable transcript is filed: one folder.
   transcriptTarget(this: AgentManagerPlugin): { transcriptDir: string } {

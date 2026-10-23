@@ -1,6 +1,7 @@
 // Transcripts, the view's side: the live transcript panel and the durable transcript note.
 
-import { StringDecoder, fs, import_obsidian } from "../externals.js";
+import { StringDecoder, fs, import_obsidian, path } from "../externals.js";
+import { sentFileMarker, sentFilesIn } from "./sent-files.js";
 import type { Session } from "../sessions/controller.js";
 import type { TranscriptMessage, TranscriptWrite } from "../types.js";
 class ViewTranscriptMethods {
@@ -210,14 +211,69 @@ class ViewTranscriptMethods {
       // Record the size we reconciled against, so the cheap growth check
       // (transcriptGrewSinceReconcile) can skip the full read until new records land.
       if (size != null) this._durableReconciledSize = size;
+      // Files it sent: whenever its transcript has grown since the last look (a tool's
+      // result is a record of its own, which adds no message), once after a launch or a
+      // resume, and while a copy is still to make.
+      if (res?.path && backend === "claude" && file && (size !== this._sentFilesScanned || this._sentFilesPending)) void this.saveSentFiles(file, res.path, size);
       return res;
     } catch { /* never let a transcript write disturb the session */ }
     return null;
   }
+  // Each file a Claude session sent you, copied into the vault where its setting says
+  // (Obsidian's attachment rule by default, for the note the session was started from, or
+  // its transcript note) and embedded in its transcript note. Each is its own entry, keyed
+  // on the tool call that sent it: the note's marker says it's done, so a copy that fails,
+  // or a file not on disk yet, is tried again on the next pass. A copy never overwrites.
+  async saveSentFiles(this: Session, transcriptFile: string, notePath: string, size: number | null = null): Promise<void> {
+    if (this._sentFilesSaving || !this.plugin.sentFilesOn()) return;
+    this._sentFilesSaving = true;
+    try {
+      let text = "";
+      try { text = fs.readFileSync(transcriptFile, "utf8"); } catch { return; }
+      const sent = sentFilesIn(text);
+      this._sentFilesScanned = size;
+      if (!sent.length) { this._sentFilesPending = false; return; }
+      const adapter = this.app.vault.adapter;
+      let noteText = "";
+      try { noteText = await adapter.read(notePath); } catch { return; }
+      let pending = false;
+      for (const f of sent) {
+        const marker = sentFileMarker(f.key);
+        if (noteText.includes(marker)) continue;
+        let data: Buffer;
+        try { data = fs.readFileSync(f.path); } catch { pending = true; continue; }
+        try {
+          const source = this._notePath && this.app.vault.getAbstractFileByPath(this._notePath) ? this._notePath : notePath;
+          const dest = await this.plugin.sentFileDestination(path.basename(f.path), source);
+          const copy = await this.app.vault.createBinary(dest, data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength) as ArrayBuffer);
+          const link = this.app.metadataCache.fileToLinktext(copy, notePath, false);
+          try {
+            await this.plugin._tc().withTranscriptLock(notePath, () => adapter.append(notePath, `\n![[${link}]]\n${marker}\n`));
+          } catch (e) {
+            // Not embedded, so not done: the copy goes too, or the retry would make another.
+            try { await this.app.fileManager.trashFile(copy); } catch { /* best effort */ }
+            throw e;
+          }
+          noteText += marker;
+        } catch {
+          pending = true;
+        }
+      }
+      this._sentFilesPending = pending;
+    } finally {
+      this._sentFilesSaving = false;
+    }
+  }
   // A link to the note this session was started from, for its transcript note's
   // `source` property, so the note's backlinks list every transcript of it, side chats
-  // included. Linked from the transcripts folder, as Obsidian would write it there.
+  // included. Linked from the transcripts folder, as Obsidian would write it there. A
+  // session started from a folder gets the folder's vault path with a trailing slash
+  // instead, since a wikilink can't name a folder; a resume reads either back (sourceOf).
   _sourceLink(this: Session): string | null {
+    if (!this._notePath && this._folderPath) {
+      const dir = this.app.vault.getAbstractFileByPath(this._folderPath);
+      return dir instanceof import_obsidian.TFolder ? `${dir.path}/` : null;
+    }
     const f = this._notePath && this.app.vault.getAbstractFileByPath(this._notePath);
     if (!(f instanceof import_obsidian.TFile)) return null;
     const from = `${this.plugin.folderOf("transcriptsFolder")}/x.md`;

@@ -286,6 +286,11 @@ export class TerminalView extends ItemView {
     return this.bellMarked;
   }
 
+  override onPaneMenu(menu: Menu, source: string): void {
+    super.onPaneMenu(menu, source);
+    this.controller?.paneMenu?.(menu, source);
+  }
+
   override getState(): Record<string, unknown> {
     const state: Record<string, unknown> = { ...super.getState(), kind: this.kind };
     if (this.cwd) state.cwd = this.cwd;

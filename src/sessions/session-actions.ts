@@ -64,6 +64,7 @@ class SessionActionMethods {
       view.sessionTitle = newTitle;
       leaf.updateHeader?.();
       view.refreshStripTitle?.();
+      view.resetTicketWriteback?.();
       this.app.workspace.requestSaveLayout();
       // Push the name into Claude's own session too (`/rename`), so its /resume
       // picker and anything reading the transcript show it. Codex and Antigravity

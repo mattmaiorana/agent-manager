@@ -14,7 +14,7 @@ macOS only, for now.
 - **Start from any note or folder.** The session is named for it and told to read it, and a note gets a link back to the session in its properties.
 - **Transcripts as notes.** Each session is saved as a Markdown note in one folder (`Agent Transcripts` by default), turn by turn, so you can search, link, and quote it, and it outlasts the CLI's own history.
 - **Three CLIs, one way of working.** Claude Code, Codex, and Antigravity all start, list, resume, and save the same way. Pick a default, or choose per session.
-- **Side chats.** From any session, open a copy of the conversation so far in a new tab, made by the CLI's own fork, and take it somewhere else. The original doesn't change.
+- **Continue Session.** From any session, start a new one that picks up from it, on any CLI. A session started from a note offers a side session, which leaves the note's main session alone, or a new main session, which takes its place. Then choose what it gets: on the same CLI, a copy of the whole conversation (the CLI's own fork) or a fresh start; on another CLI, the transcript to read or a fresh start. A fresh start reads the ticket or the note, or with neither, only the last message, and is told where the transcript is.
 - **Safe to close.** Closing a tab asks first when the agent is working or you have text you haven't sent. When a CLI exits, its tab keeps what it printed, and Enter resumes the session.
 - **It follows a session that moves.** When Claude's Remote Control or a compaction continues a conversation under a new id, the tab, its pin, its name, and its transcript follow it.
 
@@ -69,13 +69,14 @@ Agent Manager runs on your computer and reads and runs a few things outside the 
 - **Looks up file paths a session prints**, to make them clickable, and shows one in Finder when you Cmd+click a path outside the vault.
 - **Reads a picture file a CLI asks it to show**, the way the kitty terminal does, and deletes it only when it's a temporary file the CLI marked for deletion.
 - **Shows the pictures Claude sends you.** A small Claude Code mod that ships inside the plugin draws each PNG a Claude session sends you (its SendUserFile tool) as a framed picture, with Open, Save to Downloads, and Copy path. The plugin writes the mod's few files into its own folder (`.obsidian/plugins/agent-manager/claude-mod/`) and passes it to each Claude session with `--plugin-dir`, only while "Show pictures" is on; nothing is downloaded and nothing goes into `~/.claude`. Its buttons run `open`, `cp`, `cmp`, and `sips` on the picture's file, and Save to Downloads writes into `~/Downloads`. Its look comes from show-your-work by Umer Ansari (MIT, credited in `claude-mod/inline-images/THIRD_PARTY_NOTICES.md`).
+- **Copies the files Claude sends you into the vault.** When a Claude session sends you a file (its SendUserFile tool), the plugin reads it from where Claude says it is and copies it into the vault, where Obsidian puts attachments unless you set a folder, then shows it in the session's transcript note. It never changes or deletes the original. Turn it off in settings.
 - **Keeps a count of sessions waiting for you** in Obsidian's local storage, for the Dock badge, only with "Waiting count on the Dock icon" on (off by default).
 
 **Network:** the plugin's own code makes no network requests. The CLIs talk to their own services, as they do in any terminal. A transcript note is Markdown, so an image an agent links from the web loads from the web, as it would in any note.
 
 **Your sign-in and plan:** Agent Manager starts the real CLI, so sign-in, models, and billing stay with the CLI, and a Claude or ChatGPT subscription works as it does in your terminal. It never asks for an API key. By default it keeps the API keys and provider settings in your shell's startup files (such as `ANTHROPIC_API_KEY` and `OPENAI_API_KEY`) away from agents, so nothing moves you onto per-token billing by accident. That list is a setting.
 
-**Your vault:** it writes the picture mod's files into its own plugin folder (above), transcript notes into one folder, the `main-session` property into a note you start a session from, and an `AGENTS.md` only when you click Create.
+**Your vault:** it writes the picture mod's files into its own plugin folder (above), transcript notes into one folder, copies of files Claude sends you (above), the `main-session` property into a note you start a session from, and an `AGENTS.md` only when you click Create. With tickets on, it also writes `## Session Links` and `## Transcripts` into tickets, and `Tickets.base` and a ticket template where they're missing.
 
 ## Known limits
 

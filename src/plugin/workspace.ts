@@ -124,9 +124,8 @@ class WorkspaceMethods {
       // agent list (a second way to go "home" besides the "‹ name" chevron).
       // Guard on instanceof: a deferred leaf has no BrowserView yet, so just reveal
       // it (revealLeaf instantiates it).
-      const wsi: WorkspaceInternals = this.app.workspace;
       if (isBrowser(existing.view)
-          && wsi.activeLeaf === existing && existing.view.browserScope) {
+          && this.activeLeaf() === existing && existing.view.browserScope) {
         try { existing.view.goHome(); } catch { /* best effort */ }
       }
       void this.app.workspace.revealLeaf(existing);
@@ -215,6 +214,11 @@ class WorkspaceMethods {
         v._noteTriedAt = nowMs;
         void v.maybeWriteNoteBack?.();
       }
+      // Its lines on its tickets: the same, until each has its transcript line too.
+      if (!v._ticketDone && (edge || nowMs - (v._ticketTriedAt || 0) > 3000)) {
+        v._ticketTriedAt = nowMs;
+        void v.maybeWriteTicketBack?.();
+      } else if (edge) void v.maybeWriteTicketBack?.();
       v._wasWorking = isW;
     }
     // The first time a session is seen working, its transcript is being written, so
@@ -490,8 +494,7 @@ class WorkspaceMethods {
           ? ws.createLeafInParent(notesGroup, (notesGroup.children as WorkspaceLeaf[]).length)
           : this.createNotesGroupWithLeaf();
         if (!target) continue;
-        const wsi: WorkspaceInternals = ws;
-        const wasActive = wsi.activeLeaf === stray;
+        const wasActive = this.activeLeaf() === stray;
         const state = stray.getViewState();
         target.setViewState(state).then(() => {
           try {
@@ -579,10 +582,13 @@ class WorkspaceMethods {
   // The (backendKey, title) of the currently focused session tab, or null when the
   // focus isn't on a live session (a note, the browser sidebar). Same key format as getOpenSessionKeys, so the browser can mark
   // just that one row active and clear it when focus moves away.
+  // The tab with focus, in the main area or a sidebar, or null: the leaf of the active
+  // view, which is what workspace.activeLeaf (deprecated) gave.
+  activeLeaf(this: AgentManagerPlugin): WorkspaceLeaf | null {
+    return this.app.workspace.getActiveViewOfType(import_obsidian.View)?.leaf ?? null;
+  }
   getActiveSessionKey(this: AgentManagerPlugin): string | null {
-    const wsi: WorkspaceInternals = this.app.workspace;
-    const leaf = wsi.activeLeaf;
-    const v = this.sessionOf(leaf);
+    const v = this.sessionOf(this.activeLeaf());
     if (v && v.running && v.sessionTitle) {
       return this.openSessionKey({ backendKey: v.activeBackendKey || v.getBackendKey(), title: v.sessionTitle, sessionId: v._stripSessionId?.() || v.resumeSessionId || null });
     }
