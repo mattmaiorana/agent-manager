@@ -4,6 +4,20 @@ All notable changes to Agent Manager are recorded here, in [Keep a Changelog](ht
 
 ## [Unreleased]
 
+## [1.3.1] - 2026-10-23
+
+Fixes from Obsidian's automated review, two picture fixes, and the README on more than one computer and your phone.
+
+### Fixed
+
+- A long caption on a picture Claude sends is cut short before its size, which no longer wraps onto a second line.
+- Copy path on a picture shows one notice, the picture's own (as Save to Downloads does), not a second one from Agent Manager.
+
+### Changed
+
+- The README says to turn Agent Manager on in one computer only, how to keep it off on another under Obsidian Sync, and how to reach sessions on the main computer through Remote Control or SSH. Your phone and Known limits say what can and can't be done from a phone or another computer: a running Claude session can be continued there, but no session can be started in Agent Manager from elsewhere yet.
+- The terminal's pictures layer, link tooltip, and color lookup are made with Obsidian's own element helpers, and a leftover `package.json` in `src/` is gone, from Obsidian's automated review.
+
 ## [1.3.0] - 2026-10-23
 
 Onboarding: Set up this vault, with starter skills.

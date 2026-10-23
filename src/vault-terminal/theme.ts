@@ -9,8 +9,8 @@ const canvases = new WeakMap<Document, CanvasRenderingContext2D | null>();
 
 function context(doc: Document): CanvasRenderingContext2D | null {
   if (!canvases.has(doc)) {
-    const canvas = doc.createElement("canvas");
-    canvas.width = canvas.height = 1;
+    // Never attached: it only turns a color into its rgba values.
+    const canvas = createEl("canvas", { attr: { width: 1, height: 1 } });
     canvases.set(doc, canvas.getContext("2d", { willReadFrequently: true }));
   }
   return canvases.get(doc) ?? null;

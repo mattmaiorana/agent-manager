@@ -314,9 +314,7 @@ export class PictureLayer {
     let canvas = this.canvas;
     if (!canvas || canvas.parentElement !== screen) {
       canvas?.remove();
-      canvas = doc.createElement("canvas");
-      canvas.className = "vault-terminal-pictures";
-      screen.appendChild(canvas);
+      canvas = screen.createEl("canvas", { cls: "vault-terminal-pictures" });
       this.canvas = canvas;
     }
     const dpr = doc.defaultView?.devicePixelRatio ?? 1;

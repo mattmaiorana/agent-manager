@@ -1785,15 +1785,13 @@ export class TerminalView extends ItemView {
     const el = this.term?.element;
     if (!el) return;
     this.hideLinkTip();
-    const tip = el.ownerDocument.createElement("div");
     // xterm-hover: xterm lets mouse events over it pass as if it weren't there.
-    tip.className = "vault-terminal-link-tip xterm-hover";
+    const tip = el.createDiv({ cls: "vault-terminal-link-tip xterm-hover" });
     const how = this.core.settings.linkClick === "click" && textIsAddress ? "Click to open" : "Cmd+click to open";
     tip.createDiv({ cls: "vault-terminal-link-tip-address", text: address });
     tip.createDiv({ cls: "vault-terminal-link-tip-how", text: how });
     const r = el.getBoundingClientRect();
     tip.style.left = `${Math.max(0, Math.min(event.clientX - r.left + 12, r.width - 320))}px`;
-    el.appendChild(tip);
     // Below the pointer, or above it where below would be cut off at the terminal's bottom.
     const below = event.clientY - r.top + 18;
     const above = event.clientY - r.top - 8 - tip.offsetHeight;

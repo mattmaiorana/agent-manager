@@ -74,7 +74,34 @@ Every session starts in your vault's folder, or in the folder you set as **AGENT
 
 ## Your phone
 
-Claude Code's own Remote Control can make a running session reachable from the Claude app. Turn it on in Claude Code; Agent Manager doesn't drive it, and follows a session it moves to a new id.
+Claude Code's own Remote Control can make a running session reachable from the Claude app. Turn it on in Claude Code ("Enable Remote Control for all sessions" in `/config` makes every session reachable); Agent Manager doesn't drive it, and follows a session it moves to a new id.
+
+What that does and doesn't give you, from a phone or another computer:
+
+- **You can** continue any Claude Code session that's running in Agent Manager on your computer, from the Claude app or claude.ai, with its edits made on your computer.
+- **You can** read and edit your notes and tickets in Obsidian's mobile app, if your vault syncs there.
+- **You can't** start a session in Agent Manager on your computer from elsewhere: Remote Control reaches sessions that are already running, and the Launch and Resume buttons on a ticket don't work in Obsidian's mobile app, where Agent Manager doesn't run.
+- **You can't** reach a session once its computer sleeps or Obsidian closes, since the session runs inside Obsidian.
+- **Codex and Antigravity sessions** aren't reachable this way yet: each has a remote mode of its own, not yet tried with Agent Manager.
+
+## More than one computer
+
+**Turn Agent Manager on in one computer only**, the one where your sessions should run. It isn't built for two yet:
+
+- **Sessions stay on the computer that ran them**, with their CLI's files, and another computer can't resume them. Their transcript notes sync, so you can read one anywhere.
+- **Two copies overwrite each other's state.** The plugin's `data.json` keeps this computer's state (pinned sessions, which session has which agent profile) beside its settings, and Obsidian Sync carries it when it carries community plugins.
+- **Git stays on one computer.** Obsidian Sync skips folders whose names start with a dot (`.obsidian` aside), `.git` among them, and the skill links Set up this vault makes (`.claude/skills/`, `.agents/skills/`) too.
+
+**Keeping it off on another computer.** If Obsidian Sync carries your community plugins (its Active and Installed community plugin list switches), turning Agent Manager on here turns it on there too. Give the other computer a settings profile of its own: Settings → Files and links → Override config folder (for example `.obsidian-laptop`), then leave Agent Manager off in it. That profile is the whole Obsidian setup for that computer, its other plugins and workspace included. Phones and tablets need nothing: Agent Manager is desktop-only, and Obsidian doesn't load it there.
+
+On the other computer and your phone, your notes and tickets sync as usual, but a ticket's Launch and Resume buttons don't work there. Don't edit a note there while a session on the main computer is writing to it, such as its ticket: Sync merges the two, and the merge can go wrong.
+
+**Working from another computer.** Run the sessions on the one with Agent Manager, and reach them:
+
+- **Claude Code's Remote Control**: start or resume a session in Agent Manager on the main computer, and continue it from the Claude app or claude.ai anywhere (see Your phone). The main computer has to stay awake with Obsidian open.
+- **SSH**: sign in to the main computer and run Claude Code or Codex in your vault's folder there. Agent Manager there lists the session with the others (Antigravity's only when Agent Manager started it).
+
+Remote Control reaches only a session that's already running, so it has to be started on the main computer first. SSH starts one from elsewhere, but in a plain terminal, not in Agent Manager's. Starting a ticket's session on the main computer from elsewhere isn't possible yet.
 
 ## What it touches outside your vault
 
@@ -102,6 +129,8 @@ Agent Manager runs on your computer and reads and runs a few things outside the 
 ## Known limits
 
 - Desktop and macOS only. It runs the CLIs on your computer, which Obsidian's mobile apps can't, and the terminal's helper reads the process table through macOS's own library.
+- A session in Agent Manager can't be started from a phone or another computer, only continued there through Claude Code's Remote Control once it's running (see Your phone).
+- One computer at a time: turn Agent Manager on in only one, since sessions can't be resumed on another computer and two copies overwrite each other's state (see More than one computer).
 - Antigravity has no way to take an agent profile's instructions when it starts, so it gets them only in the session's first message.
 - A session keeps the agent profile it started with. Move to agent profile… files it under another, but the conversation itself doesn't change.
 

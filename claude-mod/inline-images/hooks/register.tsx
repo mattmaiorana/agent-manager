@@ -180,9 +180,14 @@ export const register: Register = on => {
       const generation = sendNumber(e.requestId, a.path) * 1_000_000 + box.columns * 1000 + box.rows
       frames.push(
         <Box key={`frame:${a.path}`} flexDirection="column" borderStyle="round" borderColor="subtle" paddingX={1} width={frameWidth} marginTop={1}>
-          <Box justifyContent="space-between">
-            <Text bold wrap="truncate-end">{caption || name}</Text>
-            <Text dimColor>{size ? `${size.width} × ${size.height} · ` : ''}{sizeText(a.size)}</Text>
+          {/* The size never shrinks or wraps; a long title is cut short two columns before it. */}
+          <Box justifyContent="space-between" columnGap={2}>
+            <Box flexShrink={1} minWidth={0}>
+              <Text bold wrap="truncate-end">{caption || name}</Text>
+            </Box>
+            <Box flexShrink={0}>
+              <Text dimColor>{size ? `${size.width} × ${size.height} · ` : ''}{sizeText(a.size)}</Text>
+            </Box>
           </Box>
           <Box marginTop={1}>
             <Image key={`image:${a.path}`} source={{ file: a.path, format: 'png', generation }} columns={box.columns} rows={box.rows} alt={name} />
@@ -191,9 +196,15 @@ export const register: Register = on => {
             <Button key={`open:${a.path}`} plain label="↗ Open" onPress={() => openIt(a.path)} />
             <Button key={`save:${a.path}`} plain dimColor label="Save to Downloads" onPress={() => saveIt(a.path)} />
             <Button key={`copy:${a.path}`} plain dimColor label="Copy path"
-              onPress={async press => {
-                const r = await $.ui.copy({ text: a.path, surface: press.surface })
-                $.ui.toast(r.isCopied ? 'Path copied' : "Couldn't copy the path")
+              onPress={async () => {
+                // pbcopy rather than $.ui.copy: the terminal's clipboard sequence would also raise
+                // Agent Manager's own copy notice, so this toast, like Save's, is the only one.
+                try {
+                  const r = await $.process.run(['pbcopy'], { stdin: a.path })
+                  $.ui.toast(r.exitCode === 0 ? 'Path copied' : "Couldn't copy the path")
+                } catch {
+                  $.ui.toast("Couldn't copy the path")
+                }
               }} />
           </Box>
         </Box>,
