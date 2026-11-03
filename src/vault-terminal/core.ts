@@ -328,7 +328,7 @@ export class VaultTerminal {
     for (const view of this.views()) view.refreshLook();
   }
 
-  /** The "Show pictures" setting changed: every terminal follows it. */
+  /** The "Pictures in the terminal" setting changed: every terminal follows it. */
   applyPictures(): void {
     for (const view of this.liveViews) view.applyPictures();
   }
@@ -686,6 +686,8 @@ export class VaultTerminal {
       if (!this.loginEnv && this.pathProbe) await Promise.race([this.pathProbe, new Promise((r) => window.setTimeout(r, 3000))]);
       // The login shell's PATH exactly, once it has answered.
       const env = agentEnv(await pathForScript(program, this.loginEnv?.PATH?.trim() || path), this.loginEnv, this.settings.agentVariables, cwd, parseNames(this.settings.strippedVariables ?? ""));
+      // The host's own variables for this start (Agent Manager's quiet-tools state file).
+      if (opts.host?.env) Object.assign(env, opts.host.env);
       // What the program actually is decides its extras: claude's own flag
       // would make another program set as the command refuse to start.
       const count = words.length;

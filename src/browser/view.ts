@@ -10,6 +10,8 @@ import { BrowserMethods } from "./home.js";
 import type { WorkspaceLeaf } from "obsidian";
 import type { BackendKey } from "../constants/backends.js";
 import type { AgentManagerPlugin } from "../plugin/main.js";
+// The sidebar's cards, each opened by its row: New session and New ticket.
+type CardKind = "session" | "ticket";
 // The view Obsidian makes. The parts and every method here that calls one take `this` as
 // Browser.
 class BrowserView extends import_obsidian.ItemView {
@@ -22,10 +24,19 @@ class BrowserView extends import_obsidian.ItemView {
   declare _nextRenderIsBackground: boolean | undefined;
   declare _renderIsBackground: boolean | undefined;
   declare _renderGen: number | undefined;
-  // The New session card: its open state's focus, its typed name, and its CLI pick.
-  declare _focusCardName: boolean | undefined;
+  // The card a click just opened, whose first field takes the focus on the next render.
+  declare _focusCard: CardKind | undefined;
+  // The New session card: its typed name, its CLI pick, and its agent profile pick (with
+  // the switch's choice when it was made).
   declare _titleDraft: string | undefined;
   declare _launchBackend: BackendKey | null | undefined;
+  declare _launchAgent: { id: string; switched: string } | undefined;
+  // Each card: the next render's card grows down (a click just opened it), when the card
+  // that did first reached the screen, and whether it's folding up (closeCard), so a
+  // render draws it closed.
+  declare _revealCard: Partial<Record<CardKind, boolean>> | undefined;
+  declare _revealAt: Partial<Record<CardKind, number>> | undefined;
+  declare _cardClosing: Partial<Record<CardKind, boolean>> | undefined;
   // The name today's chat ran under, once it has.
   declare _todayRan: string | undefined;
   // Recent: how many closed sessions show (unset until the first render sets it, which
@@ -81,4 +92,4 @@ function isBrowser(v: unknown): v is Browser {
   return v instanceof BrowserView;
 }
 export { BrowserView, isBrowser };
-export type { Browser };
+export type { Browser, CardKind };

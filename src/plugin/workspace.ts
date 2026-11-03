@@ -1,6 +1,6 @@
 // The workspace, the plugin's side: the browser leaf, live status dots, the dedicated terminal split, routing, and open sessions.
 
-import type { View, Workspace, WorkspaceLeaf, WorkspaceParent } from "obsidian";
+import type { TFile, View, Workspace, WorkspaceLeaf, WorkspaceParent } from "obsidian";
 import { import_obsidian } from "../externals.js";
 import { BrowserView, isBrowser } from "../browser/view.js";
 import { BROWSER_VIEW_TYPE, SESSION_VIEW_TYPE } from "../sessions/constants.js";
@@ -386,6 +386,24 @@ class WorkspaceMethods {
     const anchor = group?.children?.[0]; // a terminal leaf to split off
     if (!anchor) return this.app.workspace.getLeaf("tab");
     return this.app.workspace.createLeafBySplit(anchor, "vertical", true); // new group on the LEFT
+  }
+  // Open a note from a session (its strip, its transcript, a link) on the notes side:
+  // its tab if it's open, else a new tab in the notes group. Obsidian's new tab opens in
+  // the active group, the session split, and the sweep then moves it out; closing the
+  // stray there selected a neighboring session in the split, not the one in use.
+  async openInNotesArea(this: AgentManagerPlugin, file: TFile): Promise<void> {
+    const ws = this.app.workspace;
+    const already = ws.getLeavesOfType("markdown").find((l) => l.view instanceof import_obsidian.FileView && l.view.file?.path === file.path);
+    if (already) { ws.setActiveLeaf(already, { focus: true }); return; }
+    let leaf: WorkspaceLeaf;
+    if (!this.useDedicatedSplit() || !this.getTerminalGroup()) leaf = ws.getLeaf("tab");
+    else {
+      const notes = this.getNotesGroup();
+      // A tab group has children (obsidian-internals.d.ts); as elsewhere, taken as given.
+      leaf = notes ? ws.createLeafInParent(notes, (notes.children as WorkspaceLeaf[]).length) : this.createNotesGroupWithLeaf();
+    }
+    await leaf.openFile(file);
+    ws.setActiveLeaf(leaf, { focus: true });
   }
   // The leaf a routed note open should land in: reuse the visible, navigable notes
   // leaf (in-place open, like normal single-pane nav); else a new tab in the notes

@@ -18,6 +18,10 @@ const MAIN_SESSION_PROPERTY = "main-session";
 const SOURCE_PROPERTY = "source";
 // Today's chat: found and named by this, with {{date}} as YYYY-MM-DD in local time.
 const DEFAULT_DAILY_NAME = "Daily Chat - {{date}}";
+// What the sidebar's New session row says after its icon, unless set.
+const DEFAULT_NEW_BUTTON_NAME = "New Session";
+// What the sidebar's New ticket row says after its icon, unless set.
+const DEFAULT_NEW_TICKET_BUTTON_NAME = "New Ticket";
 // Set up this vault's session, found again by this name (plugin/guides.ts).
 const SETUP_SESSION_NAME = "Vault setup";
 // Folders outside the vault that every session is given with --add-dir (a setting,
@@ -84,5 +88,5 @@ const SESSION_NAME_PROMPT_SUFFIX = "\"";
 // short), and runs of spaces as one.
 const plainSessionName = (name: string): string => [...name].map((c) => (c.charCodeAt(0) < 32 || c.charCodeAt(0) === 127 || c === "\"" || c === "`" ? " " : c)).join("").replace(/\s+/g, " ").trim();
 const sessionNamePrompt = (title: string, token?: string | null): string => `${SESSION_NAME_PROMPT_PREFIX}${title}${SESSION_NAME_PROMPT_SUFFIX}${token ? ` (launch ${token}).` : "."}`;
-export { DEFAULT_WRAP_MESSAGE, wrapLine, DEFAULT_ADDED_FOLDERS, DEFAULT_DAILY_NAME, SETUP_SESSION_NAME, DEFAULT_OVERVIEW_NAME, DEFAULT_TICKET_TEMPLATE, DEFAULT_NAMES, MAIN_SESSION_PROPERTY, SOURCE_PROPERTY, DEFAULT_OPENING, NAME_LABELS, OPENING_LABELS, OPENING_LEAD, SESSION_NAME_PROMPT_PREFIX, SESSION_NAME_PROMPT_SUFFIX, plainSessionName, sessionNamePrompt };
+export { DEFAULT_WRAP_MESSAGE, wrapLine, DEFAULT_ADDED_FOLDERS, DEFAULT_DAILY_NAME, DEFAULT_NEW_BUTTON_NAME, DEFAULT_NEW_TICKET_BUTTON_NAME, SETUP_SESSION_NAME, DEFAULT_OVERVIEW_NAME, DEFAULT_TICKET_TEMPLATE, DEFAULT_NAMES, MAIN_SESSION_PROPERTY, SOURCE_PROPERTY, DEFAULT_OPENING, NAME_LABELS, OPENING_LABELS, OPENING_LEAD, SESSION_NAME_PROMPT_PREFIX, SESSION_NAME_PROMPT_SUFFIX, plainSessionName, sessionNamePrompt };
 export type { NameKey, OpeningKey };

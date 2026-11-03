@@ -10,6 +10,7 @@ class LinkMethods {
   //   obsidian://agent-manager?vault=<vault>&op=resume&session=<id>
   //   obsidian://agent-manager?vault=<vault>&op=new&backend=<key>&title=<title>
   //   obsidian://agent-manager?vault=<vault>&op=new&note=<path>[&backend=<key>]
+  //   obsidian://agent-manager?vault=<vault>&op=daily[&agent=<profile>]
   // `note` is a note's or a folder's vault path; the session is started from it, as the
   // file menu does, named for it unless the link gives a title.
   // op=resume finds its session by id alone. The operation is `op`, never `action`:
@@ -18,11 +19,29 @@ class LinkMethods {
   // session from one asks first, unless it starts from a ticket (the tickets base's
   // Launch): a web page can't make a note a ticket, since a clipped note's properties come
   // from the user's template. A resume asks only when the session ran outside this vault.
+  // op=daily goes to today's chat, as the sidebar's button does, and doesn't ask either:
+  // it carries no text of its own, and can only reach the one session the day already has.
+  // `agent` names an agent profile by name or id, in any case; the sidebar's switch picks
+  // when it names none, and while profiles are off it's ignored.
   async handleProtocolLink(this: AgentManagerPlugin, params: ObsidianProtocolData): Promise<void> {
     // The link can arrive during a cold start, before the workspace can open a leaf.
     await this.whenLayoutReady();
     const op = String(params.op || "resume").toLowerCase();
     const say = (text: string) => new import_obsidian.Notice(`Agent Manager: ${text}`, 10000);
+    if (op === "daily") {
+      await this.revealBrowser();
+      const named = String(params.agent || "").trim();
+      const agents = this.agentList();
+      let agentId: string | undefined;
+      if (named && agents.length) {
+        const want = named.toLowerCase();
+        const agent = agents.find((a) => a.id.toLowerCase() === want || a.name.trim().toLowerCase() === want);
+        if (!agent) { say(`there's no agent profile named “${named.slice(0, 100)}”.`); return; }
+        agentId = agent.id;
+      }
+      await this.openTodaysChat(null, agentId);
+      return;
+    }
     if (op === "new") {
       await this.revealBrowser();
       let backendOverride = this.backendFromName(params.backend);
@@ -85,7 +104,7 @@ class LinkMethods {
     const note = this.findTranscriptNoteBySessionId(sessionId);
     if (note) {
       say("that session isn't resumable here. Opening its transcript.");
-      await this.app.workspace.getLeaf("tab").openFile(note);
+      await this.openInNotesArea(note);
       return;
     }
     say(`session ${String(sessionId).slice(0, 8)} was not found.`);

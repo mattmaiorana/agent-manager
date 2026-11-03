@@ -1,12 +1,13 @@
 // Names and the opening a session is sent: settings with defaults, read in one place.
 
 import { fs, import_obsidian, os, path } from "../externals.js";
-import { DEFAULT_WRAP_MESSAGE, DEFAULT_ADDED_FOLDERS, DEFAULT_DAILY_NAME, DEFAULT_NAMES, DEFAULT_OPENING, DEFAULT_OVERVIEW_NAME, DEFAULT_TICKET_TEMPLATE, plainSessionName } from "../constants/names.js";
-import { composeOpening, launchContext } from "../context/launch-context.js";
+import { DEFAULT_WRAP_MESSAGE, DEFAULT_ADDED_FOLDERS, DEFAULT_DAILY_NAME, DEFAULT_NAMES, DEFAULT_NEW_BUTTON_NAME, DEFAULT_NEW_TICKET_BUTTON_NAME, DEFAULT_OPENING, DEFAULT_OVERVIEW_NAME, DEFAULT_TICKET_TEMPLATE, plainSessionName } from "../constants/names.js";
+import { composeOpening, contextPrompt, emptyContext, launchContext } from "../context/launch-context.js";
 import type { ContextVault, LaunchContext, LaunchFrom } from "../context/launch-context.js";
 import type { NameKey, OpeningKey } from "../constants/names.js";
 import { isArray, stringOf, withinVault } from "../util/guards.js";
 import type { AgentManagerPlugin } from "./main.js";
+import type { ContextSource } from "../types.js";
 class ConfigMethods {
   // A folder or property name: the setting, else its default.
   nameOf(this: AgentManagerPlugin, key: NameKey): string {
@@ -93,10 +94,20 @@ class ConfigMethods {
     const pad = (n: number) => String(n).padStart(2, "0");
     return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
   }
-  // Today's chat's name: the switched agent's while there are agents, else the setting,
-  // with {{date}} filled in.
-  dailyChatName(this: AgentManagerPlugin): string {
-    const agent = this.switchedAgent();
+  // The New session button's name: the setting, else "New Session".
+  newButtonName(this: AgentManagerPlugin): string {
+    const v = stringOf(this.pluginData.newButtonName ?? "").trim();
+    return v || DEFAULT_NEW_BUTTON_NAME;
+  }
+  // The New ticket button's name: the setting, else "New Ticket".
+  newTicketButtonName(this: AgentManagerPlugin): string {
+    const v = stringOf(this.pluginData.newTicketButtonName ?? "").trim();
+    return v || DEFAULT_NEW_TICKET_BUTTON_NAME;
+  }
+  // Today's chat's name: the switched agent's (or `agentId`'s, when given) while there
+  // are agents, else the setting, with {{date}} filled in.
+  dailyChatName(this: AgentManagerPlugin, agentId?: string | null): string {
+    const agent = agentId === undefined ? this.switchedAgent() : this.agentById(agentId);
     if (agent) return this.agentDailyName(agent);
     const v = this.pluginData.dailyChatName;
     const template = typeof v === "string" && v.trim() ? v.trim() : DEFAULT_DAILY_NAME;
@@ -135,6 +146,15 @@ class ConfigMethods {
         const f = this.app.vault.getAbstractFileByPath(p);
         return f instanceof import_obsidian.TFile ? (this.app.metadataCache.getFileCache(f)?.frontmatter ?? null) : null;
       },
+      // A wikilink's target as Obsidian resolves it, else a vault path; a folder by path
+      // only, since a link can't name one.
+      resolve: (link, from) => {
+        const note = this.app.metadataCache.getFirstLinkpathDest(link, from);
+        if (note) return { path: note.path, folder: false };
+        const f = this.app.vault.getAbstractFileByPath((0, import_obsidian.normalizePath)(link));
+        if (f instanceof import_obsidian.TFile) return { path: f.path, folder: false };
+        return f instanceof import_obsidian.TFolder && !f.isRoot() ? { path: f.path, folder: true } : null;
+      },
     };
   }
   // What a session started from this note or folder gets: its ticket, the overviews
@@ -158,7 +178,8 @@ class ConfigMethods {
   buildOpening(this: AgentManagerPlugin, { notePath, folderPath, daily, agentId }: { notePath?: string | null; folderPath?: string | null; daily?: boolean; agentId?: string | null } = {}): string {
     const vault = this.getVaultPath();
     const from = notePath || folderPath;
-    const ctx: LaunchContext = from ? this.launchContext({ notePath, folderPath }) : { ticket: null, overviews: [], repo: null, agent: null };
+    const ctx: LaunchContext = from ? this.launchContext({ notePath, folderPath }) : emptyContext();
+    if (ctx.missingReads.length) new import_obsidian.Notice(`Agent Manager: this ticket's reads name ${ctx.missingReads.length === 1 ? "something" : "things"} that isn't in the vault, so the session isn't told ${ctx.missingReads.length === 1 ? "it" : "them"}: ${ctx.missingReads.join(", ")}.`, 10000);
     const vars: Record<string, string> = { path: from ? path.join(vault, from) : "", vault, date: this.todayString() };
     const kind = ctx.ticket ? "ticket" : notePath ? "note" : folderPath ? "folder" : daily ? "daily" : "plain";
     return composeOpening((key) => this.openingPart(key), ctx, kind, vars, (p) => path.join(vault, p), this.agentOpeningInfo(agentId));
@@ -167,8 +188,57 @@ class ConfigMethods {
   agentOpening(this: AgentManagerPlugin, agentId: string | null | undefined): string {
     const info = this.agentOpeningInfo(agentId);
     if (!info) return "";
-    const empty: LaunchContext = { ticket: null, overviews: [], repo: null, agent: null };
-    return composeOpening((key) => (key === "agent" ? this.openingPart("agent") : ""), empty, "plain", {}, (p) => p, info);
+    return composeOpening((key) => (key === "agent" ? this.openingPart("agent") : ""), emptyContext(), "plain", {}, (p) => p, info);
+  }
+  // ---- Pinned context (1.4) ----
+  // A session's context comes from where it was launched from, recorded by id at launch
+  // (sessionSources), never a ticket attached or bound later. The record's `from` is a
+  // note's vault path, or a folder's with a trailing slash.
+  sourceString(this: AgentManagerPlugin, src: { notePath?: string | null; folderPath?: string | null } | null | undefined): string | null {
+    if (src?.notePath) return src.notePath;
+    if (src?.folderPath) return `${src.folderPath}/`;
+    return null;
+  }
+  // The paragraph pinned to the system prompt for a session from `from`
+  // (context/launch-context.ts, contextPrompt): "" for none, or a note or folder that's gone.
+  pinnedContext(this: AgentManagerPlugin, from: string | null | undefined): string {
+    const at = this.contextFromString(from);
+    if (!at) return "";
+    const vault = this.getVaultPath();
+    const ctx = this.launchContext(at);
+    const kind = ctx.ticket ? "ticket" : at.folderPath ? "folder" : "note";
+    return contextPrompt(ctx, { kind, path: (at.notePath || at.folderPath) as string }, (key) => !!this.openingPart(key).trim(), (p) => path.join(vault, p));
+  }
+  // A record's `from` as a launch's note or folder, while it's still in the vault; null otherwise.
+  contextFromString(this: AgentManagerPlugin, from: string | null | undefined): { notePath?: string; folderPath?: string } | null {
+    if (!from) return null;
+    if (from.endsWith("/")) {
+      const f = this.app.vault.getAbstractFileByPath(from.slice(0, -1));
+      return f instanceof import_obsidian.TFolder && !f.isRoot() ? { folderPath: f.path } : null;
+    }
+    return this.app.vault.getAbstractFileByPath(from) instanceof import_obsidian.TFile ? { notePath: from } : null;
+  }
+  // A session's recorded context source, or undefined for one launched before 1.4 or
+  // outside the plugin.
+  recordedContextSource(this: AgentManagerPlugin, sessionId: string | null | undefined): ContextSource | undefined {
+    if (!sessionId) return undefined;
+    const map = this.pluginData.sessionSources;
+    return map && Object.prototype.hasOwnProperty.call(map, sessionId) ? map[sessionId] : undefined;
+  }
+  // Where a session's context comes from: its record, else its transcript's `source`
+  // (sourceOf), else nothing. A record whose note or folder isn't there anymore (moved
+  // while Obsidian was closed, so no rename was seen) gives way to the transcript's
+  // `source`, a wikilink Obsidian resolves by name.
+  contextSourceOf(this: AgentManagerPlugin, sessionId: string | null | undefined): string | null {
+    const rec = this.recordedContextSource(sessionId);
+    if (rec && (rec.from === null || this.contextFromString(rec.from))) return rec.from;
+    return this.sourceString(this.sourceOf(sessionId)) ?? rec?.from ?? null;
+  }
+  // Record a session's context source, once: the launch's record is the one that counts.
+  async recordContextSource(this: AgentManagerPlugin, sessionId: string | null | undefined, src: ContextSource | null | undefined): Promise<void> {
+    if (!sessionId || !src || this.recordedContextSource(sessionId)) return;
+    this.pluginData.sessionSources = { ...(this.pluginData.sessionSources || {}), [sessionId]: { from: src.from, pinned: src.pinned } };
+    await this.savePluginData();
   }
   // Where a session's durable transcript is filed: the transcripts folder, or with an
   // agent, its folder there. `lockDir` is the transcripts folder either way.

@@ -9,10 +9,10 @@ import { readFileSync, readdirSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
 import { expandPath, inlineSettings, withSessionSettings } from "./finder";
-import { HOOK_ID } from "./status";
+import { BRIDGE_ID, HOOK_ID } from "./status";
 
 export interface ClaudeOptions {
-  /** "Show pictures" is on: claude is told the terminal draws kitty placeholder pictures. */
+  /** "Pictures in the terminal" is on: claude is told the terminal draws kitty placeholder pictures. */
   pictures?: boolean;
 }
 
@@ -71,13 +71,23 @@ const HOOK_EVENTS: [string, string][] = [
  * for a hook to write to the terminal) is an OSC 99 with the terminal's id
  * and the state, so it arrives in order with claude's output. printf, not
  * echo: sh's echo may read the backslashes itself.
+ *
+ * Each also reports Remote Control: a second OSC 99, with BRIDGE_ID, carrying
+ * CLAUDE_CODE_BRIDGE_SESSION_ID, which claude sets in a hook's environment
+ * while the session is connected and removes when it isn't (REFERENCE.md).
+ * `turn=` from a turn's hooks, `start=` from SessionStart, which reports only
+ * that. A value with anything but letters, digits, _ and - is dropped, so the
+ * answer stays valid JSON; a shell case, so no process is started for it.
  */
 export function sessionHooks(): Record<string, unknown> {
   const hooks: Record<string, unknown> = {};
+  const bridge = (from: string) => `\\u001b]99;i=${BRIDGE_ID};${from}=' "$b" '\\u0007`;
+  const clean = `b=\${CLAUDE_CODE_BRIDGE_SESSION_ID-}; case $b in *[!A-Za-z0-9_-]*) b=;; esac; `;
   for (const [event, state] of HOOK_EVENTS) {
-    const command = `printf '%s\\n' '{"terminalSequence":"\\u001b]99;i=${HOOK_ID};${state}\\u0007"}'`;
+    const command = `${clean}printf '%s%s%s\\n' '{"terminalSequence":"\\u001b]99;i=${HOOK_ID};${state}\\u0007${bridge("turn")}"}'`;
     hooks[event] = [{ hooks: [{ type: "command", command }] }];
   }
+  hooks.SessionStart = [{ hooks: [{ type: "command", command: `${clean}printf '%s%s%s\\n' '{"terminalSequence":"${bridge("start")}"}'` }] }];
   return hooks;
 }
 
@@ -98,7 +108,7 @@ const SUPPORTED: Record<string, string> = {
  * claude's documented variable for a terminal that draws kitty graphics
  * protocol pictures with Unicode placeholders but isn't detected: its
  * startup asks nothing this terminal could answer, so pictures need it.
- * Off with "Show pictures", or where the user has set it, it isn't added.
+ * Off with "Pictures in the terminal", or where the user has set it, it isn't added.
  */
 export const PICTURES = "CLAUDE_CODE_FORCE_TERMINAL_IMAGES";
 

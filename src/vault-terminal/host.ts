@@ -68,6 +68,8 @@ export interface HostLaunch {
   folder?: string;
   /** Without the terminal's additions, for a start that mustn't get them (a one-shot attach). */
   plain?: boolean;
+  /** Variables added to the agent's environment for this start, over the ones it would get. */
+  env?: Record<string, string>;
 }
 
 /**
@@ -93,6 +95,8 @@ export interface TerminalController {
   dialogShowing?(): boolean;
   /** The program's state changed (status.ts). */
   stateChange?(state: ProgramState | null): void;
+  /** A claude hook reported Remote Control (claude.ts): claude.ai's session id, or "" when not connected. atStart: from SessionStart, which may run before the connection is made. */
+  bridge?(id: string, atStart: boolean): void;
   /** The program started; its pid. */
   started?(pid: number): void;
   /** The program ended. True when the host takes it from here (it restarts the view itself): the terminal then says and does nothing more. */

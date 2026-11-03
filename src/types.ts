@@ -33,6 +33,18 @@ export interface PluginData {
   sessionFolders?: unknown;
   // Today's chat's name template.
   dailyChatName?: unknown;
+  // Show the sidebar's Daily Chat button (on unless false).
+  dailyChatButton?: unknown;
+  // Show the sidebar's New session button (on unless false), and what it says.
+  newButton?: unknown;
+  newButtonName?: unknown;
+  // Show the sidebar's New ticket button (on unless false, and only while tickets are
+  // on), what it says, and the heading its card's notes go under.
+  newTicketButton?: unknown;
+  newTicketButtonName?: unknown;
+  ticketNotesHeading?: unknown;
+  // The New ticket card's Launch button, beside Create (on unless false).
+  ticketLaunchButton?: unknown;
   // Read the overviews above a note or folder a session starts from (off by default).
   useOverviews?: unknown;
   // Treat notes with `type: ticket` as tickets (off by default).
@@ -47,10 +59,14 @@ export interface PluginData {
   sentFiles?: unknown;
   // The plugin's own rule: a folder, "./" at its start for beside the note.
   sentFilesFolder?: unknown;
-  // Show the Tickets button while tickets are on (on unless false), and its name.
-  ticketsButton?: unknown;
-  ticketsButtonName?: unknown;
-  // The note the Tickets button opens, a vault path; unset for the tickets base.
+  // The sidebar's custom button (on unless false): its icon (a Lucide name), its text,
+  // and what it opens (a vault path or a URL; unset for the tickets note).
+  customButton?: unknown;
+  customButtonIcon?: unknown;
+  customButtonName?: unknown;
+  customButtonTarget?: unknown;
+  // The note Open tickets (and the custom button, unset) opens, a vault path; unset for
+  // the tickets base.
   ticketsNote?: unknown;
   // The note a new overview is made from, a vault path; unset for the built-in one.
   overviewTemplate?: unknown;
@@ -67,6 +83,10 @@ export interface PluginData {
   // The agent each session's conversation launched as, by session id: what a resume or a
   // fork passes the CLI, which keeps it whatever Move to files the session under.
   sessionLaunchAgents?: Record<string, string>;
+  // Where each session's context comes from, by session id, recorded at launch: what a
+  // resume pins and the note icon shows (plugin/config.ts). Never a ticket attached or
+  // bound later, which sent the conversation nothing.
+  sessionSources?: Record<string, ContextSource>;
   // Renames, by session id.
   sessionNames?: Record<string, string>;
   // The Antigravity conversations started in this vault, by id.
@@ -79,6 +99,12 @@ export interface PluginData {
   dedicatedTerminalSplit?: boolean;
   showSidebarTitle?: boolean;
   codexServer?: boolean;
+  // "Show pictures Claude sends you": load the bundled Claude mod (plugin/claude-mod.ts). On unless false.
+  claudePictures?: boolean;
+  // "Fold tool output": load the bundled quiet-tools mod, for /quiet (plugin/claude-mod.ts). On unless false.
+  claudeQuietTools?: boolean;
+  // "Show Remote Control on the strip": the dot on a Claude session's strip (sessions/remote-control.ts). On unless false.
+  remoteControlDot?: boolean;
   // The terminal's settings (src/vault-terminal/), defaults filled in by terminalSettings().
   terminal?: unknown;
   // The terminal's own small state.
@@ -166,9 +192,20 @@ export type SavedSessionState = {
   // differs (a fork of a moved session), by id ("" for none), until its id is recorded.
   agent?: string;
   launchAgent?: string;
+  // Where its context comes from, until its id is recorded (sessionSources).
+  contextSource?: ContextSource;
   // Never saved: set by openSessionLeaf for a tab its caller launches.
   awaitLaunch?: boolean;
 };
+
+// Where a session's context comes from: `from` is the note's vault path, or a folder's
+// with a trailing slash, or null for a session started from neither (plain, Daily Chat);
+// `pinned` is whether its launch pinned that context to the system prompt (Claude and
+// Codex, with something to pin), rather than sending it in the opening only.
+export interface ContextSource {
+  from: string | null;
+  pinned: boolean;
+}
 
 // A session that followed its conversation to a new id (sessions/identity.ts), shown on
 // its strip.
@@ -221,6 +258,21 @@ export type { Session };
 
 // A loaded sidebar: the view and every part's methods.
 export type { Browser };
+
+// The New ticket card: open or not, what's typed and picked in it (a project's folder
+// path, "" for none yet; the backend, null for the default), and the session it was
+// opened from, which Create attaches to the new ticket.
+export interface TicketDraft {
+  name: string;
+  project: string;
+  backend: BackendKey | null;
+  notes: string;
+}
+export interface TicketCard {
+  open: boolean;
+  draft: TicketDraft;
+  from?: Session;
+}
 
 // ---- The transcript writer (transcripts/transcript-core.ts) ----
 

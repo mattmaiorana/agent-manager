@@ -183,6 +183,8 @@ class IdentityMethods {
   // Bind this view to another session id and file, and reset what was kept per file,
   // so capture, the model badge, and the note write-back all start again on it.
   _repointTo(this: Session, sessionId: string, file: string): void {
+    // Followed to a new id: Remote Control is known again from the next hook.
+    this._setRc("unknown");
     // A rename belongs to the conversation, not the id: the new id takes the old one's,
     // unless it has its own.
     const oldId = this._ownSessionId();

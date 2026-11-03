@@ -47,7 +47,7 @@ export interface LaunchContext {
   env: NodeJS.ProcessEnv;
   /** The folder it starts in. */
   cwd: string;
-  /** "Show pictures". */
+  /** "Pictures in the terminal". */
   pictures: boolean;
 }
 

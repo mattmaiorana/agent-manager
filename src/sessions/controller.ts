@@ -9,10 +9,12 @@ import type { App, WorkspaceLeaf } from "obsidian";
 import { StringDecoder, fs, import_obsidian, path } from "../externals.js";
 import { CLI_BACKENDS, INPUT_PASTE_MIN, isBackendKey } from "../constants/backends.js";
 import { OPENING_LEAD, SETUP_SESSION_NAME, plainSessionName, sessionNamePrompt } from "../constants/names.js";
-import { DIALOG_RE, INPUT_GUARD_NOTICE_MS } from "./constants.js";
+import { DIALOG_RE, INPUT_GUARD_NOTICE_MS, RC_PANEL_RE } from "./constants.js";
 import { splitCommand } from "../vault-terminal/finder";
 import { IdentityMethods } from "./identity.js";
 import { StripMethods } from "./strip.js";
+import { RemoteControlMethods } from "./remote-control.js";
+import type { RcState } from "./remote-control.js";
 import { SessionActionMethods } from "./session-actions.js";
 import { ViewNoteMethods } from "../notes/view-note.js";
 import { ViewTicketMethods } from "../notes/view-ticket.js";
@@ -24,7 +26,7 @@ import { stringOf } from "../util/guards.js";
 import type { BackendKey, CliBackend } from "../constants/backends.js";
 import type { AgentManagerPlugin } from "../plugin/main.js";
 import type { LinkKind } from "../tickets/session-links.js";
-import type { ForkFrom, HandoffMode, IndexRecord, RehostedFrom, SavedSessionState, SessionRecord } from "../types.js";
+import type { ContextSource, ForkFrom, HandoffMode, IndexRecord, RehostedFrom, SavedSessionState, SessionRecord } from "../types.js";
 import type { CloseReason } from "../vault-terminal/close";
 import type { HostLaunch, TerminalController } from "../vault-terminal/host";
 import type { ExitInfo } from "../vault-terminal/session";
@@ -73,6 +75,31 @@ class SessionController implements TerminalController {
   declare lastUserInputAt: number;
   declare _attempt: number;
   declare _resumeStep: "attach" | "resume" | null;
+  // Whether this start loaded the quiet-tools mod, so /quiet works (launch, strip.ts).
+  declare _quietTools: boolean;
+  // quiet-tools' state for this tab (strip.ts): its file, whether /quiet is on, the watch on it.
+  declare _quietFile: string | null;
+  declare _quietOn: boolean;
+  declare _quietWatch: { close(): void } | null;
+  declare _quietBtnEl: HTMLElement | null;
+  // A Quiet press waiting on its Enter, so a second press can't type over it.
+  declare _quietSending: boolean;
+  // Remote Control, as the hooks last said (remote-control.ts): the state, claude.ai's id
+  // for the session while on, the dot, and a click waiting on its Enter.
+  declare _rc: RcState;
+  declare _rcId: string;
+  declare _rcEl: HTMLElement | null;
+  declare _rcSending: boolean;
+  // Watching Claude's Remote Control panel for it to close (remote-control.ts).
+  declare _rcWatching: boolean;
+  // Counts the hooks' Remote Control reports, so a read of Claude's record that a report overtook is dropped.
+  declare _rcSeq: number;
+  // The plugin is typing a line into this session (_typeLine), so another waits or is refused.
+  declare _lineBusy: boolean;
+  // Keys the user has sent this tab (input), for _draftMark.
+  declare _inputCount: number;
+  // The running CLI's pid (started), to find its record in ~/.claude/sessions/ (remote-control.ts).
+  declare _programPid: number | null;
   declare _inert: { message: string; title: string } | null;
   // Launching, typing the opening, and closing (this file).
   declare _decided: boolean | undefined;
@@ -106,6 +133,9 @@ class SessionController implements TerminalController {
   declare _agentId: string | undefined;
   // A fork's: the agent its source's conversation launched as, which the fork keeps.
   declare _launchAgentId: string | undefined;
+  // Where this session's context comes from, and whether its launch pinned it (types.ts,
+  // ContextSource): set at launch, or on a resume from its record; undefined when not known.
+  declare _contextSource: ContextSource | undefined;
   declare _forkFrom: ForkFrom | null | undefined;
   declare _noteSupport: boolean | undefined;
   declare _noteClaim: boolean | undefined;
@@ -162,7 +192,12 @@ class SessionController implements TerminalController {
   declare _transcriptOffset: number | undefined;
   declare _transcriptDecoder: InstanceType<typeof StringDecoder> | undefined;
   declare _transcriptCarry: string | undefined;
-  declare _transcriptSkipPartial: boolean | undefined;
+  // Where the shown records start in the file (0: from the start), the notice above them
+  // while there are earlier ones, a load of them under way, and a count of resets.
+  declare _transcriptStart: number | undefined;
+  declare _transcriptEarlierEl: HTMLElement | null | undefined;
+  declare _transcriptLoadingEarlier: boolean | undefined;
+  declare _transcriptGen: number | undefined;
   constructor(view: TerminalView, plugin: AgentManagerPlugin) {
     this.view = view;
     this.plugin = plugin;
@@ -189,6 +224,21 @@ class SessionController implements TerminalController {
     this._attempt = 0;
     // A Claude resume tries attach first, then -r (launch, exit).
     this._resumeStep = null;
+    this._quietTools = false;
+    this._quietFile = null;
+    this._quietOn = false;
+    this._quietWatch = null;
+    this._quietBtnEl = null;
+    this._quietSending = false;
+    this._rc = "unknown";
+    this._rcId = "";
+    this._rcEl = null;
+    this._rcSending = false;
+    this._rcWatching = false;
+    this._rcSeq = 0;
+    this._inputCount = 0;
+    this._programPid = null;
+    this._lineBusy = false;
     // A tab whose restore failed: kept open, saying why, and never matched or restarted.
     this._inert = null;
   }
@@ -268,6 +318,7 @@ class SessionController implements TerminalController {
     if (this._setup) state.setup = true;
     if (this._agentId !== undefined) state.agent = this._agentId;
     if (this._launchAgentId !== undefined) state.launchAgent = this._launchAgentId;
+    if (this._contextSource) state.contextSource = this._contextSource;
     if (this._ticketLinks && Object.keys(this._ticketLinks).length) state.ticketLinks = this._ticketLinks;
     // Took a turn: its transcript was found, or it was a resume. A restore that finds no
     // transcript for a tab that never did starts it afresh rather than failing.
@@ -302,6 +353,7 @@ class SessionController implements TerminalController {
     if (state.setup) this._setup = true;
     if (typeof state.agent === "string") this._agentId = state.agent;
     if (typeof state.launchAgent === "string") this._launchAgentId = state.launchAgent;
+    if (state.contextSource && typeof state.contextSource === "object") this._contextSource = { from: typeof state.contextSource.from === "string" ? state.contextSource.from : null, pinned: state.contextSource.pinned === true };
     if (state.ticketLinks && typeof state.ticketLinks === "object") this._ticketLinks = { ...state.ticketLinks };
     if (state.started) this._started = true;
     if (state.rehostedFrom && typeof state.rehostedFrom === "object") this._rehostedFrom = state.rehostedFrom;
@@ -357,6 +409,9 @@ class SessionController implements TerminalController {
     this.hasOutput = false;
     this.lastOutputAt = 0;
     this._draft.clear();
+    // A new process: nothing is known about its Remote Control until its hooks say.
+    this._setRc("unknown");
+    this._programPid = null;
     const backendKey = this.getBackendKey();
     const backend = CLI_BACKENDS[backendKey];
     const cwd = this.workingDir || this.plugin.getVaultPath();
@@ -368,11 +423,18 @@ class SessionController implements TerminalController {
     // server has open can't be opened without it ("This conversation is open in another app").
     const codexServer = backendKey === "codex" && this.plugin.pluginData.codexServer === true;
     const global = backendKey === "codex" && !codexServer ? ["--no-daemon"] : [];
-    // The bundled Claude mod (claude-mod.ts), for every Claude start and resume while pictures
-    // are on. A `claude attach` takes no launch flags, so a re-hosted session reconnected that
-    // way goes without it.
-    const modDir = backendKey === "claude" ? this.plugin.claudeModDir?.() : null;
-    if (modDir) global.push("--plugin-dir", modDir);
+    // The bundled Claude mods (claude-mod.ts), for every Claude start and resume, each while
+    // its setting is on. A `claude attach` takes no launch flags, so a re-hosted session
+    // reconnected that way goes without them. The strip's Quiet button shows only while this
+    // start has quiet-tools (_setQuietTools).
+    const mods = backendKey === "claude" ? this.plugin.claudeModDirs() : { dirs: [], quiet: false };
+    for (const dir of mods.dirs) global.push("--plugin-dir", dir);
+    this._setQuietTools(mods.quiet);
+    // With quiet-tools, the file it reports /quiet's state in, for the strip's icon (strip.ts);
+    // without it (the setting turned off before a restart), the last start's file goes.
+    if (!mods.quiet) this._stopQuietWatch(true);
+    const quietEnv = mods.quiet ? this._prepareQuietState() : null;
+    const withQuiet = (l: HostLaunch): HostLaunch => (quietEnv ? { ...l, env: quietEnv } : l);
     // The agent its conversation launched as, on every start the CLI takes it on
     // (context/agents.ts, agentArgs): a resume or a fork keeps it, whatever the session
     // is filed under since, so the CLI's header and the conversation agree.
@@ -381,7 +443,11 @@ class SessionController implements TerminalController {
     const validId = (id: string | null | undefined): string | null => (id && /^[0-9a-fA-F-]{16,}$/.test(id) ? id : null);
     const resumeId = validId(this.resumeSessionId);
     const forkId = validId(this._forkFrom?.id);
-    global.push(...this.plugin.agentLaunchArgs(backendKey, this.conversationAgentId(), !!(resumeId || forkId), resumeId || forkId));
+    // With the context it was launched from, pinned (plugin/config.ts, pinnedContext): worked
+    // out again on each start from the recorded source, so a moved overview is its new path
+    // when a compaction renders the system prompt again.
+    const context = backendKey === "antigravity" ? "" : this.plugin.pinnedContext(this._contextSource?.from);
+    global.push(...this.plugin.agentLaunchArgs(backendKey, this.conversationAgentId(), !!(resumeId || forkId), resumeId || forkId, context));
     const addDirs = this.plugin.addedFolders().filter((d) => path.resolve(d) !== path.resolve(cwd));
     // The setup session reads its guide from the plugin's folder, which sits outside a
     // session started below the vault's root: Claude asks before reading outside its
@@ -400,7 +466,7 @@ class SessionController implements TerminalController {
         if (this.launchSessionId) args.push("--session-id", this.launchSessionId);
         // Claude has a name flag (constants/backends.ts).
         if (this.sessionName) args.push(backend.nameFlag as string, this.sessionName);
-        return { args, folder: this.workingDir || "" };
+        return withQuiet({ args, folder: this.workingDir || "" });
       }
       // Codex: its fork subcommand, by id. The fork's id is learned from its new rollout.
       if (backendKey === "codex") return { args: [...global, "fork", forkId], folder: this.workingDir || "" };
@@ -418,8 +484,8 @@ class SessionController implements TerminalController {
         // No answer from `claude agents` (slow, or many tabs restoring at once): attach
         // first anyway; a fast attach failure goes on to -r.
         if (this._resumeStep === null) this._resumeStep = (await this._liveAgentFor(id)) === false ? "resume" : "attach";
-        if (this._resumeStep === "attach") return { args: ["attach", id.split("-")[0]], folder: this.workingDir || "", plain: true };
-        return { args: [...global, backend.resumeByIdFlag, id], folder: this.workingDir || "" };
+        if (this._resumeStep === "attach") { this._setQuietTools(false); this._stopQuietWatch(true); return { args: ["attach", id.split("-")[0]], folder: this.workingDir || "", plain: true }; }
+        return withQuiet({ args: [...global, backend.resumeByIdFlag, id], folder: this.workingDir || "" });
       }
       return { args: [...global, ...splitCommand(backend.resumeByIdFlag), id], folder: this.workingDir || "" };
     }
@@ -427,7 +493,7 @@ class SessionController implements TerminalController {
     if (this.sessionName && backend.nameFlag) args.push(backend.nameFlag, this.sessionName);
     // The id Agent Manager minted (Claude only), so the transcript is known from the start.
     if (this.launchSessionId && backendKey === "claude" && /^[0-9a-f-]{36}$/.test(this.launchSessionId)) args.push("--session-id", this.launchSessionId);
-    return { args, folder: this.workingDir || "" };
+    return withQuiet({ args, folder: this.workingDir || "" });
   }
   // Is this Claude session running as a background agent right now? From `claude agents
   // --json`, one call shared by the tabs restoring together; null when it didn't answer.
@@ -441,6 +507,7 @@ class SessionController implements TerminalController {
     }
   }
   started(pid: number): void {
+    this._programPid = pid;
     this._cliFound = true;
     this._ranOnce = true;
     this.plugin.scheduleStatusRefresh();
@@ -457,10 +524,17 @@ class SessionController implements TerminalController {
     const activity = text.replace(/\x1b\][02];[^\x07\x1b]*(?:\x07|\x1b\\)/g, "");
     if (activity.trim()) this.lastWorkOutputAt = Date.now();
   }
-  input(data: string): void {
+  input(this: Session, data: string): void {
     // Focus reports aren't typing.
     // eslint-disable-next-line no-control-regex -- terminal escape sequences are control characters
     if (/^(?:\x1b\[[IO])+$/.test(data)) return;
+    // Every key that reaches the prompt, for _draftMark: an Enter or Ctrl+C empties the
+    // draft, so its text alone can't tell a key was pressed. Mouse reports (Claude's
+    // fullscreen view turns them on) aren't keys.
+    // eslint-disable-next-line no-control-regex -- terminal escape sequences are control characters
+    if (!/^(?:\x1b\[<[\d;]+[Mm]|\x1b\[M[\s\S]{3})+$/.test(data)) this._inputCount++;
+    // Before the draft is fed: Enter clears the text it checks.
+    this._rcTyped(data);
     this._draft.feed(data, this.getBackendKey());
     this.lastUserInputAt = Date.now();
   }
@@ -476,6 +550,7 @@ class SessionController implements TerminalController {
   }
   exit(this: Session, info: ExitInfo): boolean {
     this.plugin.scheduleStatusRefresh();
+    this._setRc("unknown");
     // A Claude attach that failed at once: no live agent after all, so resume with -r.
     if (this._resumeStep === "attach") {
       const ran = info.ran !== undefined ? info.ran * 1000 : 0;
@@ -532,6 +607,7 @@ class SessionController implements TerminalController {
     // Capture what's new before the session goes.
     try { if (this.transcriptGrewSinceReconcile?.()) void this.updateDurableTranscript?.(); } catch { /* best effort */ }
     this.closeTranscript?.();
+    this._stopQuietWatch(true);
     this.plugin.scheduleStatusRefresh();
   }
 
@@ -581,6 +657,19 @@ class SessionController implements TerminalController {
     const fork = this._forkFrom;
     // A fork keeps the agent its source's conversation launched as.
     if (fork) this._launchAgentId = this.plugin.launchAgentOf(fork.id);
+    // Its context source: a fork's is its source's record (never the source tab's note,
+    // which a ticket bound since can have changed), and Claude pins it again; a Codex fork
+    // keeps what its source pinned. Otherwise where this launch starts from, which is what
+    // its opening is built from too; a setup session has none.
+    const pins = backendKey !== "antigravity";
+    if (fork) {
+      const from = this.plugin.contextSourceOf(fork.id);
+      const rec = this.plugin.recordedContextSource(fork.id);
+      this._contextSource = { from, pinned: backendKey === "claude" ? !!this.plugin.pinnedContext(from) : !!rec?.pinned && pins };
+    } else {
+      const from = this._setup ? null : this.plugin.sourceString({ notePath: this._notePath, folderPath: this._folderPath });
+      this._contextSource = { from, pinned: pins && !!this.plugin.pinnedContext(from) };
+    }
     this.launchSessionId = backendKey === "claude" ? (reuseId || this.plugin.newSessionId()) : null;
     // Codex and Antigravity learn their id only once they write a transcript, which is
     // found by a token unique to this launch in the opening (_resolveModelFile). A side
@@ -596,6 +685,7 @@ class SessionController implements TerminalController {
     // So is a Claude session's agent; Codex's and Antigravity's once their id is known
     // (updateDurableTranscript).
     if (this.launchSessionId && this._agentId !== undefined) this.plugin.recordSessionAgent(this.launchSessionId, this._agentId, { launchAgentId: this._launchAgentId }).catch(() => {});
+    if (this.launchSessionId) this.plugin.recordContextSource(this.launchSessionId, this._contextSource).catch(() => {});
     // A session continuing another with nothing to start from is told only to read what
     // it's handed and wait; the plain opening would tell it to read nothing.
     const continuing = !!this._handoffMode && this._handoffMode !== "side-chat";
@@ -699,6 +789,20 @@ class SessionController implements TerminalController {
     // Its agent is the one recorded for it (agentId); a resume never works it out again.
     // A tab restored before its id was recorded carries what it launched as, and records it.
     if (this._agentId !== undefined && this.resumeSessionId) this.plugin.recordSessionAgent(this.resumeSessionId, this._agentId, { launchAgentId: this._launchAgentId }).catch(() => {});
+    // So does its context source; otherwise it's the session's record, else its
+    // transcript's `source`, so a session from before 1.4 is pinned from its next compaction.
+    if (this._contextSource && this.resumeSessionId) this.plugin.recordContextSource(this.resumeSessionId, this._contextSource).catch(() => {});
+    const rec = this.plugin.recordedContextSource(this.resumeSessionId);
+    if (rec) {
+      // Its record, with a moved source found again; the record takes the found path.
+      const from = this.plugin.contextSourceOf(this.resumeSessionId);
+      if (from !== rec.from) { rec.from = from; this.plugin.savePluginData().catch(() => {}); }
+      this._contextSource = { from, pinned: rec.pinned };
+    }
+    else if (!this._contextSource) {
+      const from = this.plugin.contextSourceOf(this.resumeSessionId);
+      if (from) this._contextSource = { from, pinned: false };
+    }
     if (session.backend && CLI_BACKENDS[session.backend]) this.backendKey = session.backend;
     // Antigravity records no working folder, so its sessions resume in the starting folder.
     const start = this.plugin.startDir();
@@ -842,28 +946,83 @@ class SessionController implements TerminalController {
   }
   // Type a line and submit it: the text, then once it shows in the prompt, a separate
   // Enter (sent together, a long line and its CR read as a pasted newline).
-  // Nothing is typed, and no Enter sent, while a dialog shows.
+  // Nothing is typed, and no Enter sent, while a dialog shows, or once the user has typed
+  // while it waited: their text would go with it. True once Enter went to a line that showed.
   async submitLine(text: string): Promise<boolean> {
-    if (!this.running || this._dialogShowing()) return false;
+    const r = await this._typeLine(text);
+    if (r === "busy") new import_obsidian.Notice("Not sent: Agent Manager is still typing something else into this session. Try again in a moment.", INPUT_GUARD_NOTICE_MS);
+    if (r === "typed") {
+      const s = String(text);
+      const what = s.length > 40 ? `${s.slice(0, 40)}…` : s;
+      new import_obsidian.Notice(this._draft._unknown || this._draft._moved
+        ? `Not sent: you typed while Agent Manager was typing "${what}", so the prompt holds both. Fix it before you send it.`
+        : `Not sent: you typed while Agent Manager was typing "${what}". Your text is back in the prompt.`, INPUT_GUARD_NOTICE_MS);
+    }
+    return r === "shown";
+  }
+  // submitLine's work. "typed": the user typed before its Enter, so it sent none, and
+  // cleared the line and typed their text back when the draft tracker knows it (when it
+  // doesn't, both stay, since clearing would lose theirs). "busy": the plugin is already
+  // typing another line into this session, which the draft tracker can't see, so the two
+  // would run together. `mark`: the draft's state when the caller began, for one that
+  // clears a draft first (the opening).
+  async _typeLine(text: string, mark = this._draftMark()): Promise<"shown" | "unshown" | "refused" | "typed" | "busy"> {
+    if (!this.running || this._dialogShowing()) return "refused";
+    if (this._lineBusy) return "busy";
+    this._lineBusy = true;
+    try {
+      return await this._typeLineNow(text, mark);
+    } finally {
+      this._lineBusy = false;
+    }
+  }
+  async _typeLineNow(text: string, typed: string): Promise<"shown" | "unshown" | "refused" | "typed"> {
     const attempt = this._attempt;
+    const live = () => this.running && this._attempt === attempt;
     const probe = this._echoProbe(text);
+    // What the plugin types isn't fed to the draft tracker, so any change to it is the user's.
+    if (this._draftMark() !== typed) return this._typedOver(probe, attempt);
     await this._writeInput(text);
     let shown = !probe;
     const deadline = Date.now() + 2000;
     while (!shown && Date.now() < deadline) {
       await new Promise((r) => window.setTimeout(r, 90));
-      if (!this.running || this._attempt !== attempt) return false;
+      if (!live()) return "refused";
       // shown starts true when there's no probe, so the loop runs only with one.
       shown = this._promptShows(probe as EchoProbe);
     }
     if (!shown) console.warn("[Agent Manager] input not echoed by the CLI within 2s; submitting anyway");
     await new Promise((r) => window.setTimeout(r, 180));
-    if (!this.running || this._attempt !== attempt) return false;
+    if (!live()) return "refused";
     // A dialog that appeared while the line went in, unless the line's own text is what
     // matched (a session named "Update available").
-    if (this._dialogShowing() && !DIALOG_RE.test(String(text))) return false;
+    if (this._dialogShowing() && !DIALOG_RE.test(String(text))) return "refused";
+    if (this._draftMark() !== typed) return this._typedOver(probe, attempt);
     this.writeRaw("\r");
-    return shown;
+    return shown ? "shown" : "unshown";
+  }
+  // The user typed while a line went in: clear the line and type their text back. A key
+  // that lands while it clears means clear again, so nothing is typed twice; when it
+  // can't settle, or the tracker can't follow the draft, the prompt is left as it is and
+  // the tracker told it can't know (the safe side: nothing more is typed over it).
+  async _typedOver(probe: EchoProbe | null, attempt: number): Promise<"typed"> {
+    const d = this._draft;
+    for (let i = 0; i < 3; i++) {
+      if (d._unknown || d._moved) return "typed";
+      const before = this._draftMark();
+      await this._clearComposeLine(probe, attempt);
+      if (!this.running || this._attempt !== attempt) return "typed";
+      if (this._draftMark() !== before) continue;
+      if (d.text()) await this._writeInput(d.text());
+      return "typed";
+    }
+    d._unknown = true;
+    return "typed";
+  }
+  // What the user has typed, to compare: it changes with every key that reaches the prompt.
+  _draftMark(): string {
+    const d = this._draft;
+    return `${this._inputCount}:${d._unknown ? 1 : 0}${d._moved ? 1 : 0}${d.text()}`;
   }
   async _clearComposeLine(probe: EchoProbe | null, attempt = this._attempt): Promise<void> {
     for (let i = 0; i < 12; i++) {
@@ -898,36 +1057,52 @@ class SessionController implements TerminalController {
   // Bound to the start it began in: a restart partway stops it, so nothing (the draft
   // put back, above all) lands in the next process. A draft it can't put back (a line
   // recalled from history, an edit mid-line) waits for the user to send or clear it.
+  // Typing while it goes in puts the user's text back (_typeLine), and it tries again.
   async submitOpeningLine(text: string): Promise<boolean> {
     const attempt = this._attempt;
     const same = () => this.running && this._attempt === attempt && !this._closed;
-    if (this._draft.pending() && (this._draft.text() === "" || this._draft._unknown || this._draft._moved)) {
-      new import_obsidian.Notice("Agent Manager: the new session's prompt has text in it, so the opening instruction waits until you send or clear it.", INPUT_GUARD_NOTICE_MS);
-      const end = Date.now() + 5 * 60 * 1000;
-      while (this._draft.pending() && same() && Date.now() < end) await new Promise((r) => window.setTimeout(r, 250));
-      if (!same()) return false;
-      if (this._draft.pending()) {
-        new import_obsidian.Notice("Agent Manager: the prompt never cleared, so the opening instruction was not sent.", INPUT_GUARD_NOTICE_MS);
-        return false;
+    for (let tries = 0; tries < 3; tries++) {
+      if (this._draft.pending() && (this._draft.text() === "" || this._draft._unknown || this._draft._moved)) {
+        new import_obsidian.Notice("Agent Manager: the new session's prompt has text in it, so the opening instruction waits until you send or clear it.", INPUT_GUARD_NOTICE_MS);
+        const end = Date.now() + 5 * 60 * 1000;
+        while (this._draft.pending() && same() && Date.now() < end) await new Promise((r) => window.setTimeout(r, 250));
+        if (!same()) return false;
+        if (this._draft.pending()) {
+          new import_obsidian.Notice("Agent Manager: the prompt never cleared, so the opening instruction was not sent.", INPUT_GUARD_NOTICE_MS);
+          return false;
+        }
+        // What cleared it may have opened a dialog (Enter on a recalled /model opens its
+        // picker), and the opening's Enter would answer it.
+        if (!(await this.waitPastTrustPrompt(5 * 60 * 1000)) || !same()) {
+          if (same()) new import_obsidian.Notice("Agent Manager: the session's dialog never cleared, so the opening instruction was not sent.", INPUT_GUARD_NOTICE_MS);
+          return false;
+        }
       }
-      // What cleared it may have opened a dialog (Enter on a recalled /model opens its
-      // picker), and the opening's Enter would answer it.
-      if (!(await this.waitPastTrustPrompt(5 * 60 * 1000)) || !same()) {
-        if (same()) new import_obsidian.Notice("Agent Manager: the session's dialog never cleared, so the opening instruction was not sent.", INPUT_GUARD_NOTICE_MS);
-        return false;
-      }
-    }
-    const draft = this._draft.text();
-    if (draft) {
-      await this._clearComposeLine(this._echoProbe(draft), attempt);
+      // Another line the plugin is typing (a strip command) goes first.
+      const end = Date.now() + 10000;
+      while (this._lineBusy && same() && Date.now() < end) await new Promise((r) => window.setTimeout(r, 100));
       if (!same()) return false;
+      // Marked before the draft is cleared, so a key typed while it clears counts.
+      const mark = this._draftMark();
+      const draft = this._draft.text();
+      if (draft) {
+        await this._clearComposeLine(this._echoProbe(draft), attempt);
+        if (!same()) return false;
+      }
+      const r = await this._typeLine(text, mark);
+      if (r === "busy") continue;
+      if (r === "typed") {
+        if (!same()) return false;
+        continue;
+      }
+      if (draft && same()) {
+        await new Promise((r) => window.setTimeout(r, 120));
+        if (same()) await this._writeInput(draft);
+      }
+      return r === "shown";
     }
-    const sent = await this.submitLine(text);
-    if (draft && same()) {
-      await new Promise((r) => window.setTimeout(r, 120));
-      if (same()) await this._writeInput(draft);
-    }
-    return sent;
+    // The caller says it wasn't sent.
+    return false;
   }
   async waitForOutput(maxMs: number): Promise<boolean> {
     const start = Date.now();
@@ -954,7 +1129,8 @@ class SessionController implements TerminalController {
   // and scrolled off, isn't showing. Unanchored, since a trust question's answer lines
   // ("Yes, I trust this folder") carry the words mid-line.
   _dialogShowing(): boolean {
-    return DIALOG_RE.test(this.view.screenTail(this.view.screenRows || 40));
+    const screen = this.view.screenTail(this.view.screenRows || 40);
+    return DIALOG_RE.test(screen) || RC_PANEL_RE.test(screen);
   }
   // Clear once no dialog shows and the screen has gone quiet with none showing: a second
   // dialog can follow the first (Codex's update menu after a trust question).
@@ -1037,8 +1213,8 @@ class SessionController implements TerminalController {
 }
 // A session's type: the class, and every part's methods, which applyParts puts on the
 // class's prototype below. Made from the parts themselves, so it can't drift from them.
-interface Session extends SessionController, ViewTranscriptMethods, StripMethods, ViewNoteMethods, ViewTicketMethods, IdentityMethods, SessionActionMethods {}
-applyParts(SessionController, ViewTranscriptMethods, StripMethods, ViewNoteMethods, ViewTicketMethods, IdentityMethods, SessionActionMethods);
+interface Session extends SessionController, ViewTranscriptMethods, StripMethods, RemoteControlMethods, ViewNoteMethods, ViewTicketMethods, IdentityMethods, SessionActionMethods {}
+applyParts(SessionController, ViewTranscriptMethods, StripMethods, RemoteControlMethods, ViewNoteMethods, ViewTicketMethods, IdentityMethods, SessionActionMethods);
 // Is this a session? instanceof finds the class; applyParts above gave every instance the
 // parts, which is what Session adds.
 // Is `p` the folder `dir` or inside it?

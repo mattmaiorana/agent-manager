@@ -1,0 +1,6 @@
+{
+  "name": "quiet-tools",
+  "version": "0.2.0",
+  "description": "/quiet folds each tool's output into one line, and back; Ctrl+O still shows it in full.",
+  "types": "./types/index.d.ts"
+}

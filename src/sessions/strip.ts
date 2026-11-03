@@ -1,6 +1,6 @@
 // The status strip above a session: title, id, model, backend, Side chat, and its commands.
 
-import { import_obsidian } from "../externals.js";
+import { fs, import_obsidian, path } from "../externals.js";
 import { CLI_BACKENDS, REAL_BACKENDS, SIDE_SUFFIX_RE, STRIP_COMMANDS } from "../constants/backends.js";
 import { wrapLine } from "../constants/names.js";
 import { modelFromTranscriptTail, prettyModelName, readFileTail } from "../sessions/transcript-files.js";
@@ -92,24 +92,42 @@ class StripMethods {
     // The backend this session is running, as a badge for orientation.
     this.appendBackendBadge(strip, stripBackendKey);
     // Strip order: note, title, id (the identity cluster, left), then the spacer, then the
-    // controls: info, Side chat, backend, model, transcript.
+    // controls: info, Wrap, Continue Session, backend, model, Quiet, transcript, Remote Control.
     // The model this session is on, read from the transcript (Claude/Codex record
     // it per turn). Short label, full id on hover; blank until the first response
     // writes a model, and blank for Antigravity (no model field in its transcript).
     this.modelEl = strip.createSpan({ cls: "agent-manager-strip-model" });
     void this.updateStripModel();
+    // Quiet: sends /quiet, the bundled quiet-tools mod's toggle, to a Claude session that
+    // started with it ("Fold tool output"). Its icon follows the state the mod reports
+    // (_prepareQuietState): fold while tool output shows in full, unfold while it's folded.
+    if (stripBackendKey === "claude" && this._quietTools) {
+      const quiet = strip.createSpan({ cls: "agent-manager-strip-quiet", attr: { role: "button" } });
+      quiet.addEventListener("click", () => { void this.sendQuiet(); });
+      this._quietBtnEl = quiet;
+      this._syncQuietIcon();
+    }
     // Rendered-transcript toggle — Claude, Codex, and Antigravity (each has a
     // parser). Flips the pane between the live terminal and the session
     // transcript rendered as real markdown (native select/copy, no wrapping,
     // no chrome).
     if (REAL_BACKENDS.includes(stripBackendKey)) {
       const tr = strip.createSpan({ cls: "agent-manager-strip-transcript" });
-      this._stripTip(tr, "Toggle rendered transcript");
+      this._stripTip(tr, "Toggle rendered transcript. Right-click to open the transcript note");
       tr.addEventListener("click", () => this.toggleTranscript());
+      tr.addEventListener("contextmenu", (evt) => {
+        evt.preventDefault();
+        evt.stopPropagation();
+        const menu = new import_obsidian.Menu();
+        menu.addItem((i) => i.setTitle("Open transcript note").setIcon("file-text").onClick(() => { void this.openDurableTranscriptNote(); }));
+        menu.showAtMouseEvent(evt);
+      });
       this.transcriptBtnEl = tr;
       if (this._transcriptOpen) tr.addClass("is-active");
       this._syncTranscriptIcon();
     }
+    // Remote Control, last: a dot with no text (remote-control.ts).
+    this._buildRcDot(strip);
   }
   // The id this view is bound to: the resume id, else the transcript file it resolved
   // (a fresh launch learns its id from that file after the first turn).
@@ -139,13 +157,14 @@ class StripMethods {
   // Strip tooltips go through Obsidian's tooltip system (aria-label, plus setTooltip
   // where the API has it), not a native `title`: native tooltips are unreliable inside
   // Obsidian's window, and Obsidian's render on hover at once, styled, and wrap long text.
-  _stripTip(el: HTMLElement | null | undefined, text: string): void {
+  // `classes`: extra classes for the tooltip itself (Obsidian 1.8.7 and later).
+  _stripTip(el: HTMLElement | null | undefined, text: string, classes?: string[]): void {
     if (!el) return;
     el.removeAttribute("title");
     if (!text) { el.removeAttribute("aria-label"); return; }
     el.setAttribute("aria-label", text);
     if (typeof import_obsidian.setTooltip === "function") {
-      try { import_obsidian.setTooltip(el, text, { placement: "bottom" }); } catch { /* best effort */ }
+      try { import_obsidian.setTooltip(el, text, { placement: "bottom", ...(classes ? { classes } : {}) }); } catch { /* best effort */ }
     }
   }
   _stripCommandItems(backendKey: BackendKey): StripItem[] {
@@ -161,6 +180,80 @@ class StripMethods {
     if (this.hasPendingInput()) { new import_obsidian.Notice("Not sent: you have unsent text in the prompt. Clear it, then press Wrap again.", INPUT_GUARD_NOTICE_MS); return; }
     if (this._dialogShowing()) { new import_obsidian.Notice("Not sent: the session is asking you something. Answer it, then press Wrap again.", INPUT_GUARD_NOTICE_MS); return; }
     await this.submitLine(line);
+  }
+  // Send /quiet, never over unsent text or into a question the CLI is asking. It runs at once,
+  // mid-turn too (the mod registers it immediate).
+  async sendQuiet(this: Session): Promise<void> {
+    if (!this.running) { new import_obsidian.Notice("This session isn't running."); return; }
+    if (this.hasPendingInput()) { new import_obsidian.Notice("Not sent: you have unsent text in the prompt. Clear it, then press Quiet again.", INPUT_GUARD_NOTICE_MS); return; }
+    if (this._dialogShowing()) { new import_obsidian.Notice("Not sent: the session is asking you something. Answer it, then press Quiet again.", INPUT_GUARD_NOTICE_MS); return; }
+    // What the plugin types isn't in the draft tracker, so a second press before the first's
+    // Enter would pass the guard above and type "/quiet/quiet".
+    if (this._quietSending) return;
+    this._quietSending = true;
+    try { await this.submitLine("/quiet"); } finally { this._quietSending = false; }
+  }
+  // The Quiet button's icon and tooltip, from the state the mod last reported.
+  _syncQuietIcon(this: Session): void {
+    const el = this._quietBtnEl;
+    if (!el || !el.isConnected) return;
+    import_obsidian.setIcon(el, this._quietOn ? "unfold-vertical" : "fold-vertical");
+    this._stripTip(el, this._quietOn ? "Tool output is folded. Click to show it in full (/quiet)" : "Fold tool output to one line (/quiet)");
+  }
+  // A start with quiet-tools: the file the mod reports /quiet's state in (its
+  // AGENT_MANAGER_QUIET_STATE), one per tab, emptied for each start and watched for the
+  // icon. Returns the variable for the start, or null when the folder can't be made.
+  _prepareQuietState(this: Session): Record<string, string> | null {
+    const dir = this.plugin.claudeQuietStateDir();
+    if (!dir) return null;
+    try {
+      this._stopQuietWatch(true);
+      fs.mkdirSync(dir, { recursive: true });
+      const file = path.join(dir, `${window.crypto.randomUUID()}.json`);
+      this._quietFile = file;
+      this._setQuietOn(false);
+      const name = path.basename(file);
+      const watch = fs.watch(dir, (_event, changed) => {
+        if (changed && String(changed) !== name) return;
+        this._readQuietState();
+      });
+      watch.on("error", () => this._stopQuietWatch());
+      this._quietWatch = watch;
+      return { AGENT_MANAGER_QUIET_STATE: file };
+    } catch (e) {
+      console.error("[Agent Manager] couldn't set up the quiet-tools state file:", e);
+      this._stopQuietWatch(true);
+      return null;
+    }
+  }
+  _readQuietState(this: Session): void {
+    const file = this._quietFile;
+    if (!file) return;
+    let on = false;
+    try {
+      const data: unknown = JSON.parse(fs.readFileSync(file, "utf8"));
+      on = typeof data === "object" && data !== null && (data as { isQuiet?: unknown }).isQuiet === true;
+    } catch { return; } // missing, or caught mid-write: the next change reads it
+    this._setQuietOn(on);
+  }
+  _setQuietOn(this: Session, on: boolean): void {
+    if (this._quietOn === on) return;
+    this._quietOn = on;
+    this._syncQuietIcon();
+  }
+  // Stops watching, and with `remove`, deletes the tab's state file.
+  _stopQuietWatch(this: Session, remove = false): void {
+    try { this._quietWatch?.close(); } catch { /* best effort */ }
+    this._quietWatch = null;
+    if (remove && this._quietFile) { try { fs.rmSync(this._quietFile, { force: true }); } catch { /* best effort */ } }
+    if (remove) this._quietFile = null;
+  }
+  // Records whether this start has quiet-tools, and redraws the strip when that changes, so the
+  // Quiet button appears or goes.
+  _setQuietTools(this: Session, on: boolean): void {
+    if (this._quietTools === on) return;
+    this._quietTools = on;
+    this.rebuildStrip();
   }
   async _runStripCommand(this: Session, c: StripItem): Promise<void> {
     if (c.action === "rename") { this._startStripRename(this.stripEl?.querySelector<HTMLElement>(".agent-manager-strip-title")); return; } // the plugin's rename, never a bare /rename

@@ -11,10 +11,10 @@ import { join } from "path";
 import { HelperSession, type ExitInfo, type StartError } from "../src/vault-terminal/session";
 import { DEFAULT_STRIPPED_VARIABLES, agentEnv, parseNames, parseVariables, probeLoginEnv, fallbackPath, findPython, loginShell, probeLoginPath, programEnv, splitCommand, expandPath, withNotificationChannel } from "../src/vault-terminal/finder";
 import { findPaths, findUrls } from "../src/vault-terminal/links";
-import { HOOK_ID, StatusTracker, splitTitle, type Attention } from "../src/vault-terminal/status";
+import { BRIDGE_ID, HOOK_ID, StatusTracker, splitTitle, type Attention } from "../src/vault-terminal/status";
 import { zshIntegrationEnv } from "../src/vault-terminal/zsh";
 import { AGENTS, agentById, agentFor, agentForProgram, prepareAgent } from "../src/vault-terminal/agents";
-import { afterExitKey, ctrlCCopies } from "../src/vault-terminal/keys";
+import { afterExitKey, ctrlCCopies, gestureReports, KeyQueue, replayPlan, selectsInBox, typesCharacter } from "../src/vault-terminal/keys";
 import { closeText } from "../src/vault-terminal/close";
 import { prepareClaude, userScrollSetting } from "../src/vault-terminal/claude";
 import { ReportQueue, REPORT_GAP_MS, WheelCounter, DOM_DELTA_LINE, DOM_DELTA_PAGE, DOM_DELTA_PIXEL, drainCount, scrollSpeed } from "../src/vault-terminal/wheel";
@@ -159,10 +159,24 @@ async function main(): Promise<void> {
     check("claude scroll: added when nothing is set (speed 0.25: one line a report)", fresh.env.CLAUDE_CODE_SCROLL_SPEED === "0.25" && sansHooks(fresh.w[2]) === '{"preferredNotifChannel":"kitty","wheelScrollAccelerationEnabled":false}', JSON.stringify(fresh));
     {
       const hooks = JSON.parse(fresh.w[2]).hooks as Record<string, { hooks: { command: string }[] }[]>;
-      const states = Object.fromEntries(Object.entries(hooks).map(([e, l]) => [e, l[0].hooks[0].command.match(/vault-terminal-state;(\w+)/)?.[1]]));
+      const states = Object.fromEntries(Object.entries(hooks).filter(([e]) => e !== "SessionStart").map(([e, l]) => [e, l[0].hooks[0].command.match(/vault-terminal-state;(\w+)/)?.[1]]));
       check("hooks: one per event, each reporting its state", JSON.stringify(states) === JSON.stringify({ UserPromptSubmit: "working", PostToolUse: "working", PostToolUseFailure: "working", PermissionRequest: "waiting", Stop: "finished", StopFailure: "error" }), JSON.stringify(states));
-      const out = execFileSync("/bin/sh", ["-c", hooks.Stop[0].hooks[0].command]).toString();
-      check("hooks: the command prints claude's answer, the sequence intact", (JSON.parse(out) as { terminalSequence: string }).terminalSequence === "\x1b]99;i=vault-terminal-state;finished\x07", JSON.stringify(out));
+      // Remote Control's id from the hook's environment, or empty; anything else in it is dropped.
+      const run = (event: string, id?: string) => {
+        const env = { ...process.env };
+        delete env.CLAUDE_CODE_BRIDGE_SESSION_ID;
+        if (id !== undefined) env.CLAUDE_CODE_BRIDGE_SESSION_ID = id;
+        return (JSON.parse(execFileSync("/bin/sh", ["-c", hooks[event][0].hooks[0].command], { env }).toString()) as { terminalSequence: string }).terminalSequence;
+      };
+      const out = [run("Stop"), run("Stop", "session_01Ab-c_9"), run("Stop", 'x"y'), run("SessionStart", "session_01Ab"), run("SessionStart")];
+      const want = [
+        "\x1b]99;i=vault-terminal-state;finished\x07\x1b]99;i=vault-terminal-bridge;turn=\x07",
+        "\x1b]99;i=vault-terminal-state;finished\x07\x1b]99;i=vault-terminal-bridge;turn=session_01Ab-c_9\x07",
+        "\x1b]99;i=vault-terminal-state;finished\x07\x1b]99;i=vault-terminal-bridge;turn=\x07",
+        "\x1b]99;i=vault-terminal-bridge;start=session_01Ab\x07",
+        "\x1b]99;i=vault-terminal-bridge;start=\x07",
+      ];
+      check("hooks: the command prints claude's answer, the sequences intact, with Remote Control's id or none", JSON.stringify(out) === JSON.stringify(want), JSON.stringify(out));
       const own = prep(`claude --settings '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"true"}]}]}}'`);
       const ownHooks = JSON.parse(own.w[2]).hooks as Record<string, { hooks: { command: string }[] }[]>;
       check("hooks: added to the command's own, both kept", ownHooks.Stop.length === 2 && ownHooks.Stop[0].hooks[0].command === "true" && ownHooks.Stop[1].hooks[0].command.includes("finished") && !!ownHooks.UserPromptSubmit, JSON.stringify(ownHooks.Stop));
@@ -254,6 +268,22 @@ async function main(): Promise<void> {
     agent.start();
     agent.adopt(shell);
     check("status: an agent recognized late keeps a permission prompt it already showed", agent.state === "waiting", `${shell.state} then ${agent.state}`);
+  }
+  {
+    // Remote Control reports: the id or empty, from a turn or SessionStart; nothing else is one.
+    const seen: string[] = [];
+    const t = new StatusTracker("unknown", true, () => {}, () => {}, (id, atStart) => seen.push(`${atStart ? "start" : "turn"}:${id}`));
+    t.start();
+    t.kittyNotification(`i=${BRIDGE_ID};start=`);
+    t.kittyNotification(`i=${BRIDGE_ID};turn=session_01Ab-c_9`);
+    t.kittyNotification(`i=${BRIDGE_ID};turn=`);
+    t.kittyNotification(`i=${BRIDGE_ID};turn=bad id`);
+    t.kittyNotification(`i=${BRIDGE_ID};other=x`);
+    t.kittyNotification(`i=n1;turn=session_01x`);
+    const plain = new StatusTracker("running", false, () => {}, () => {}, (id) => seen.push(`plain:${id}`));
+    plain.start();
+    plain.kittyNotification(`i=${BRIDGE_ID};turn=session_01x`);
+    check("status: Remote Control reports pass their id, empty included, and nothing else does", JSON.stringify(seen) === JSON.stringify(["start:", "turn:session_01Ab-c_9", "turn:"]) && t.state === "unknown", JSON.stringify(seen));
   }
   // Progress and session status.
   {
@@ -848,6 +878,113 @@ function seamChecks(): void {
     check("seams: Ctrl+C always interrupts with the setting on", !ctrlCCopies(k(), true, true));
     check("seams: Ctrl+Shift+C, Cmd+C and Ctrl+Option+C aren't this", !ctrlCCopies(k({ shiftKey: true, key: "C" }), true, false) && !ctrlCCopies(k({ metaKey: true }), true, false) && !ctrlCCopies(k({ altKey: true }), true, false));
     check("seams: Ctrl+C with Caps Lock on still copies", ctrlCCopies(k({ key: "C" }), true, false));
+  }
+  // A selection in claude's input: which keys type over it, which gestures make one, and the queue.
+  {
+    const k = (key: string, over: Partial<{ ctrlKey: boolean; metaKey: boolean; altKey: boolean; shiftKey: boolean }> = {}) => ({ key, ctrlKey: false, metaKey: false, altKey: false, shiftKey: false, ...over });
+    check("seams: letters, digits, symbols, Space and shifted keys type a character", ["a", "7", "?", " ", "é"].every((c) => typesCharacter(k(c), false)) && typesCharacter(k("A", { shiftKey: true }), false));
+    check("seams: Enter, Tab, Backspace, the arrows, and the composing keys don't", ["Enter", "Tab", "Backspace", "ArrowLeft", "Escape", "Dead", "Process", "Unidentified"].every((c) => !typesCharacter(k(c), false)));
+    check("seams: Cmd and Ctrl chords don't", !typesCharacter(k("a", { metaKey: true }), false) && !typesCharacter(k("a", { ctrlKey: true }), false));
+    check("seams: Option types a character unless it's acting as Meta", typesCharacter(k("ƒ", { altKey: true }), false) && !typesCharacter(k("b", { altKey: true }), true));
+    const box = { top: 10, bottom: 14 };
+    check("seams: a drag inside the box selects", selectsInBox({ col: 3, row: 11 }, { col: 9, row: 12 }, 1, box));
+    check("seams: a drag along one row selects", selectsInBox({ col: 3, row: 11 }, { col: 9, row: 11 }, 1, box));
+    check("seams: a single click doesn't", !selectsInBox({ col: 3, row: 11 }, { col: 3, row: 11 }, 1, box));
+    check("seams: a double or triple click does", selectsInBox({ col: 3, row: 11 }, { col: 3, row: 11 }, 2, box) && selectsInBox({ col: 3, row: 11 }, { col: 3, row: 11 }, 3, box));
+    check("seams: a drag from or into the reply above doesn't", !selectsInBox({ col: 3, row: 4 }, { col: 9, row: 12 }, 1, box) && !selectsInBox({ col: 3, row: 12 }, { col: 9, row: 8 }, 1, box));
+    check("seams: the borders aren't inside, and no box selects nothing", !selectsInBox({ col: 3, row: 10 }, { col: 9, row: 11 }, 1, box) && !selectsInBox({ col: 3, row: 11 }, { col: 9, row: 14 }, 1, box) && !selectsInBox({ col: 3, row: 11 }, { col: 9, row: 12 }, 2, null));
+    const acts = (g: Parameters<typeof gestureReports>[0]) => gestureReports(g).map((r) => `${r.action}@${r.at.col},${r.at.row}`).join(" ");
+    check("seams: a drag is made again as a press, a move and a release", acts({ from: { col: 3, row: 11 }, to: { col: 9, row: 12 }, clicks: 1, whole: false }) === "down@3,11 move@9,12 up@9,12");
+    check("seams: a double or triple click as that many clicks where it ended", acts({ from: { col: 3, row: 11 }, to: { col: 5, row: 11 }, clicks: 2, whole: false }) === "down@5,11 up@5,11 down@5,11 up@5,11" && gestureReports({ from: { col: 0, row: 0 }, to: { col: 0, row: 0 }, clicks: 3, whole: false }).length === 6);
+    // Cut's replay, planned so claude doesn't count it as more of the user's clicks.
+    {
+      const text = "  ❯ fix the parser.ts bug";
+      const wordChar = (col: number) => /^[\p{L}\p{N}_]$/u.test(text[col] ?? "");
+      const press = (col: number, at = 1000) => ({ col, row: 11, at });
+      const dbl = (col: number) => ({ from: { col, row: 11 }, to: { col, row: 11 }, clicks: 2, whole: false });
+      // "parser" is cols 12 to 17.
+      const p1 = replayPlan(dbl(13), press(13), 1100, wordChar);
+      check("seams: a double click is replayed two cells along in its word, with no wait", p1.wait === 0 && p1.gesture.to.col === 15 && p1.gesture.from.col === 15, JSON.stringify(p1));
+      const p2 = replayPlan(dbl(17), press(17), 1100, wordChar);
+      check("seams: or back, at a word's end", p2.wait === 0 && p2.gesture.to.col === 15, JSON.stringify(p2));
+      // "the" is cols 8 to 10: from its middle, neither two nor three cells along stays in it.
+      const p3 = replayPlan(dbl(9), press(9), 1100, wordChar);
+      check("seams: a short word waits out claude's window from the last press", p3.gesture.to.col === 9 && p3.wait === 550, JSON.stringify(p3));
+      check("seams: and not once the window has passed", replayPlan(dbl(9), press(9), 1700, wordChar).wait === 0);
+      check("seams: never across a dot or a space", replayPlan(dbl(18), press(18), 1100, wordChar).gesture.to.col === 18);
+      const tri = { from: { col: 9, row: 11 }, to: { col: 9, row: 11 }, clicks: 3, whole: false };
+      check("seams: a triple click is replayed where it was, with no wait", replayPlan(tri, press(9), 1100, wordChar).wait === 0 && replayPlan(tri, press(9), 1100, wordChar).gesture.to.col === 9);
+      check("seams: the wait covers claude timing the press late", replayPlan(dbl(9), press(9), 1600, wordChar).wait === 50);
+      check("seams: a double click at a line's start doesn't look left of it", replayPlan(dbl(0), press(0), 1100, (c) => c >= 0 && c <= 1).wait > 0);
+      check("seams: a last press on another row isn't shifted from", replayPlan(dbl(13), { col: 13, row: 12, at: 1000 }, 1100, wordChar).gesture.to.col === 13);
+      // A wide character's second cell reads as empty in the buffer.
+      const wide = (col: number) => col !== 14 && wordChar(col);
+      check("seams: a wide character's empty second cell stops the shift", replayPlan(dbl(13), press(13), 1100, wide).gesture.to.col === 11 || replayPlan(dbl(13), press(13), 1100, wide).wait > 0, JSON.stringify(replayPlan(dbl(13), press(13), 1100, wide)));
+      const drag = { from: { col: 4, row: 11 }, to: { col: 20, row: 11 }, clicks: 1, whole: false };
+      check("seams: a drag waits only while its press is near the last one", replayPlan(drag, press(4), 1200, wordChar).wait === 450 && replayPlan(drag, press(20), 1200, wordChar).wait === 0);
+    }
+    // The queue, on a fake clock.
+    const sent: string[] = [];
+    let timers: { at: number; fn: () => void; id: number }[] = [];
+    let now = 0;
+    let next = 0;
+    const q = new KeyQueue((d) => sent.push(d), (fn, ms) => { const id = ++next; timers.push({ at: now + ms, fn, id }); return id; }, (id) => { timers = timers.filter((t) => t.id !== id); }, 15);
+    const advance = (ms: number) => {
+      const until = now + ms;
+      for (;;) {
+        timers.sort((a, b) => a.at - b.at);
+        const t = timers[0];
+        if (!t || t.at > until) break;
+        timers.shift();
+        now = t.at;
+        t.fn();
+      }
+      now = until;
+    };
+    let ran = 0;
+    q.push("\x0b", "\x0b", "\x15", "\x15", () => ran++, "h");
+    check("seams: the queue sends its first key at once and is busy", sent.join() === "\x0b" && q.busy);
+    advance(5);
+    q.push("e");
+    q.push("\r");
+    check("seams: keys typed meanwhile wait", sent.length === 1);
+    advance(15 * 10);
+    check("seams: everything goes out in order, a gap apart, the step run in its turn", sent.join("|") === ["\x0b", "\x0b", "\x15", "\x15", "h", "e", "\r"].join("|") && ran === 1, JSON.stringify(sent));
+    check("seams: the queue is idle once the last gap has passed", !q.busy);
+    sent.length = 0;
+    q.push("\x7f", "x");
+    advance(5);
+    check("seams: still busy during the gap after the last key", q.busy && sent.join() === "\x7f");
+    q.clear();
+    advance(100);
+    check("seams: clear drops what's left", sent.join() === "\x7f" && !q.busy);
+    // A clear from inside a send stops there, with no gap left busy.
+    sent.length = 0;
+    const q2 = new KeyQueue((d) => { sent.push(d); if (d === "stop") q2.clear(); }, (fn, ms) => { const id = ++next; timers.push({ at: now + ms, fn, id }); return id; }, (id) => { timers = timers.filter((t) => t.id !== id); }, 15);
+    q2.push("stop", "never");
+    check("seams: a clear from inside a send leaves the queue idle at once", sent.join() === "stop" && !q2.busy);
+    advance(100);
+    check("seams: and nothing after it is sent", sent.join() === "stop");
+    // A push from inside a step waits its turn, a gap apart.
+    sent.length = 0;
+    q.push(() => q.push("late"), "next");
+    check("seams: a push from inside a step goes to the end", sent.length === 0 && q.busy);
+    advance(15);
+    check("seams: the item after the step follows a gap later", sent.join() === "next");
+    advance(15);
+    check("seams: and the pushed one after it", sent.join("|") === "next|late");
+    advance(100);
+    // A wait pauses before the next item, and the queue is busy through it.
+    sent.length = 0;
+    q.push({ wait: 200 }, "a");
+    advance(150);
+    check("seams: a wait holds what follows, busy all along", sent.length === 0 && q.busy);
+    q.push("b");
+    advance(60);
+    check("seams: then the rest in order", sent.join() === "a");
+    advance(20);
+    check("seams: keys pushed during the wait follow", sent.join("|") === "a|b");
+    advance(100);
   }
   // After the program ends: S never starts a shell in a host's terminal.
   check("seams: after exit, Enter restarts and S starts a shell in a plain terminal", afterExitKey("\r", false) === "restart" && afterExitKey("s", false) === "shell" && afterExitKey("S", false) === "shell" && afterExitKey("x", false) === "nothing");

@@ -593,10 +593,11 @@ class SessionMethods {
   }
   // ---- Today's chat ----
   // Today's chat's tab, loaded or not, or null: a session tab named for today.
-  // While there are agents, it's the switched agent's: named for it and recorded as its.
-  todaysChatLeaf(this: AgentManagerPlugin): WorkspaceLeaf | null {
-    const name = this.dailyChatName();
-    const switched = this.switchedAgentId();
+  // While there are agents, it's the switched agent's (or `agentId`'s, when given): named
+  // for it and recorded as its.
+  todaysChatLeaf(this: AgentManagerPlugin, agentId?: string | null): WorkspaceLeaf | null {
+    const switched = agentId === undefined ? this.switchedAgentId() : agentId;
+    const name = this.dailyChatName(switched);
     for (const leaf of this.sessionLeaves()) {
       const v = this.sessionOf(leaf);
       const title = v ? v.sessionTitle : this.savedSessionState(leaf)?.sessionTitle;
@@ -621,28 +622,33 @@ class SessionMethods {
     return note instanceof import_obsidian.TFile ? { notePath: note.path } : null;
   }
   // Go to today's chat: its tab, else resume it (the newest session by that name), else
-  // start it on the default CLI. Never a second one.
-  async openTodaysChat(this: AgentManagerPlugin, sourceView: LaunchSource = null): Promise<void> {
-    if (this._openingToday) return;
-    this._openingToday = true;
+  // start it on the default CLI. Never a second one. It's the switched agent's, or with
+  // `agentId` given (an op=daily link's), that agent's, whatever the switch shows.
+  async openTodaysChat(this: AgentManagerPlugin, sourceView: LaunchSource = null, agentId?: string | null): Promise<void> {
+    const switched = agentId === undefined ? this.switchedAgentId() : agentId;
+    // One opening at a time per agent: a second click or link for the same chat while it
+    // opens is dropped, and another agent's goes ahead.
+    const opening = this._openingToday || (this._openingToday = new Set());
+    const key = switched ?? "";
+    if (opening.has(key)) return;
+    opening.add(key);
     try {
-      const leaf = this.todaysChatLeaf();
+      const leaf = this.todaysChatLeaf(switched);
       if (leaf) {
         void this.app.workspace.revealLeaf(leaf);
         this.app.workspace.setActiveLeaf(leaf, { focus: true });
         return;
       }
-      const name = this.dailyChatName();
+      const name = this.dailyChatName(switched);
       let sessions: SessionRecord[] = [];
       try { sessions = await this.listedSessions(); } catch { /* best effort */ }
-      const switched = this.switchedAgentId();
       const earlier = sessions.find((s) => s.displayName === name && (switched === null || this.listedAgentOf(this.recordedAgentId(s.sessionId)) === switched));
       if (earlier) { await this.startResume(earlier, sourceView); return; }
       const offered = this.getBrowserBackends();
       const backend = offered.includes(this.getCurrentBackend()) ? this.getCurrentBackend() : offered[0];
       await this.startSession(name, null, { backendOverride: backend, daily: true, agentId: switched || "" });
     } finally {
-      this._openingToday = false;
+      opening.delete(key);
     }
   }
   // Does this session's working directory still exist? A repo that moved or was
@@ -655,7 +661,7 @@ class SessionMethods {
     if (this.placeMissing(session)) {
       const note = this.findTranscriptNoteBySessionId(session.sessionId);
       new import_obsidian.Notice(`Agent Manager: that session ran in ${session.cwd}, which is not on this machine.${note ? " Opening its transcript." : ""}`, 8000);
-      if (note) await this.app.workspace.getLeaf("tab").openFile(note);
+      if (note) await this.openInNotesArea(note);
       return;
     }
     // One resume at a time per session: a double-click on a row would otherwise open a

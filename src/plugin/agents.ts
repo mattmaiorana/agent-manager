@@ -145,13 +145,13 @@ class AgentMethods {
   agentInstructionsPath(this: AgentManagerPlugin, agent: AgentDef): string {
     return agent.instructions ? path.join(this.getVaultPath(), (0, import_obsidian.normalizePath)(agent.instructions)) : "";
   }
-  // The flags that give a CLI this agent (context/agents.ts, agentArgs). `fromId`: the
-  // session a Claude resume or fork continues, whose recorded agent name is kept.
-  agentLaunchArgs(this: AgentManagerPlugin, backend: string, agentId: string | null | undefined, resume: boolean, fromId: string | null = null): string[] {
+  // The flags that give a CLI this agent and the pinned context (context/agents.ts,
+  // agentArgs). `fromId`: the session a Claude resume or fork continues, whose recorded
+  // agent name is kept. `context`: the paragraph to pin (config.ts, pinnedContext).
+  agentLaunchArgs(this: AgentManagerPlugin, backend: string, agentId: string | null | undefined, resume: boolean, fromId: string | null = null, context = ""): string[] {
     const agent = this.agentById(agentId);
-    if (!agent) return [];
-    const slug = backend === "claude" && fromId ? this.claudeAgentSetting(fromId) : null;
-    return agentArgs(backend, { id: agent.id, name: agent.name, instructionsPath: this.agentInstructionsPath(agent) }, { resume, slug });
+    const slug = agent && backend === "claude" && fromId ? this.claudeAgentSetting(fromId) : null;
+    return agentArgs(backend, agent ? { id: agent.id, name: agent.name, instructionsPath: this.agentInstructionsPath(agent) } : null, { resume, slug, context });
   }
   // The agent name a Claude conversation recorded (its last `agentSetting`), or null.
   claudeAgentSetting(this: AgentManagerPlugin, sessionId: string): string | null {
@@ -174,11 +174,12 @@ class AgentMethods {
     return null;
   }
   // A session followed to a new id (a re-host, a compaction, a restore that picked the
-  // continuation) takes its agent records with it, unless the new id has its own.
+  // continuation) takes its agent records and its context source with it, unless the new
+  // id has its own.
   carrySessionAgent(this: AgentManagerPlugin, oldId: string | null | undefined, newId: string | null | undefined): boolean {
     if (!oldId || !newId || oldId === newId) return false;
     let carried = false;
-    for (const map of [this.pluginData.sessionAgents, this.pluginData.sessionLaunchAgents]) {
+    for (const map of [this.pluginData.sessionAgents, this.pluginData.sessionLaunchAgents, this.pluginData.sessionSources] as (Record<string, unknown> | undefined)[]) {
       if (map && oldId in map && !(newId in map)) { map[newId] = map[oldId]; carried = true; }
     }
     return carried;
@@ -195,7 +196,7 @@ class AgentMethods {
     const agent = this.agentById(agentId);
     return agent ? (0, import_obsidian.normalizePath)(`${root}/${agent.name}`) : root;
   }
-  // Today's chat's name for an agent: its own template ({{profile}} Daily Chat - {{date}} by
+  // Today's chat's name for an agent: its own template (Daily Chat - {{profile}} - {{date}} by
   // default), with {{profile}} and {{date}} filled in.
   agentDailyName(this: AgentManagerPlugin, agent: AgentDef): string {
     const t = agent.dailyName.trim() || DEFAULT_AGENT_DAILY_NAME;

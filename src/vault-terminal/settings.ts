@@ -345,8 +345,8 @@ export const appearanceSettings: Section = (containerEl, core) => {
     );
 
   new Setting(containerEl)
-    .setName("Show pictures")
-    .setDesc("Programs can show pictures and video in a terminal, as Claude Code's mods do. Turn this off if pictures ever misbehave: the terminal then works as it did without them, and pictures on screen go. A Claude already running keeps what it decided at its start until you restart it.")
+    .setName("Pictures in the terminal")
+    .setDesc("Lets a program running in a terminal draw pictures and video in it, the way some terminal apps do; Claude Code's pictures use it. Turn it off if pictures ever misbehave: the terminal then ignores them, and pictures already on screen go. With it off, the pictures Claude sends you (a setting under Claude Code) don't show either. A Claude session already running keeps what it found at its start until you restart it.")
     .addToggle((t) =>
       t.setValue(s.showPictures).onChange(async (v) => {
         s.showPictures = v;

@@ -57,5 +57,17 @@ check("filter: an agent's, under No agent", shownUnder("p", "", known, null), fa
 check("listed: default", listedAgent(undefined, known, "w"), "w");
 check("listed: own", listedAgent("p", known, "w"), "p");
 
+// Pinned context (1.4).
+const ctxText = "This session was started from the ticket at \"/v/T.md\".";
+const cc = agentArgs("claude", ag, { resume: true, context: ctxText });
+check("claude: context on resume", cc.slice(4), ["--append-system-prompt", ctxText]);
+check("claude: context with no agent", agentArgs("claude", null, { resume: false, context: ctxText }), ["--append-system-prompt", ctxText]);
+check("claude: no context, no flag", agentArgs("claude", ag, { resume: false, context: "" }).includes("--append-system-prompt"), false);
+const cx = agentArgs("codex", ag, { resume: false, context: ctxText });
+check("codex: one string", cx.length === 2 && JSON.parse(cx[1].slice("developer_instructions=".length)).endsWith("\n\n" + ctxText), true);
+check("codex: context alone", JSON.parse(agentArgs("codex", null, { resume: false, context: ctxText })[1].slice("developer_instructions=".length)), ctxText);
+check("codex: none on resume", agentArgs("codex", ag, { resume: true, context: ctxText }), []);
+check("antigravity: none with context", agentArgs("antigravity", ag, { resume: false, context: ctxText }), []);
+
 console.log(failures ? `${failures} failed` : "all passed");
 process.exit(failures ? 1 : 0);

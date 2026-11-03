@@ -23,7 +23,7 @@ import { TranscriptMethods } from "../transcripts/plugin-transcripts.js";
 import { ConfirmModal } from "../ui/modals.js";
 import { applyParts } from "../util/apply-parts.js";
 import { isArray, stringOf } from "../util/guards.js";
-import type { PluginData, SavedSessionState, SessionRecord, SetupStatus } from "../types.js";
+import type { PluginData, SavedSessionState, SessionRecord, SetupStatus, TicketCard } from "../types.js";
 import type { VaultTerminal } from "../vault-terminal/core";
 // The class Obsidian loads. Its full type, with every part's methods, is AgentManagerPlugin
 // (below): the parts and every method here that calls one take `this` as that.
@@ -40,7 +40,7 @@ class VaultTerminalPlugin extends import_obsidian.Plugin {
   // The terminal (terminal-host.ts).
   declare terminal: VaultTerminal | undefined;
   declare _reloadAsked: number | undefined;
-  // The Claude mod's folder (claude-mod.ts).
+  // The folder the Claude mods are written into (claude-mod.ts).
   declare _claudeModDir: string | null | undefined;
   // The guides' folder (guides.ts).
   declare _guidesDir: string | null | undefined;
@@ -58,7 +58,7 @@ class VaultTerminalPlugin extends import_obsidian.Plugin {
   declare _noteLaunches: Map<string, number | null> | undefined;
   // Tickets whose main session is being started, until its tab exists (startSession).
   declare _ticketLaunching: Set<string> | undefined;
-  declare _openingToday: boolean | undefined;
+  declare _openingToday: Set<string> | undefined;
   declare _openingSetup: boolean | undefined;
   declare _resuming: Set<string> | undefined;
   // The workspace (workspace.ts).
@@ -69,9 +69,11 @@ class VaultTerminalPlugin extends import_obsidian.Plugin {
   declare _openRoutingAvailable: boolean | undefined;
   declare _sweepScheduled: boolean | undefined;
   declare _unmovableStrays: WeakSet<WorkspaceLeaf> | undefined;
-  // Set by the sidebar's new-session card (browser/home.js, still JavaScript), and by a
+  // Set by the sidebar's cards (browser/home.ts): New session open, and the New ticket
+  // card (open, what's typed in it, and the session it was opened from); and by a
   // session's restore queue and re-host check cache (sessions/identity.ts).
   declare newCardOpen: boolean | undefined;
+  declare ticketCard: TicketCard | undefined;
   declare _restoreQueue: Promise<unknown> | undefined;
   declare _firstTextsCache: Map<string, string[]> | undefined;
   // Obsidian makes the plugin with (app, manifest); every argument goes on to Plugin, as before.
@@ -147,6 +149,13 @@ class VaultTerminalPlugin extends import_obsidian.Plugin {
         if (isFolder && p.startsWith(oldPath + "/")) return file.path + p.slice(oldPath.length);
         return null;
       };
+      // A context source: a note's path, or a folder's with a trailing slash.
+      const movedSource = (p: string | null | undefined): string | null => {
+        if (!p) return null;
+        if (!p.endsWith("/")) return moved(p);
+        const to = moved(p.slice(0, -1));
+        return to ? `${to}/` : null;
+      };
       let changed = false;
       for (const leaf of this.sessionLeaves()) {
         const v = this.sessionOf(leaf);
@@ -154,6 +163,8 @@ class VaultTerminalPlugin extends import_obsidian.Plugin {
           const note = moved(v._notePath), folder = moved(v._folderPath);
           if (note) { v._notePath = note; changed = true; }
           if (folder) { v._folderPath = folder; changed = true; }
+          const ctxFrom = movedSource(v._contextSource?.from);
+          if (ctxFrom && v._contextSource) { v._contextSource = { ...v._contextSource, from: ctxFrom }; changed = true; }
           // The tickets it's attached to.
           for (const [p, kind] of Object.entries(v._ticketLinks || {})) {
             const to = moved(p);
@@ -166,21 +177,30 @@ class VaultTerminalPlugin extends import_obsidian.Plugin {
           const note = moved(fields.notePath), folder = moved(fields.folderPath);
           if (note) fields.notePath = note;
           if (folder) fields.folderPath = folder;
+          const ctxFrom = movedSource(fields.contextSource?.from);
+          if (ctxFrom && fields.contextSource) fields.contextSource = { ...fields.contextSource, from: ctxFrom };
           let linked = false;
           for (const [p, kind] of Object.entries(fields.ticketLinks || {})) {
             const to = moved(p);
             if (to && fields.ticketLinks) { delete fields.ticketLinks[p]; fields.ticketLinks[to] = kind; linked = true; }
           }
-          return !!(note || folder || linked);
+          return !!(note || folder || ctxFrom || linked);
         }).catch(() => {});
+      }
+      // The recorded context sources (sessionSources), so a resume pins the new path.
+      let sourced = false;
+      for (const rec of Object.values(this.pluginData.sessionSources || {})) {
+        const to = movedSource(rec.from);
+        if (to) { rec.from = to; sourced = true; }
       }
       if (changed) this.app.workspace.requestSaveLayout(); // the path persists in view state
       // The AGENTS.md folder follows its folder's rename.
       const start = moved(this.pluginData.startFolder ? this.startFolder() : null);
       if (start) this.pluginData.startFolder = start;
-      // So do the notes the settings name: the Tickets button's, and the templates.
+      // So do the notes the settings name: the tickets note, the custom button's (a URL
+      // never matches), and the templates.
       let named = false;
-      for (const key of ["ticketsNote", "ticketTemplate", "overviewTemplate"] as const) {
+      for (const key of ["ticketsNote", "customButtonTarget", "ticketTemplate", "overviewTemplate"] as const) {
         const to = moved(stringOf(this.pluginData[key] ?? "") || null);
         if (to) { this.pluginData[key] = to; named = true; }
       }
@@ -201,7 +221,7 @@ class VaultTerminalPlugin extends import_obsidian.Plugin {
         if (notePath) { a.instructions = notePath; agentsMoved = true; }
       }
       if (agentsMoved) this.pluginData.agents = agents;
-      if (start || named || agentsMoved) this.savePluginData().catch(() => {});
+      if (start || named || agentsMoved || sourced) this.savePluginData().catch(() => {});
     }));
     // Track the most recently focused session tab, and keep the browser's active-row
     // highlight in sync. ANY focus change can change which session is active (or move

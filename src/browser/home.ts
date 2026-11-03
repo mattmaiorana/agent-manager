@@ -1,5 +1,5 @@
-// The sidebar: the home page (the header and its New session card, Today's chat, the
-// setup note, Pinned, and Recent), session rows and their actions, and dragging rows
+// The sidebar: the home page (the header and its custom button, the agent switch, Today's
+// chat, the New session and New ticket rows and their cards, the setup note, Pinned, and Recent), session rows and their actions, and dragging rows
 // between the two sections.
 
 import { fs, import_obsidian } from "../externals.js";
@@ -7,14 +7,20 @@ import { CLI_BACKENDS, REAL_BACKENDS } from "../constants/backends.js";
 import { antigravityBrainDir } from "../sessions/transcript-files.js";
 import { ConfirmModal } from "../ui/modals.js";
 import { stringOf } from "../util/guards.js";
+import { ticketFileName } from "../tickets/new-ticket.js";
 import type { BackendKey } from "../constants/backends.js";
-import type { SessionRecord } from "../types.js";
-import type { Browser } from "./view.js";
+import type { SessionRecord, TicketCard } from "../types.js";
+import type { Browser, CardKind } from "./view.js";
+
+// How long a card takes to open; the CSS animation's length.
+const REVEAL_MS = 200;
 
 // What a session row is drawn with (renderSessionRow).
 interface RowOptions {
   draggable?: boolean;
   showDate?: boolean;
+  // In Pinned sessions: a faint pin at the row's right.
+  pinned?: boolean;
 }
 class BrowserMethods {
   // The sidebar has one page, home. `browserScope` stays null on it.
@@ -88,28 +94,80 @@ class BrowserMethods {
     const wrap = createDiv({ cls: "agent-manager-browser-inner agent-manager-home" });
     const head = wrap.createDiv({ cls: "agent-manager-home-head" });
     head.createDiv({ cls: "agent-manager-home-title", text: "Agent Manager" });
-    // "+ New session" (a plus icon and the words) opens and closes the card. It starts
-    // closed each time Obsidian opens, and stays as left while it runs.
-    const cardOpen = this.plugin.newCardOpen === true;
-    const toggle = head.createEl("button", { cls: "agent-manager-new-toggle" + (cardOpen ? " is-on" : "") });
-    // A plus while the card is closed, a minus while it's open, to say a click closes it.
-    import_obsidian.setIcon(toggle.createSpan({ cls: "agent-manager-new-toggle-icon" }), cardOpen ? "minus" : "plus");
-    toggle.createSpan({ text: "New Session" });
-    toggle.setAttribute("aria-pressed", String(cardOpen));
-    toggle.addEventListener("click", () => {
-      this.plugin.newCardOpen = !cardOpen;
-      this._focusCardName = !cardOpen;
-      this.renderBrowser();
-    });
+    // The header's right side: the custom button, while it's on.
+    this.renderCustomButton(head.createDiv({ cls: "agent-manager-head-buttons" }));
     this.renderAgentSwitch(wrap);
-    if (cardOpen) this.renderNewSessionForm(wrap);
     this.renderTodayRow(wrap);
-    this.renderTicketsRow(wrap);
+    // Under Daily Chat, the rows that open a card under themselves.
+    const reveals: HTMLElement[] = [];
+    const sessionOn = this.plugin.pluginData.newButton !== false;
+    // New ticket, while tickets are on and it's shown, or a session's menu opened its card.
+    const ticketOn = this.plugin.ticketsOn() && (this.plugin.pluginData.newTicketButton !== false || !!this.plugin.ticketCard?.from);
+    // Both shown, they share one line (a trial), their cards opening full width below it.
+    const pair = sessionOn && ticketOn ? wrap.createDiv({ cls: "agent-manager-card-rows" }) : wrap;
+    if (sessionOn) this.renderCardRow(wrap, "session", reveals, pair);
+    if (ticketOn) this.renderCardRow(wrap, "ticket", reveals, pair);
     this.renderSetupNote(wrap);
     // Let the header paint before the transcript scan, which is synchronous disk I/O.
     await new Promise((r) => window.setTimeout(r, 0));
     await this.renderSessionSections(wrap);
     this.swapBrowserContent(wrap, gen);
+    if (!wrap.isConnected) return;
+    // A card a click just opened takes the focus, now that it's in the document. The flag
+    // holds until a render lands, as the reveal's does.
+    const autofocus = wrap.querySelector<HTMLElement>("[data-autofocus]");
+    if (autofocus) { this._focusCard = undefined; autofocus.focus(); }
+    // A card a click opened starts growing now that it's on screen; one still growing
+    // carries on from the same point, through a negative delay.
+    const revealCard = this._revealCard || (this._revealCard = {});
+    const revealAt = this._revealAt || (this._revealAt = {});
+    for (const reveal of reveals) {
+      const kind = reveal.dataset.card as CardKind;
+      if (revealCard[kind]) { revealCard[kind] = false; revealAt[kind] = Date.now(); }
+      else if (reveal.hasClass("is-opening")) reveal.setCssProps({ "--agent-manager-reveal-delay": `-${Date.now() - (revealAt[kind] as number)}ms` });
+    }
+  }
+  // Whether a card is open. Each starts closed each time Obsidian opens, and stays as
+  // left while it runs.
+  isCardOpen(this: Browser, kind: CardKind): boolean {
+    return kind === "session" ? this.plugin.newCardOpen === true : this.plugin.ticketCard?.open === true;
+  }
+  // Closing the New ticket card keeps what was typed in it, but not the session it was
+  // opened from.
+  setCardOpen(this: Browser, kind: CardKind, open: boolean): void {
+    if (kind === "session") { this.plugin.newCardOpen = open; return; }
+    const card = this.ticketCardState();
+    card.open = open;
+    if (!open) card.from = undefined;
+  }
+  // A row that opens a card under itself (New session, New ticket): its icon and name, and while
+  // the card is open, the card's color. The card grows down when a click opened it; the
+  // flag holds until a render reaches the screen (renderHome), since one the click
+  // started can be dropped for a later one. A render that lands while it's folding up
+  // draws it closed.
+  renderCardRow(this: Browser, wrap: HTMLElement, kind: CardKind, reveals: HTMLElement[], rowParent: HTMLElement = wrap): void {
+    const open = this.isCardOpen(kind) && !this._cardClosing?.[kind];
+    const name = kind === "session" ? this.plugin.newButtonName() : this.plugin.newTicketButtonName();
+    const icon = kind === "session" ? "message-square-plus" : import_obsidian.getIcon("ticket-plus") ? "ticket-plus" : "ticket";
+    const row = rowParent.createDiv({ cls: "agent-manager-card-row" + (open ? " is-open" : ""), attr: { role: "button", tabindex: "0", "aria-expanded": String(open) } });
+    import_obsidian.setIcon(row.createSpan({ cls: "agent-manager-card-row-icon" }), icon);
+    row.createDiv({ cls: "agent-manager-today-title agent-manager-card-row-name", text: name });
+    const toggle = () => {
+      if (open) { this.closeCard(kind); return; }
+      this.setCardOpen(kind, true);
+      this._focusCard = kind;
+      (this._revealCard || (this._revealCard = {}))[kind] = true;
+      this.renderBrowser();
+    };
+    row.addEventListener("click", toggle);
+    row.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); } });
+    if (!open) return;
+    const at = this._revealAt?.[kind];
+    const growing = !!this._revealCard?.[kind] || (!!at && Date.now() - at < REVEAL_MS);
+    const reveal = wrap.createDiv({ cls: "agent-manager-newcard-reveal" + (growing ? " is-opening" : ""), attr: { "data-card": kind } });
+    reveals.push(reveal);
+    const clip = reveal.createDiv({ cls: "agent-manager-newcard-clip" });
+    if (kind === "session") this.renderNewSessionForm(clip); else this.renderNewTicketForm(clip);
   }
   // What to install before a session can start: Python 3, or any agent CLI at all.
   // Shown only once the setup check has found something missing.
@@ -209,8 +267,10 @@ class BrowserMethods {
     }
     select.addEventListener("change", () => { void this.plugin.setSwitchedAgent(select.value); });
   }
-  // Today's chat: one row that goes to the day's chat, resumes it, or starts it.
+  // Today's chat: one row that goes to the day's chat, resumes it, or starts it. Hidden
+  // when the Daily Chat button is off in settings.
   renderTodayRow(this: Browser, wrap: HTMLElement): void {
+    if (this.plugin.pluginData.dailyChatButton === false) return;
     const name = this.plugin.dailyChatName();
     const row = wrap.createDiv({ cls: "agent-manager-today", attr: { role: "button", tabindex: "0", "data-day": this.plugin.todayString() } });
     const icon = row.createSpan({ cls: "agent-manager-today-icon" });
@@ -227,17 +287,21 @@ class BrowserMethods {
     row.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); go(); } });
     this.refreshTodayDot(row);
   }
-  // The Tickets button, under Daily Chat while tickets and the button are on: it opens
-  // the tickets base, or the note set in settings, under the name set there.
-  renderTicketsRow(this: Browser, wrap: HTMLElement): void {
-    if (!this.plugin.ticketsOn() || this.plugin.pluginData.ticketsButton === false) return;
-    const name = this.plugin.ticketsButtonName();
-    const row = wrap.createDiv({ cls: "agent-manager-tickets", attr: { role: "button", tabindex: "0", "aria-label": `Open ${name}` } });
-    import_obsidian.setIcon(row.createSpan({ cls: "agent-manager-tickets-icon" }), "ticket");
-    row.createDiv({ cls: "agent-manager-today-title", text: name });
-    const go = () => { void this.plugin.openTicketsNote(); };
-    row.addEventListener("click", go);
-    row.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); go(); } });
+  // The custom button, at the header's right while it's on and has something to open:
+  // its icon and text, and a click opens its note or link. With no text set, it says
+  // Tickets while it opens the tickets note, else what it opens.
+  renderCustomButton(this: Browser, parent: HTMLElement): void {
+    if (this.plugin.pluginData.customButton === false) return;
+    const target = this.plugin.customButtonTarget();
+    if (!target) return;
+    const set = stringOf(this.plugin.pluginData.customButtonName ?? "").trim();
+    const opens = "url" in target ? target.url : target.path;
+    const name = set || (stringOf(this.plugin.pluginData.customButtonTarget ?? "").trim() ? opens.replace(/^.*\//, "").replace(/\.(md|base)$/, "") : "Tickets");
+    // No aria-label: Obsidian shows one as a tooltip, which would repeat the text.
+    const btn = parent.createEl("button", { cls: "agent-manager-head-button agent-manager-custom-button" });
+    import_obsidian.setIcon(btn.createSpan({ cls: "agent-manager-head-button-icon" }), this.plugin.customButtonIcon());
+    btn.createSpan({ cls: "agent-manager-head-button-name", text: name });
+    btn.addEventListener("click", () => { void this.plugin.openCustomButton(); });
   }
   // The row's sun: grey until today's chat has run, yellow once it has and is closed, and
   // green while it has a tab (one Obsidian hasn't loaded yet after a reload included).
@@ -284,14 +348,69 @@ class BrowserMethods {
       this._launchBackend = select.value as BackendKey;
     });
   }
-  // The New session card: a name (optional), then the CLI and Start on one row. A session starts in
-  // the starting folder; reading a particular note or folder first is the file menu's.
+  // Close a card: it folds up, then the sidebar redraws without it. With no card on
+  // show, or the animation off, it closes at once.
+  closeCard(this: Browser, kind: CardKind): void {
+    const reveal = this.containerEl.querySelector<HTMLElement>(`.agent-manager-newcard-reveal[data-card="${kind}"]`);
+    const closing = this._cardClosing || (this._cardClosing = {});
+    // The ticket card closing now; a session's menu can put a new one in its place before
+    // this finishes, and that one stays open.
+    const card = kind === "ticket" ? this.plugin.ticketCard : undefined;
+    let done = false;
+    let timer = 0;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      window.clearTimeout(timer);
+      closing[kind] = false;
+      if (kind === "ticket" && this.plugin.ticketCard !== card) { if (!this._closed) this.renderBrowser(); return; }
+      this.setCardOpen(kind, false);
+      if (!this._closed) this.renderBrowser();
+    };
+    if (!reveal || window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches) { finish(); return; }
+    closing[kind] = true;
+    reveal.removeClass("is-opening");
+    reveal.addClass("is-closing");
+    reveal.addEventListener("animationend", finish, { once: true });
+    // In case the animation never runs (a hidden sidebar, say). Cleared when the view closes.
+    timer = window.setTimeout(finish, 400);
+    this.register(() => window.clearTimeout(timer));
+  }
+  // The card's agent profile dropdown, while the switch offers more than one: it starts on
+  // the switch's choice, and follows the switch until one is picked here. A pick holds only
+  // while the switch stays where it was when it was made.
+  renderCardAgentSelector(this: Browser, parentEl: HTMLElement): void {
+    const choices = this.plugin.switchChoices();
+    if (choices.length < 2) return;
+    const switched = this.plugin.switchedAgentId() ?? "";
+    const pick = this._launchAgent;
+    const current = pick && pick.switched === switched && choices.some((c) => c.id === pick.id) ? pick.id : switched;
+    const select = parentEl.createEl("select", { cls: "dropdown agent-manager-card-agent-select", attr: { "aria-label": "Agent profile" } });
+    for (const c of choices) {
+      const opt = select.createEl("option", { text: c.name, value: c.id });
+      if (c.id === current) opt.selected = true;
+    }
+    select.addEventListener("change", () => { this._launchAgent = { id: select.value, switched }; });
+  }
+  // The agent profile a session from the card starts as: the card's pick, else the
+  // switch's (undefined leaves it to startSession, which reads the switch).
+  cardAgentId(this: Browser): string | undefined {
+    const pick = this._launchAgent;
+    if (!pick || !this.plugin.switchChoices().some((c) => c.id === pick.id)) return undefined;
+    return pick.switched === (this.plugin.switchedAgentId() ?? "") ? pick.id : undefined;
+  }
+  // The New session card: a name (optional), the agent profile (while there's a choice),
+  // then the CLI with Start beside it. A session starts in the starting folder; reading a
+  // particular note or folder first is the file menu's.
   renderNewSessionForm(this: Browser, wrap: HTMLElement): void {
     const form = wrap.createDiv({ cls: "agent-manager-newform agent-manager-newcard" });
     const input = form.createEl("input", { type: "text", cls: "agent-manager-name-input", attr: { placeholder: "Name this session (optional)" } });
     // A render can land mid-typing (a session opened elsewhere), so the draft is kept.
     input.value = this._titleDraft || "";
     input.addEventListener("input", () => { this._titleDraft = input.value; });
+    // The agent profile while there's a choice (profiles on, more than one offered), then
+    // the CLI beside Start, as the New ticket card has it beside its buttons.
+    this.renderCardAgentSelector(form);
     const controls = form.createDiv({ cls: "agent-manager-newform-row agent-manager-newform-controls" });
     this.renderBackendSelector(controls);
     const start = controls.createEl("button", { text: "Start", cls: "agent-manager-start-btn mod-cta" });
@@ -301,14 +420,115 @@ class BrowserMethods {
       done = true;
       const name = input.value.trim();
       this._titleDraft = "";
-      void this.plugin.startSession(name, this);
+      const agentId = this.cardAgentId();
+      this._launchAgent = undefined;
+      void this.plugin.startSession(name, this, agentId !== undefined ? { agentId } : null);
     };
     start.addEventListener("click", go);
     input.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); go(); }
       else if (e.key === "Escape") { e.preventDefault(); input.value = ""; this._titleDraft = ""; input.blur(); }
     });
-    if (this._focusCardName) { this._focusCardName = false; window.setTimeout(() => input.focus(), 0); }
+    if (this._focusCard === "session") input.dataset.autofocus = "true";
+  }
+  // The New ticket card's state, made empty the first time it's asked for.
+  ticketCardState(this: Browser): TicketCard {
+    return this.plugin.ticketCard || (this.plugin.ticketCard = { open: false, draft: { name: "", project: "", backend: null, notes: "" } });
+  }
+  // The New ticket card: a name (always), the project (always picked, never guessed,
+  // except from a session's menu, which fills in the session's), notes, and the CLI (the
+  // default to start) beside Create, which makes the ticket and opens it, and Launch
+  // (while it's on), which also starts the ticket's main session on the CLI picked. What's typed is kept as it's typed, since a
+  // render can land mid-typing. Opened from a session's menu, it says which session
+  // Create attaches to the ticket.
+  renderNewTicketForm(this: Browser, wrap: HTMLElement): void {
+    const card = this.ticketCardState();
+    const draft = card.draft;
+    const form = wrap.createDiv({ cls: "agent-manager-newform agent-manager-newcard agent-manager-ticketcard" });
+    const from = card.from;
+    if (from) form.createDiv({ cls: "agent-manager-ticketcard-from", text: `Attaches “${from.sessionTitle || "this session"}” to the new ticket` });
+    const input = form.createEl("input", { type: "text", cls: "agent-manager-name-input", attr: { placeholder: "Name this ticket" } });
+    input.value = draft.name;
+    input.addEventListener("input", () => { draft.name = input.value; });
+    const project = form.createEl("select", { cls: "dropdown agent-manager-ticket-select", attr: { "aria-label": "Project" } });
+    project.createEl("option", { text: "Choose a project", value: "" });
+    const projects = this.plugin.ticketProjects();
+    // A session's project outside the switched profile's home is still offered; any other
+    // pick the list no longer has (the switch moved, the folder went) is dropped.
+    const picked = draft.project ? this.plugin.app.vault.getAbstractFileByPath(draft.project) : null;
+    if (picked instanceof import_obsidian.TFolder && !projects.includes(picked)) {
+      if (from) projects.unshift(picked); else draft.project = "";
+    } else if (!(picked instanceof import_obsidian.TFolder)) draft.project = "";
+    for (const f of projects) {
+      const opt = project.createEl("option", { text: this.plugin.ticketProjectLabel(f), value: f.path });
+      if (f.path === draft.project) opt.selected = true;
+    }
+    project.addEventListener("change", () => { draft.project = project.value; });
+    const notes = form.createEl("textarea", { cls: "agent-manager-ticket-notes", attr: { placeholder: "Notes (optional)", rows: "3" } });
+    notes.value = draft.notes;
+    notes.addEventListener("input", () => { draft.notes = notes.value; });
+    const controls = form.createDiv({ cls: "agent-manager-newform-row agent-manager-newform-controls" });
+    // The CLIs offered, beside the buttons; with one, nothing to pick, and that one is written.
+    const backends = this.plugin.getBrowserBackends();
+    const fallback = backends.includes(this.plugin.getCurrentBackend()) ? this.plugin.getCurrentBackend() : (backends[0] || null);
+    if (!draft.backend || !backends.includes(draft.backend)) draft.backend = fallback;
+    if (backends.length > 1) {
+      const select = controls.createEl("select", { cls: "dropdown agent-manager-ticket-select", attr: { "aria-label": "CLI" } });
+      for (const key of backends) {
+        const opt = select.createEl("option", { text: CLI_BACKENDS[key].label, value: key });
+        if (key === draft.backend) opt.selected = true;
+      }
+      // Its options are the offered backends' keys.
+      select.addEventListener("change", () => { draft.backend = select.value as BackendKey; });
+    }
+    const launchOn = this.plugin.pluginData.ticketLaunchButton !== false;
+    const create = controls.createEl("button", { text: "Create", cls: "agent-manager-start-btn" + (launchOn ? "" : " mod-cta") });
+    const launch = launchOn ? controls.createEl("button", { text: "Launch", cls: "agent-manager-start-btn mod-cta" }) : null;
+    let done = false;
+    const go = (andLaunch = false) => {
+      if (done) return;
+      const folder = draft.project ? this.plugin.app.vault.getAbstractFileByPath(draft.project) : null;
+      if (!ticketFileName(draft.name)) { new import_obsidian.Notice("Name the ticket."); input.focus(); return; }
+      if (!(folder instanceof import_obsidian.TFolder)) { new import_obsidian.Notice("Choose a project for the ticket."); project.focus(); return; }
+      done = true;
+      const kept = { ...draft };
+      const opts = { name: draft.name, backend: draft.backend, notes: draft.notes };
+      const fresh: TicketCard = { open: true, draft: { name: "", project: "", backend: null, notes: "" } };
+      this.plugin.ticketCard = fresh;
+      this.closeCard("ticket");
+      void (async () => {
+        const file = await this.plugin.newTicket(folder, opts);
+        // It couldn't be made (newTicket said why): the card comes back with what was typed.
+        if (!file) {
+          // Unless a session's menu has opened a new card since.
+          if (this.plugin.ticketCard !== fresh) return;
+          this.plugin.ticketCard = { open: true, draft: kept, from };
+          if (!this._closed) this.renderBrowser();
+          return;
+        }
+        // Both wait until Obsidian has read the ticket's properties, or neither sees it as one.
+        if ((andLaunch || (from && from.containerEl.isConnected)) && !(await this.plugin.whenIndexed(file))) {
+          new import_obsidian.Notice(`Made “${file.basename}”, but it didn't read as a ticket in time (does the ticket template have type: ticket in its properties?), so ${andLaunch ? "nothing was launched" : "the session wasn't attached"}.`, 8000);
+          return;
+        }
+        // The session it came from, while its tab is still open.
+        if (from && from.containerEl.isConnected) await from.attachToTicket(file.path);
+        else if (from) new import_obsidian.Notice(`Made “${file.basename}”. “${from.sessionTitle || "The session"}” was closed, so it wasn't attached.`);
+        if (andLaunch) await this.plugin.startSession(file.basename, null, { notePath: file.path, ...(opts.backend ? { backendOverride: opts.backend } : {}) });
+      })();
+    };
+    create.addEventListener("click", () => go());
+    launch?.addEventListener("click", () => go(true));
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); go(launchOn); }
+      else if (e.key === "Escape") { e.preventDefault(); input.blur(); }
+    });
+    // Enter, and Cmd+Enter in the notes, run the highlighted button.
+    notes.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && !e.isComposing) { e.preventDefault(); go(launchOn); }
+      else if (e.key === "Escape") { e.preventDefault(); notes.blur(); }
+    });
+    if (this._focusCard === "ticket") input.dataset.autofocus = "true";
   }
   // Each full render takes a number. A render that finishes after a later one began
   // (the user moved on while it was reading) is dropped at the swap.
@@ -328,7 +548,7 @@ class BrowserMethods {
     // Someone is typing a session name or a rename here. A render nobody asked for
     // (a session starting or ending elsewhere) waits; the next one catches up.
     const focused = container.ownerDocument.activeElement;
-    const typing = focused && container.contains(focused) && focused.matches(".agent-manager-name-input, .agent-manager-search-input") ? focused : null;
+    const typing = focused && container.contains(focused) && focused.matches(".agent-manager-name-input, .agent-manager-search-input, .agent-manager-ticket-notes, .agent-manager-ticket-select") ? focused : null;
     if (this._renderIsBackground && typing) {
       typing.addEventListener("blur", () => window.setTimeout(() => {
         if (!this._closed) this.renderBrowser({ background: true });
@@ -390,7 +610,7 @@ class BrowserMethods {
     parentEl.createDiv({ text: "Pinned", cls: "agent-manager-sublabel" });
     const pinList = parentEl.createDiv({ cls: "agent-manager-list agent-manager-session-list agent-manager-pinned-list" });
     this.attachSessionOrderDrop(pinList, (id, before) => this.plugin.reorderPinnedSession(id, before));
-    if (pinned.length) for (const s of pinned) this.renderSessionRow(pinList, s, openKeys, rowOpts);
+    if (pinned.length) for (const s of pinned) this.renderSessionRow(pinList, s, openKeys, { ...rowOpts, pinned: true });
     else pinList.createDiv({ cls: "agent-manager-empty", text: "Right-click a session and choose Pin, or drag it here, to keep it here." });
 
     parentEl.createDiv({ text: "Recent", cls: "agent-manager-sublabel agent-manager-sessions-head" });
@@ -398,7 +618,7 @@ class BrowserMethods {
       // Still a drop target, so a pinned session can be dragged back out.
       const empty = parentEl.createDiv({ cls: "agent-manager-recent" });
       this.attachSessionUnpinDrop(empty);
-      empty.createEl("p", { text: pinned.length ? "No other sessions." : "No sessions yet. Click New Session, or try Daily Chat.", cls: "agent-manager-empty" });
+      empty.createEl("p", { text: pinned.length ? "No other sessions." : "No sessions yet.", cls: "agent-manager-empty" });
       return;
     }
     // Obsidian's own search field: the magnifying glass and the clear button.
@@ -446,6 +666,8 @@ class BrowserMethods {
         if (capped) hidden++;
         row.toggle(hit && !capped);
       }
+      // The open sessions' last row keeps its divider while closed ones show below it.
+      openList.toggleClass("has-rows-below", listed !== 0);
       moreText.setText(`Show ${Math.min(PAGE, hidden)} more`);
       more.toggle(hidden !== 0);
       noMatch.toggle(matched === 0 && !!q);
@@ -487,6 +709,8 @@ class BrowserMethods {
       meta.createSpan({ text: "·", cls: "agent-manager-row-sep" });
       meta.createSpan({ text: this.plugin.shortDate(s.mtime), cls: "agent-manager-row-date" });
     }
+    // A pinned row's pin, centered on the row, as Obsidian marks a pinned note.
+    if (opts.pinned) import_obsidian.setIcon(body.createSpan({ cls: "agent-manager-row-pin", attr: { "aria-hidden": "true" } }), "pin");
     // Pin, close, rename, and delete are in the right-click menu.
     row.addEventListener("click", () => {
       if (row.dataset.dragging) return; // a drag just ended; not a click
@@ -667,8 +891,8 @@ class BrowserMethods {
     const named = id && this.plugin.pluginData.sessionNames?.[id] != null;
     // `named` found the rename in sessionNames.
     if (named) delete (this.plugin.pluginData.sessionNames as Record<string, string>)[id];
-    // And its agent and side-chat records.
-    if (id) { delete this.plugin.pluginData.sessionAgents?.[id]; delete this.plugin.pluginData.sessionLaunchAgents?.[id]; delete this.plugin.pluginData.sideChats?.[id]; }
+    // And its agent, context-source, and side-chat records.
+    if (id) { delete this.plugin.pluginData.sessionAgents?.[id]; delete this.plugin.pluginData.sessionLaunchAgents?.[id]; delete this.plugin.pluginData.sessionSources?.[id]; delete this.plugin.pluginData.sideChats?.[id]; }
     // A session with a file is a store record, which has its id (IndexRecord).
     if (session.backend === "antigravity") this.plugin.forgetAntigravitySession(id as string);
     await this.plugin.savePluginData();

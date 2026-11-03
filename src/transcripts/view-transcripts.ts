@@ -4,6 +4,13 @@ import { StringDecoder, fs, import_obsidian, path } from "../externals.js";
 import { sentFileMarker, sentFilesIn } from "./sent-files.js";
 import type { Session } from "../sessions/controller.js";
 import type { TranscriptMessage, TranscriptWrite } from "../types.js";
+
+// A big transcript opens with its last FIRST_CHUNK bytes; scrolling near the top loads
+// EARLIER_CHUNK more at a time, back to the start (_loadEarlierTranscript).
+const FIRST_CHUNK = 512 * 1024;
+const EARLIER_CHUNK = 256 * 1024;
+// How close to the top, in pixels, starts loading earlier turns.
+const EARLIER_AT = 300;
 class ViewTranscriptMethods {
   // ---- Rendered transcript overlay ----
   // The session transcript rendered as real markdown, toggled from the strip.
@@ -26,6 +33,10 @@ class ViewTranscriptMethods {
     if (!this.transcriptHost) {
       this.transcriptHost = this.termHost.createDiv({ cls: "agent-manager-transcript-overlay" });
       this._transcriptBodyEl = this.transcriptHost.createDiv({ cls: "agent-manager-transcript-body markdown-rendered" });
+      const host = this.transcriptHost;
+      this.view.registerDomEvent(host, "scroll", () => {
+        if (host.scrollTop < EARLIER_AT) void this._loadEarlierTranscript();
+      });
     }
     this.transcriptHost.addClass("is-open");
     this._transcriptOpen = true;
@@ -34,6 +45,8 @@ class ViewTranscriptMethods {
     await this._refreshTranscript();
     if (!this._transcriptOpen) return; // closed during the first refresh: don't start the poll
     this.transcriptHost.scrollTop = this.transcriptHost.scrollHeight;
+    // Too little to scroll yet: fill the view from earlier turns.
+    if (this.transcriptHost.scrollTop < EARLIER_AT) void this._loadEarlierTranscript();
     if (!this._transcriptTimer) {
       this._transcriptTimer = window.setInterval(() => {
         this._refreshTranscript().catch(() => {});
@@ -71,23 +84,21 @@ class ViewTranscriptMethods {
       this._transcriptDecoder = new StringDecoder("utf8");
       this._transcriptCarry = "";
       body.empty();
-      // Cap the initial render on a big transcript: start near the end, at the
-      // next full line. Reading and rendering many MB up front would stall the
-      // UI for a file whose old turns are rarely the point.
-      const CAP = 512 * 1024;
-      if (stat.size > CAP) {
-        this._transcriptOffset = stat.size - CAP;
-        // Drop the first (partial) line only if the offset really landed mid-line:
-        // if the byte before it is a newline, the chunk starts on a record boundary
-        // and dropping would lose a whole record.
-        this._transcriptSkipPartial = !this._byteIsNewline(file, this._transcriptOffset - 1);
-        // The durable note holds the FULL conversation (its writer reads the
-        // whole file), so the cap notice links there instead of dead-ending.
+      this._transcriptGen = (this._transcriptGen || 0) + 1;
+      this._transcriptStart = 0;
+      this._transcriptEarlierEl = null;
+      // A big transcript opens near its end, at a record's start (reading and rendering
+      // many MB up front would stall the UI); scrolling up loads the earlier turns.
+      if (stat.size > FIRST_CHUNK) {
+        const start = this._lineStartFrom(file, stat.size - FIRST_CHUNK, stat.size);
+        this._transcriptOffset = start;
+        this._transcriptStart = start;
         const notice = body.createDiv({ cls: "agent-manager-transcript-notice" });
-        notice.appendText("Transcript is large, so only the latest turns are shown here. ");
+        notice.appendText("Scroll up for earlier turns. ");
         const link = notice.createEl("a", { text: "Open the full transcript note", href: "#" });
         link.addEventListener("click", (ev) => { ev.preventDefault(); void this.openDurableTranscriptNote(); });
         notice.appendText(".");
+        this._transcriptEarlierEl = notice;
       }
     }
     if (stat.size === this._transcriptOffset) return;
@@ -104,12 +115,6 @@ class ViewTranscriptMethods {
     const text = (this._transcriptCarry || "") + chunk;
     const lines = text.split("\n");
     this._transcriptCarry = lines.pop() || "";
-    if (this._transcriptSkipPartial) {
-      // The capped start almost certainly landed mid-record; drop up to the
-      // first newline.
-      lines.shift();
-      this._transcriptSkipPartial = false;
-    }
     const paneBackend = this.getBackendKey();
     const msgs: TranscriptMessage[] = [];
     for (const line of lines) {
@@ -130,8 +135,9 @@ class ViewTranscriptMethods {
   // key) }. The `uuid` is whatever stable per-record key that backend has —
   // Claude's uuid, Codex's payload.id, agy's step_index — used for the
   // append-only <!-- pl-rec:KEY --> markers, so the field name is generic.
-  async _appendTranscriptMessage(this: Session, m: TranscriptMessage): Promise<void> {
-    const el = this._transcriptBodyEl;
+  // `target` is the body, or a detached holder for earlier turns.
+  async _appendTranscriptMessage(this: Session, m: TranscriptMessage, target: HTMLElement | null | undefined = this._transcriptBodyEl): Promise<void> {
+    const el = target;
     if (!el) return;
     if (m.role === "boundary") {
       el.createDiv({ cls: "agent-manager-transcript-boundary", text: "context compacted" });
@@ -159,6 +165,76 @@ class ViewTranscriptMethods {
         box.createDiv({ cls: "agent-manager-transcript-tool", text: p.hint ? `${p.name} · ${p.hint}` : p.name });
       }
     }
+  }
+  // Earlier turns of a transcript opened near its end: the records before the first one
+  // shown, rendered off-page and put in above it, keeping the view where it was. One load
+  // at a time; a reset of the overlay meanwhile (a new or truncated file) drops it. Loads
+  // again while the view is still near the top, so a short screen fills.
+  async _loadEarlierTranscript(this: Session): Promise<void> {
+    const file = this._transcriptFilePath;
+    const body = this._transcriptBodyEl;
+    const scroller = this.transcriptHost;
+    const end = this._transcriptStart || 0;
+    if (!file || !body || !scroller || end <= 0 || this._transcriptLoadingEarlier) return;
+    this._transcriptLoadingEarlier = true;
+    const gen = this._transcriptGen;
+    let from = end;
+    try {
+      // Back a chunk, to a record's start; a record longer than the chunk widens it.
+      let size = EARLIER_CHUNK;
+      from = this._lineStartFrom(file, end - size, end);
+      while (from >= end && end - size > 0) {
+        size *= 2;
+        from = this._lineStartFrom(file, end - size, end);
+      }
+      if (from >= end) return;
+      const buf = Buffer.alloc(end - from);
+      let read = 0;
+      const fd = fs.openSync(file, "r");
+      try { read = fs.readSync(fd, buf, 0, buf.length, from); } finally { fs.closeSync(fd); }
+      const backend = this.getBackendKey();
+      const holder = createDiv();
+      for (const line of buf.subarray(0, read).toString("utf8").split("\n")) {
+        const m = this.plugin._tc().parseTranscriptRecord(line, backend);
+        if (m) await this._appendTranscriptMessage(m, holder);
+      }
+      if (this._transcriptGen !== gen || this._transcriptBodyEl !== body) return;
+      const before = scroller.scrollHeight;
+      const marker = this._transcriptEarlierEl;
+      const anchor = marker && marker.parentElement === body ? marker.nextSibling : body.firstChild;
+      while (holder.firstChild) body.insertBefore(holder.firstChild, anchor);
+      this._transcriptStart = from;
+      if (from === 0) { marker?.remove(); this._transcriptEarlierEl = null; }
+      scroller.scrollTop += scroller.scrollHeight - before;
+    } catch (e) {
+      console.error("[Agent Manager] couldn't load earlier transcript turns:", e);
+      return;
+    } finally {
+      this._transcriptLoadingEarlier = false;
+    }
+    if (from > 0 && this._transcriptOpen && scroller.scrollTop < EARLIER_AT) {
+      window.setTimeout(() => { void this._loadEarlierTranscript(); }, 0);
+    }
+  }
+  // The first record start at or after `pos` (a byte offset), or `end` when none comes
+  // before it: `pos` itself when the byte before it is a newline, else just past the next
+  // newline. 0 for a `pos` at or before the file's start.
+  _lineStartFrom(file: string, pos: number, end: number): number {
+    if (pos <= 0) return 0;
+    if (this._byteIsNewline(file, pos - 1)) return pos;
+    let fd: number | null = null;
+    try {
+      fd = fs.openSync(file, "r");
+      const buf = Buffer.alloc(64 * 1024);
+      for (let at = pos; at < end; at += buf.length) {
+        const read = fs.readSync(fd, buf, 0, Math.min(buf.length, end - at), at);
+        if (read <= 0) break;
+        const nl = buf.subarray(0, read).indexOf(0x0a);
+        if (nl !== -1) return Math.min(end, at + nl + 1);
+      }
+    } catch { /* treated as none */ }
+    finally { if (fd != null) try { fs.closeSync(fd); } catch { /* best effort */ } }
+    return end;
   }
   _byteIsNewline(file: string, pos: number): boolean {
     if (pos < 0) return true;
@@ -201,6 +277,7 @@ class ViewTranscriptMethods {
       // Its agent is recorded once its id is known (a Claude session's is at launch).
       const ownId = this._ownSessionId();
       if (ownId && this._agentId !== undefined) await this.plugin.recordSessionAgent(ownId, this._agentId, { launchAgentId: this._launchAgentId });
+      if (ownId && this._contextSource) await this.plugin.recordContextSource(ownId, this._contextSource);
       const agentId = this.agentId();
       const res = await this.plugin._tc().writeDurableTranscript(this.plugin._vaultTranscriptIO(), {
         ...this.plugin.transcriptTarget(agentId),
@@ -313,8 +390,7 @@ class ViewTranscriptMethods {
     // A note: the writer's, or the one found by its id (a folder at the writer's path would
     // be no note to open).
     if (!(af instanceof import_obsidian.TFile)) { new import_obsidian.Notice("Transcript note not written yet."); return; }
-    const leaf = this.app.workspace.getLeaf("tab");
-    await leaf.openFile(af);
+    await this.plugin.openInNotesArea(af);
   }
 }
 export { ViewTranscriptMethods };

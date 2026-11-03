@@ -17,7 +17,7 @@ export interface AgentDef {
 }
 
 // A new agent's Daily Chat name, by default.
-export const DEFAULT_AGENT_DAILY_NAME = "{{profile}} Daily Chat - {{date}}";
+export const DEFAULT_AGENT_DAILY_NAME = "Daily Chat - {{profile}} - {{date}}";
 
 // The agents in saved data, each checked: an entry without an id or a name is skipped, and
 // so is a second one with an id already seen.
@@ -82,24 +82,34 @@ export function agentPrompt(name: string, instructionsPath: string): string {
     : `You are the ${name} agent.`;
 }
 
-// The flags that give a CLI its agent, for a launch, a resume, or a fork (`resume` covers
-// both). Both Claude and Codex keep the agent a conversation launched as through every
-// resume and fork. Claude is given it on every start anyway, since a resume without it
-// warns that the agent is "no longer available"; Codex ignores its instructions given
-// again, so it's given them at launch only.
+// The flags that give a CLI its agent and its pinned context (`context`, launch-context.ts
+// contextPrompt), for a launch, a resume, or a fork (`resume` covers both). Both Claude and
+// Codex keep the agent a conversation launched as through every resume and fork. Claude is
+// given it on every start anyway, since a resume without it warns that the agent is "no
+// longer available"; Codex ignores its instructions given again, so it's given them at
+// launch only, the agent's and the context's as one string.
+// Claude's context goes in --append-system-prompt on every start: Claude keeps the system
+// prompt a conversation first rendered until it's compacted (--system-prompt-snapshot),
+// and after a compaction renders it again from what this start passed. Tested 2026-11-02
+// (REFERENCE.md, "Context through a compaction").
 // Antigravity's --agent takes only agents in its own files: it gets the opening instead.
 // Tested 2026-10-22 (REFERENCE.md, "Agents and the CLIs").
 // `slug`, for a Claude resume or fork: the agent name the conversation recorded
 // (`agentSetting`), which a rename since mustn't change, or Claude reports the agent gone.
-export function agentArgs(backend: string, agent: (Pick<AgentDef, "id" | "name"> & { instructionsPath: string }) | null, { resume, slug: recorded }: { resume: boolean; slug?: string | null }): string[] {
-  if (!agent) return [];
-  const prompt = agentPrompt(agent.name, agent.instructionsPath);
+export function agentArgs(backend: string, agent: (Pick<AgentDef, "id" | "name"> & { instructionsPath: string }) | null, { resume, slug: recorded, context = "" }: { resume: boolean; slug?: string | null; context?: string }): string[] {
+  const prompt = agent ? agentPrompt(agent.name, agent.instructionsPath) : "";
   if (backend === "claude") {
-    const slug = recorded || agentSlug(agent);
-    return ["--agents", JSON.stringify({ [slug]: { description: `The ${agent.name} agent`, prompt } }), "--agent", slug];
+    const out: string[] = [];
+    if (agent) {
+      const slug = recorded || agentSlug(agent);
+      out.push("--agents", JSON.stringify({ [slug]: { description: `The ${agent.name} agent`, prompt } }), "--agent", slug);
+    }
+    if (context) out.push("--append-system-prompt", context);
+    return out;
   }
   // A TOML string: JSON's escaping is TOML's for a basic string.
-  if (backend === "codex" && !resume) return ["-c", `developer_instructions=${JSON.stringify(prompt)}`];
+  const text = [prompt, context].filter(Boolean).join("\n\n");
+  if (backend === "codex" && !resume && text) return ["-c", `developer_instructions=${JSON.stringify(text)}`];
   return [];
 }
 

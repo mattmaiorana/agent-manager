@@ -88,13 +88,15 @@ class ViewTicketMethods {
       this._ticketWriting = false;
     }
   }
-  // The tab's menu, while tickets are on: attach this session to a ticket, or make it a
-  // ticket's main session. The second is its own item, so a session never becomes a
+  // The tab's menu, while tickets are on: attach this session to a ticket, make it a
+  // ticket's main session, or make a new ticket from it. The second is its own item, so a session never becomes a
   // ticket's main session without being asked to by name.
   paneMenu(this: Session, menu: Menu): void {
     if (!this.plugin.ticketsOn() || !this.sessionTitle || this._inert) return;
     menu.addItem((i) => i.setTitle("Attach to a ticket").setIcon("ticket").setSection("action").onClick(() => this.pickTicketToAttach(false)));
     menu.addItem((i) => i.setTitle("Attach to a ticket as its main session").setIcon("ticket").setSection("action").onClick(() => this.pickTicketToAttach(true)));
+    // The sidebar's New ticket card, its Create attaching this session as Linked.
+    menu.addItem((i) => i.setTitle("Make a ticket from this session").setIcon(import_obsidian.getIcon("ticket-plus") ? "ticket-plus" : "ticket").setSection("action").onClick(() => { void this.plugin.openTicketCardFrom(this); }));
   }
   // A picker over every ticket (fuzzy, by name and folder), but the ones this session
   // already writes to; as main, but the one it was started from and those it's already

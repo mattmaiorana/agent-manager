@@ -47,6 +47,7 @@ function makeTab(oldId, oldFile, records, pluginData) {
     getBackendKey: () => "claude",
     _transcriptFile: async () => tab._modelFile,
     refreshStripId: () => {},
+    _setRc: () => {},
     _showRehostPill: () => { tab._pillShown = true; },
     plugin: {
       pluginData,

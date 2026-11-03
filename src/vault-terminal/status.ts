@@ -41,6 +41,8 @@ export interface Attention {
 const IDLE_GLYPH = "✳";
 /** The OSC 99 id of the hooks' state reports (claude.ts). */
 export const HOOK_ID = "vault-terminal-state";
+/** The OSC 99 id of the hooks' Remote Control reports (claude.ts): `turn=<id>` or `start=<id>`, the id empty while not connected. */
+export const BRIDGE_ID = "vault-terminal-bridge";
 const HOOK_STATES: Record<string, ProgramState> = { working: "working", waiting: "waiting", finished: "finished", error: "error" };
 // Spinner glyphs claude was seen using while it works: quarter circles now,
 // braille in older versions (its changelog). Any other glyph means nothing.
@@ -84,6 +86,8 @@ export class StatusTracker {
     private readonly reporter: boolean,
     private readonly changed: () => void,
     private readonly attention: (a: Attention) => void,
+    /** A hook's Remote Control report: claude.ai's session id, or "" when not connected; atStart from SessionStart. */
+    private readonly bridge?: (id: string, atStart: boolean) => void,
   ) {
     this.state = firstState;
   }
@@ -274,6 +278,12 @@ export class StatusTracker {
     }
     const payload = data.slice(semi + 1);
     const id = meta.get("i") ?? "";
+    // A hook's Remote Control report, never a notification.
+    if (id === BRIDGE_ID) {
+      const m = /^(turn|start)=([A-Za-z0-9_-]*)$/.exec(payload);
+      if (m && (this.reporter || this.reportsStatus) && this.state !== "exited") this.bridge?.(m[2], m[1] === "start");
+      return;
+    }
     // A hook's state report: a state, never a notification.
     if (id === HOOK_ID) {
       // Own keys only: "constructor" or "__proto__" from a program is no state.

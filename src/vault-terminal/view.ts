@@ -15,7 +15,7 @@ import { fileURLToPath } from "url";
 import { confirmClose, type VaultTerminal } from "./core";
 import type { CloseReason } from "./close";
 import type { TerminalController } from "./host";
-import { afterExitKey, ctrlCCopies } from "./keys";
+import { afterExitKey, ctrlCCopies, gestureReports, KeyQueue, replayPlan, selectsInBox, typesCharacter, type Cell, type Gesture, type QueueItem } from "./keys";
 import { HelperSession, validSize, type ExitInfo, type Foreground, type StartError } from "./session";
 import { findPaths, findUrls, type FoundPath } from "./links";
 import { clipboardHasOnlyImage, clipboardText, copyText } from "./clipboard";
@@ -77,7 +77,7 @@ const FRAME_FALLBACK_MS = 300;
 const CTRL_COMBOS: Modifier[][] = [["Ctrl"], ["Ctrl", "Shift"], ["Ctrl", "Alt"], ["Ctrl", "Shift", "Alt"]];
 const ANY_MODIFIERS = ["Escape", "Tab", "Enter", "Backspace", "Delete", "Home", "End", "PageUp", "PageDown", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"];
 const FUNCTION_KEYS = Array.from({ length: 20 }, (_, i) => `F${i + 1}`);
-const CMD_KEYS = ["A", "C", "V", "K", "F", "G", "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End", "Backspace", "Delete", "Z"];
+const CMD_KEYS = ["A", "C", "V", "X", "K", "F", "G", "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End", "Backspace", "Delete", "Z"];
 // Prompt marks kept for Cmd+Up and Cmd+Down; older ones are dropped.
 const MAX_PROMPT_MARKS = 1000;
 // After a scrollback reset while scrolled up, how long to look for the same text again.
@@ -168,8 +168,38 @@ export class TerminalView extends ItemView {
   private pathsKept: { text: string; dir: string; at: number; found: FoundPath[] } | null = null;
   /** The last selection Cmd+A made of claude's input, and its rows' indent (selectPrompt). */
   private promptSelection: { text: string; indent: number; col: number; row: number; length: number } | null = null;
-  /** What Cmd+A's drag and its Backspace still have to send (later, cancelPending). */
+  /** What Cmd+A's drag still has to send (later, cancelPending). */
   private pendingSends = new Set<number>();
+  /**
+   * The keys that delete a selection in claude's input, and whatever was
+   * typed or pasted while they go out, after them (replaceSelection). Only
+   * to the program it began in (queueSession).
+   */
+  private keyQueue = new KeyQueue(
+    (data) => {
+      if (this.session && this.session === this.queueSession) this.sendNow(data);
+      else this.keyQueue.clear();
+    },
+    (fn, ms) => this.pane.win.setTimeout(fn, ms),
+    (timer) => this.pane.win.clearTimeout(timer as number),
+    CLEAR_KEY_GAP_MS,
+  );
+  private queueSession: HelperSession | null = null;
+  /** While keyQueue itself sends through xterm's input (a mouse report), which onInput lets through. */
+  private queueWriting = false;
+  /**
+   * How claude's own selection in its input box was made, in its full screen,
+   * where the plugin can't see it; null when there's none. Set by a drag or a
+   * double or triple click there (selectsInBox) and by Cmd+A's drag, and
+   * dropped by anything else (claude clears its selection on nearly any key,
+   * Cmd+C included), since a wrong yes deletes a character the user meant to
+   * keep. Cut makes it again after the copy (cutSelection).
+   */
+  private claudeSelection: Gesture | null = null;
+  /** Where and when (performance.now()) the left button last went down while claude has the mouse, for Cut's replay (replayPlan). */
+  private lastPress: Cell & { at: number } = { col: -9, row: -9, at: 0 };
+  /** Where the left button went down, while claude has the mouse, for claudeSelection. */
+  private pressedAt: Cell | null = null;
   /** The notice that says a program copied to the clipboard, while it shows. */
   private copiedNotice: Notice | null = null;
   /** Undoes guardClose's hold on the leaf's detach. */
@@ -205,7 +235,7 @@ export class TerminalView extends ItemView {
   private lastFitAt = 0;
   private fitTimer = 0;
   private fitTimerWin: Window | null = null;
-  /** Pictures: null while "Show pictures" is off, and then none of their code runs. */
+  /** Pictures: null while "Pictures in the terminal" is off, and then none of their code runs. */
   private picturesLayer: PictureLayer | null = null;
   /**
    * Turned off mid-command: the pictures are gone at once, and only the
@@ -535,12 +565,23 @@ export class TerminalView extends ItemView {
     this.registerDomEvent(this.pane, "mousedown", (e) => {
       if (e.button !== 2) {
         this.promptSelection = null;
+        // Any press ends claude's selection or starts a new one, which the release settles.
+        this.claudeSelection = null;
+        // Option+drag is the terminal's own selection, which claude never sees.
+        this.pressedAt = e.button === 0 && !e.altKey && term.modes.mouseTrackingMode !== "none" && this.isClaude() ? this.cellAt(e) : null;
+        if (this.pressedAt) this.lastPress = { ...this.pressedAt, at: performance.now() };
         return;
       }
       rightHeld = !e.shiftKey && term.modes.mouseTrackingMode !== "none";
       if (rightHeld) e.stopPropagation();
     }, { capture: true });
     this.registerDomEvent(this.pane, "mouseup", (e) => {
+      if (e.button === 0 && this.pressedAt) {
+        const up = this.cellAt(e);
+        const made = !!up && term.modes.mouseTrackingMode !== "none" && selectsInBox(this.pressedAt, up, e.detail, this.promptBox());
+        this.claudeSelection = made && up ? { from: this.pressedAt, to: up, clicks: e.detail >= 2 ? e.detail : 1, whole: false } : null;
+        this.pressedAt = null;
+      }
       if (e.button !== 2) return;
       if (rightHeld) e.stopPropagation();
       rightHeld = false;
@@ -618,6 +659,7 @@ export class TerminalView extends ItemView {
 
   protected override async onClose(): Promise<void> {
     this.core.liveViews.delete(this);
+    this.keyQueue.clear();
     this.unguardClose?.();
     this.unguardClose = null;
     try {
@@ -663,33 +705,13 @@ export class TerminalView extends ItemView {
     const term = this.term;
     if (!term) return false;
     const buf = term.buffer.active;
-    const text = (y: number) => buf.getLine(y)?.translateToString(true) ?? "";
-    // A border starts with a run of ─ and spans the width (the top one can
-    // carry the session's name in it), so a rule pasted into the input isn't one.
-    const border = (y: number) => {
-      const row = text(y);
-      return /^\s*─{8,}/.test(row) && row.length >= term.cols - 2;
-    };
     this.promptSelection = null;
-    // A question claude is asking (a permission dialog, a menu) is no input box.
-    if (this.controller?.dialogShowing?.()) return false;
-    const cursor = buf.baseY + buf.cursorY;
-    let top = -1;
-    let bottom = -1;
-    for (let y = cursor; y >= Math.max(0, cursor - PROMPT_ROWS); y--) if (border(y)) { top = y; break; }
-    for (let y = cursor; y < Math.min(buf.length, cursor + PROMPT_ROWS); y++) if (border(y)) { bottom = y; break; }
-    if (top < 0 || bottom <= top + 1) return false;
+    const box = this.promptBox();
+    if (!box) return false;
+    const { top, bottom, mark } = box;
     const cell = buf.getNullCell();
     const first = buf.getLine(top + 1);
     if (!first) return false;
-    // The prompt mark's column, read by cell, since a wide character takes two.
-    let mark = -1;
-    for (let x = 0; x < term.cols && x < 4; x++) {
-      if (first.getCell(x, cell)?.getChars() === "❯") { mark = x; break; }
-    }
-    if (mark < 0) return false;
-    // A menu's chosen option ("❯ 1. Yes") is marked the same way.
-    if (/^\s*❯\s*\d+\./.test(text(top + 1))) return false;
     const start = mark + 2;
     // The last row of the box with text written in it, and that text's last column.
     const lastCol = (y: number): number => {
@@ -723,6 +745,168 @@ export class TerminalView extends ItemView {
   }
 
   /**
+   * Claude's input box around the cursor: the buffer rows of its two borders,
+   * and the column of its prompt mark (❯). Null when there's none: a border
+   * missing, no mark, a dialog or menu showing. Read from the screen, so it's
+   * checked at every step.
+   */
+  private promptBox(): { top: number; bottom: number; mark: number } | null {
+    const term = this.term;
+    if (!term) return null;
+    const buf = term.buffer.active;
+    const text = (y: number) => buf.getLine(y)?.translateToString(true) ?? "";
+    // A border starts with a run of ─ and spans the width (the top one can
+    // carry the session's name in it), so a rule pasted into the input isn't one.
+    const border = (y: number) => {
+      const row = text(y);
+      return /^\s*─{8,}/.test(row) && row.length >= term.cols - 2;
+    };
+    // A question claude is asking (a permission dialog, a menu) is no input box.
+    if (this.controller?.dialogShowing?.()) return null;
+    const cursor = buf.baseY + buf.cursorY;
+    let top = -1;
+    let bottom = -1;
+    for (let y = cursor; y >= Math.max(0, cursor - PROMPT_ROWS); y--) if (border(y)) { top = y; break; }
+    for (let y = cursor; y < Math.min(buf.length, cursor + PROMPT_ROWS); y++) if (border(y)) { bottom = y; break; }
+    if (top < 0 || bottom <= top + 1) return null;
+    const first = buf.getLine(top + 1);
+    if (!first) return null;
+    // The prompt mark's column, read by cell, since a wide character takes two.
+    const cell = buf.getNullCell();
+    let mark = -1;
+    for (let x = 0; x < term.cols && x < 4; x++) {
+      if (first.getCell(x, cell)?.getChars() === "❯") { mark = x; break; }
+    }
+    if (mark < 0) return null;
+    // A menu's chosen option ("❯ 1. Yes") is marked the same way.
+    if (/^\s*❯\s*\d+\./.test(text(top + 1))) return null;
+    return { top, bottom, mark };
+  }
+
+  /** The buffer cell under a mouse event, or null when xterm's internals have moved. */
+  private cellAt(e: MouseEvent): Cell | null {
+    const term = this.term;
+    const size = term && cellSize(term);
+    const rect = term?.element?.querySelector(".xterm-screen")?.getBoundingClientRect();
+    if (!term || !size || !rect) return null;
+    const col = Math.max(0, Math.min(term.cols - 1, Math.floor((e.clientX - rect.left) / size.width)));
+    const row = Math.max(0, Math.min(term.rows - 1, Math.floor((e.clientY - rect.top) / size.height)));
+    return { col, row: row + term.buffer.active.viewportY };
+  }
+
+  /**
+   * Whether a key can replace a selection in claude's input: claude's own
+   * (claudeSelection), or the terminal's selection Cmd+A made of it
+   * (promptSelection). Never while a dialog shows.
+   */
+  private inputSelected(): boolean {
+    const term = this.term;
+    if (!term || !this.isClaude() || this.controller?.dialogShowing?.()) return false;
+    // A selection of the terminal's own (Option+drag) means claude has none.
+    if (term.modes.mouseTrackingMode !== "none") return !!this.claudeSelection && !term.hasSelection();
+    return !!this.promptSelection && term.hasSelection() && term.getSelection() === this.promptSelection.text;
+  }
+
+  /**
+   * Deletes the selection in claude's input, as Backspace does, then sends
+   * `after` (a typed character, or nothing). `gesture`: how claude's own
+   * selection was made, in its full screen. Everything typed or pasted
+   * meanwhile waits behind it (keyQueue), so it lands after the deletion, in
+   * order. Claude's own selection gets a Backspace, which it deletes it on.
+   * The terminal's selection Cmd+A made gets claude's line-editing keys, which
+   * never interrupt a turn (Escape would): Ctrl+K deletes to the end of the
+   * line (and, at the end, joins the next), Ctrl+U to the start, which
+   * claude's docs say clears across lines when repeated. One of each per row
+   * the input takes, and one more. Each key its own write, a moment apart.
+   */
+  private replaceSelection(after: string | null, gesture: Gesture | null): void {
+    const term = this.term;
+    if (!term || !this.session) return;
+    const items: QueueItem[] = [];
+    if (term.modes.mouseTrackingMode !== "none") {
+      items.push("\x7f");
+      // Cmd+A's selection was the whole input, now empty: the draft tracker
+      // saw one Backspace.
+      if (gesture?.whole) items.push(() => this.controller?.inputCleared?.());
+    } else if (this.promptSelection) {
+      const rows = Math.ceil((this.promptSelection.col + this.promptSelection.length) / term.cols) + 1;
+      items.push(...Array<string>(rows).fill("\x0b"), ...Array<string>(rows).fill("\x15"));
+      // Once all are sent the input is empty, which the host's draft tracking
+      // can't tell from the keys alone.
+      items.push(() => this.controller?.inputCleared?.());
+    }
+    this.claudeSelection = null;
+    this.promptSelection = null;
+    term.clearSelection();
+    if (after !== null) items.push(after);
+    this.queue(items);
+  }
+
+  /** Sends items through keyQueue, to the program running now. */
+  private queue(items: QueueItem[]): void {
+    if (!this.keyQueue.busy) this.queueSession = this.session;
+    this.keyQueue.push(...items);
+  }
+
+  /**
+   * Cut, on a selection in claude's input: what Cmd+C does, then what
+   * Backspace does. In claude's full screen the copy clears claude's
+   * selection, so it's made again first, with the gesture that made it, its
+   * reports sent through keyQueue a moment apart, planned so claude doesn't
+   * count them as more of the user's clicks (replayPlan: a double click two
+   * cells along in its word, else after claude's click window). Cmd+A's
+   * selection is cleared with claude's line-editing keys instead. Only the copy
+   * when that can't be done: the box moved or scrolled off, a word-by-word
+   * drag (a double click held and dragged, which two clicks don't remake),
+   * xterm's internals moved.
+   */
+  private cutSelection(gesture: Gesture | null): void {
+    const term = this.term;
+    this.copy();
+    if (!term) return;
+    if (term.modes.mouseTrackingMode === "none") {
+      this.replaceSelection(null, null);
+      return;
+    }
+    if (!gesture) return;
+    const box = this.promptBox();
+    // Cmd+A's selection is the whole input, which claude's line-editing keys
+    // clear without remaking it: one Ctrl+K and one Ctrl+U per row of the box,
+    // and one more.
+    if (gesture.whole) {
+      if (!box) return;
+      const rows = box.bottom - box.top;
+      this.queue([...Array<string>(rows).fill("\x0b"), ...Array<string>(rows).fill("\x15"), () => this.controller?.inputCleared?.()]);
+      return;
+    }
+    const size = cellSize(term);
+    const top = term.buffer.active.viewportY;
+    const line = term.buffer.active.getLine(gesture.to.row);
+    const cell = term.buffer.active.getNullCell();
+    const plan = replayPlan(gesture, this.lastPress, performance.now(), (col) => /^[\p{L}\p{N}_]$/u.test(line?.getCell(col, cell)?.getChars() ?? ""));
+    const reports = gestureReports(plan.gesture);
+    const wordDrag = gesture.clicks >= 2 && (gesture.from.col !== gesture.to.col || gesture.from.row !== gesture.to.row);
+    if (!size || wordDrag || !selectsInBox(gesture.from, gesture.to, gesture.clicks, box)) return;
+    if (reports.some((r) => r.at.row - top < 0 || r.at.row - top >= term.rows)) return;
+    const items: QueueItem[] = reports.map((r) => () => {
+      if (this.term !== term || this.session !== this.queueSession) return;
+      const row = r.at.row - top;
+      const px = { x: Math.round((r.at.col + 0.5) * size.width), y: Math.round((row + 0.5) * size.height) };
+      // A report goes out through xterm's input (onInput), which mustn't
+      // queue it behind the keys it comes before.
+      // Claude counts the replay's presses too, so the next Cut plans from them.
+      if (r.action === "down") this.lastPress = { ...r.at, at: performance.now() };
+      this.queueWriting = true;
+      try {
+        sendButtonReport(term, r.at.col, row, r.action, px);
+      } finally {
+        this.queueWriting = false;
+      }
+    });
+    this.queue([...(plan.wait > 0 ? [{ wait: plan.wait }] : []), ...items, "\x7f"]);
+  }
+
+  /**
    * Drags over claude's input with mouse reports, from the first character
    * (buffer column and row, 0-based) to the last: press, drag, release, each
    * its own report a moment apart, as a hand would. False when the reports
@@ -744,9 +928,14 @@ export class TerminalView extends ItemView {
     this.cancelPending();
     const session = this.session;
     if (sendButtonReport(term, from.col, from.row, "down", from.px) === null) return false;
+    this.lastPress = { col: from.col, row: from.row + top, at: performance.now() };
     term.clearSelection();
     this.later(() => { if (this.term === term && this.session === session) sendButtonReport(term, to.col, to.row, "move", to.px); }, DRAG_STEP_MS);
-    this.later(() => { if (this.term === term && this.session === session) sendButtonReport(term, to.col, to.row, "up", to.px); }, 2 * DRAG_STEP_MS);
+    this.later(() => {
+      if (this.term !== term || this.session !== session) return;
+      sendButtonReport(term, to.col, to.row, "up", to.px);
+      this.claudeSelection = { from: { col: from.col, row: from.row + top }, to: { col: to.col, row: to.row + top }, clicks: 1, whole: true };
+    }, 2 * DRAG_STEP_MS);
     return true;
   }
 
@@ -805,7 +994,7 @@ export class TerminalView extends ItemView {
   }
 
   /**
-   * Follows "Show pictures". On: output goes through the pictures
+   * Follows "Pictures in the terminal". On: output goes through the pictures
    * layer. Off: the layer and every picture in it go, and output reaches
    * xterm untouched, whose parser drops graphics commands without a trace
    * or a reply. The pictures go at once; a command half-received when it's
@@ -865,6 +1054,8 @@ export class TerminalView extends ItemView {
   /** Ends the program and everything it started; used on plugin unload. */
   stopSession(withFallback = true): void {
     this.cancelPending();
+    this.keyQueue.clear();
+    this.claudeSelection = null;
     const s = this.session;
     this.session = null;
     if (!s) return;
@@ -897,6 +1088,8 @@ export class TerminalView extends ItemView {
 
   private onMigrated(): void {
     this.cancelFrame();
+    // Its timer was the old window's, which may never fire now.
+    this.keyQueue.clear();
     this.observe();
     this.anchor ??= this.topAnchor();
     if (this.term && this.opened) {
@@ -1207,6 +1400,7 @@ export class TerminalView extends ItemView {
           this.core.updateBadge();
         },
         (a) => this.onAttention(a),
+        (id, atStart) => this.onBridge(id, atStart),
       );
       this.status.start();
       this.foreground = null;
@@ -1253,7 +1447,11 @@ export class TerminalView extends ItemView {
     // Some input methods mark their keys only as "Process", and a dead key's
     // first press (Option+E on a Mac) comes before composition starts: both
     // were keyCode 229.
-    if (e.isComposing || e.key === "Process" || e.key === "Dead") return true;
+    if (e.isComposing || e.key === "Process" || e.key === "Dead") {
+      // What it composes clears claude's selection, as any key does.
+      this.claudeSelection = null;
+      return true;
+    }
     const cmd = e.metaKey && !e.ctrlKey && !e.altKey;
     if (e.type !== "keydown") return !e.metaKey;
     if (!MODIFIER_KEYS.has(e.key)) {
@@ -1273,29 +1471,25 @@ export class TerminalView extends ItemView {
       term.clearSelection();
       return false;
     }
-    // Backspace or Delete on what Cmd+A selected in claude's input box clears
-    // the input, as in a text field, with claude's line-editing keys, which
-    // never interrupt a turn (Escape would): Ctrl+K deletes to the end of the
-    // line (and, at the end, joins the next), Ctrl+U to the start, which
-    // claude's docs say clears across lines when repeated. One of each per row
-    // the input takes, and one more, each its own write a moment apart, so
-    // claude reads keys rather than a paste.
-    if ((e.key === "Backspace" || e.key === "Delete") && plain && !e.shiftKey && this.promptSelection && term.hasSelection() && term.getSelection() === this.promptSelection.text) {
+    // A selection in claude's input, as in a text field: a typed character,
+    // Cmd+X and Cmd+V replace it (replaceSelection). Read before the flag
+    // below drops it.
+    const selected = !MODIFIER_KEYS.has(e.key) && this.inputSelected();
+    // Claude's own selection, which the plugin can't see, is forgotten on any
+    // key, as claude clears it on nearly every one (Cmd+C included). Cut keeps
+    // how it was made, to make it again after its copy.
+    const gesture = this.claudeSelection;
+    if (!MODIFIER_KEYS.has(e.key)) this.claudeSelection = null;
+    if (selected && typesCharacter(e, !!term.options.macOptionIsMeta)) {
       e.preventDefault();
-      if (this.controller?.dialogShowing?.()) return false;
-      const rows = Math.ceil((this.promptSelection.col + this.promptSelection.length) / term.cols) + 1;
-      this.promptSelection = null;
-      term.clearSelection();
-      const keys = [...Array<string>(rows).fill("\x0b"), ...Array<string>(rows).fill("\x15")];
-      // Each only to the program this began in; any key cancels the rest. Once
-      // all are sent the input is empty, which the host's draft tracking can't
-      // tell from the keys alone (inputCleared).
-      const session = this.session;
-      keys.forEach((k, i) => this.later(() => {
-        if (this.session !== session) return;
-        this.onInput(k);
-        if (i === keys.length - 1) this.controller?.inputCleared?.();
-      }, i * CLEAR_KEY_GAP_MS));
+      this.replaceSelection(e.key, gesture);
+      return false;
+    }
+    // Backspace or Delete on a selection in claude's input deletes it
+    // (replaceSelection): outside the full screen, only what Cmd+A selected.
+    if ((e.key === "Backspace" || e.key === "Delete") && plain && !e.shiftKey && selected) {
+      e.preventDefault();
+      this.replaceSelection(null, gesture);
       return false;
     }
     // Page Up and Page Down (Fn+Up, Fn+Down) page the scrollback in a normal
@@ -1352,7 +1546,17 @@ export class TerminalView extends ItemView {
           // from it, in brackets when the program asked for that. An image
           // alone has no text to paste; an agent CLI (claude, Codex,
           // Antigravity) gets Ctrl+V, which each attaches it on.
+          // Text over a selection in claude's input replaces it: the deletion
+          // goes first, and the paste waits behind it (keyQueue).
           if (this.agentKeys() && clipboardHasOnlyImage()) this.onInput("\x16");
+          else if (selected && clipboardText()) this.replaceSelection(null, gesture);
+          return false;
+        case "x":
+          // Cut, on a selection in claude's input: what Cmd+C does, then what
+          // Backspace does. Anywhere else, only the copy.
+          e.preventDefault();
+          if (selected) this.cutSelection(gesture);
+          else this.copy();
           return false;
         case "f":
           e.preventDefault();
@@ -1425,6 +1629,8 @@ export class TerminalView extends ItemView {
    * scrollback otherwise. Ctrl is a trackpad pinch, left to xterm.
    */
   private onWheel(e: WheelEvent): void {
+    // Claude's selection may not survive a scroll; better to forget it than guess.
+    this.claudeSelection = null;
     const term = this.term;
     if (!term || !this.opened || e.ctrlKey || !this.ownWheel) return;
     const cell = cellSize(term);
@@ -1504,7 +1710,11 @@ export class TerminalView extends ItemView {
     if (!term) return;
     // A picture's placeholder cells are no text.
     if (term.hasSelection()) this.copySelection();
-    else if (this.programCopies()) this.onInput("\x1b[99;9u");
+    else if (this.programCopies()) {
+      this.onInput("\x1b[99;9u");
+      // Claude clears its selection on its copy.
+      this.claudeSelection = null;
+    }
   }
 
   /** Whether closing asks first: closeReason says why, null when it doesn't. */
@@ -1630,6 +1840,7 @@ export class TerminalView extends ItemView {
               this.core.updateBadge();
             },
             (a) => this.onAttention(a),
+            (id, atStart) => this.onBridge(id, atStart),
           );
           this.status.start();
           // What it said before it was recognized, to the shell's tracker, is its own.
@@ -1728,6 +1939,8 @@ export class TerminalView extends ItemView {
   private pasteFromMenu(): void {
     const term = this.term;
     if (!term) return;
+    // Claude clears its selection on a paste, as on any key.
+    this.claudeSelection = null;
     if (clipboardHasOnlyImage()) {
       if (this.agentKeys()) this.onInput("\x16");
       return;
@@ -2066,6 +2279,16 @@ export class TerminalView extends ItemView {
   }
 
   private onInput(data: string): void {
+    // While a selection's deletion goes out, everything else waits behind it.
+    if (this.session && this.keyQueue.busy && !this.queueWriting) {
+      this.keyQueue.push(data);
+      return;
+    }
+    this.sendNow(data);
+  }
+
+  /** Input to the program now, or after it ends, to start it again. */
+  private sendNow(data: string): void {
     if (this.session) {
       if (data.includes("\r")) this.status?.answered();
       else if (data === "\x1b") this.status?.escaped();
@@ -2208,6 +2431,15 @@ export class TerminalView extends ItemView {
       }
     }
     if (this.stateLog.length > 200) this.stateLog.splice(0, 100);
+  }
+
+  /** A hook said whether claude's Remote Control is connected (status.ts), for the host. */
+  private onBridge(id: string, atStart: boolean): void {
+    try {
+      this.controller?.bridge?.(id, atStart);
+    } catch (e) {
+      console.error(`${this.core.name}: the host's Remote Control handler failed`, e);
+    }
   }
 
   /** The program asked for attention. Notifications are a setting, off by default. */

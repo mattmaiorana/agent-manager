@@ -27,15 +27,17 @@ const external = [
   ...builtinModules.map((m) => `node:${m}`),
 ];
 
-// The Claude mod (claude-mod/, its README), bundled as text: `import files from "claude-mod-files"`
-// gives { "inline-images/hooks/register.tsx": "...", ... }, every file the mod ships with,
-// without the API types copied in to check it or its tsconfig.
+// The Claude mods (claude-mod/, its README), bundled as text: `import files from "claude-mod-files"`
+// gives { "inline-images/hooks/register.tsx": "...", "quiet-tools/types/index.d.ts": "...", ... },
+// every file each mod ships with, without the API types copied into .claude-plugin/types/ to
+// check it, or its tsconfig. A mod's own types/ (its state contract) ships.
 const MOD_ROOT = "claude-mod";
 function modFiles(dir = MOD_ROOT) {
   const out = [];
   for (const name of readdirSync(dir).sort()) {
     const path = join(dir, name);
-    if (name === "types" || name === "tsconfig.json" || name === "README.md" || name === ".DS_Store") continue;
+    if (name === "tsconfig.json" || name === "README.md" || name === ".DS_Store") continue;
+    if (name === "types" && dir.endsWith(".claude-plugin")) continue;
     if (statSync(path).isDirectory()) out.push(...modFiles(path));
     else out.push(path);
   }
@@ -46,8 +48,9 @@ const claudeMod = {
   setup(build) {
     build.onResolve({ filter: /^claude-mod-files$/ }, () => ({ path: "claude-mod-files", namespace: "claude-mod" }));
     build.onLoad({ filter: /.*/, namespace: "claude-mod" }, () => {
-      // The mod alone: claude-mod/.claude-plugin/ is the marketplace for installing it by hand.
-      const files = modFiles(join(MOD_ROOT, "inline-images"));
+      // The mods alone: claude-mod/.claude-plugin/ is the marketplace for installing them by hand.
+      const mods = readdirSync(MOD_ROOT).sort().filter((n) => n !== ".claude-plugin" && statSync(join(MOD_ROOT, n)).isDirectory());
+      const files = mods.flatMap((m) => modFiles(join(MOD_ROOT, m)));
       const map = Object.fromEntries(files.map((f) => [relative(MOD_ROOT, f), readFileSync(f, "utf8")]));
       return { contents: `export default ${JSON.stringify(map)};`, loader: "js", watchFiles: files };
     });

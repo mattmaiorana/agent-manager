@@ -1,7 +1,18 @@
 {
   "name": "agent-manager-mods",
-  "owner": { "name": "Matt Maiorana" },
+  "owner": {
+    "name": "Matt Maiorana"
+  },
   "plugins": [
-    { "name": "inline-images", "source": "./inline-images", "description": "Shows the PNG images Claude sends you as framed pictures in the terminal, with Open, Save to Downloads, and Copy path." }
+    {
+      "name": "inline-images",
+      "source": "./inline-images",
+      "description": "Shows the PNG images Claude sends you as framed pictures in the terminal, with Open, Save to Downloads, and Copy path."
+    },
+    {
+      "name": "quiet-tools",
+      "source": "./quiet-tools",
+      "description": "/quiet folds each tool's output into one line, and back; Ctrl+O still shows it in full."
+    }
   ]
 }

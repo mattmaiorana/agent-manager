@@ -10,6 +10,9 @@ export interface ContextVault {
   isNote(path: string): boolean;
   // A note's frontmatter, or null when it has none.
   frontmatter(path: string): Record<string, unknown> | null;
+  // A `reads` entry (a wikilink's target, or a vault path), seen from the note at `from`:
+  // the note or folder it names, or null when there's neither.
+  resolve?(link: string, from: string): { path: string; folder: boolean } | null;
 }
 
 export interface ContextOptions {
@@ -42,6 +45,15 @@ export interface LaunchContext {
   // homes nest), by id, or null. Only where the session sits: an agent recorded on the
   // session, or picked at launch, wins over it (plugin/agents.ts, launchAgentId).
   agent: string | null;
+  // A ticket's `reads`: the notes and folders it names, by vault path, in its order.
+  reads: { path: string; folder: boolean }[];
+  // The `reads` entries that named nothing, as written, so the launch can say so.
+  missingReads: string[];
+}
+
+// The context of a session started from nothing.
+export function emptyContext(): LaunchContext {
+  return { ticket: null, overviews: [], repo: null, agent: null, reads: [], missingReads: [] };
 }
 
 // Where a session starts: a note, or a folder.
@@ -83,12 +95,34 @@ export function homeAgent(folder: string, homes: { id: string; home: string }[])
   return best ? best.id : null;
 }
 
+// A ticket's `reads` property: one entry or a list, each a wikilink ([[Note]], [[Note|as]],
+// [[Folder/]]) or a vault path. Each resolves through the vault; one that doesn't is kept
+// in missingReads, and one named twice is read once. YAML reads an unquoted [[Note]] as a
+// list inside a list, so a one-item list (at any depth) is taken as a link to its text.
+function readsOf(ticket: string, vault: ContextVault, ctx: LaunchContext): void {
+  const raw = vault.frontmatter(ticket)?.reads;
+  const list = Array.isArray(raw) ? raw : raw == null ? [] : [raw];
+  for (const e of list) {
+    let v: unknown = e, depth = 0;
+    while (Array.isArray(v) && v.length === 1) { v = v[0]; depth++; }
+    if (typeof v !== "string") { if (v != null) ctx.missingReads.push(JSON.stringify(e)); continue; }
+    if (!v.trim()) continue;
+    const text = depth ? `[[${v.trim()}]]` : v.trim();
+    const m = text.match(/^\[\[([^\]|#]+)(?:[#|][^\]]*)?\]\]$/);
+    const link = (m ? m[1] : text).trim().replace(/^\/+|\/+$/g, "");
+    const hit = link && vault.resolve ? vault.resolve(link, ticket) : null;
+    if (!hit) { ctx.missingReads.push(text); continue; }
+    if (!ctx.reads.some((r) => r.path === hit.path)) ctx.reads.push(hit);
+  }
+}
+
 export function launchContext(from: LaunchFrom, vault: ContextVault, opts: ContextOptions): LaunchContext {
   const notePath = from.notePath || null;
   const folder = notePath ? parentOf(notePath) : (from.folderPath ?? null);
-  const ctx: LaunchContext = { ticket: null, overviews: [], repo: null, agent: null };
+  const ctx = emptyContext();
   if (notePath && isTicket(notePath, vault, opts)) ctx.ticket = notePath;
   if (folder !== null) ctx.agent = homeAgent(folder, opts.homes || []);
+  if (ctx.ticket) readsOf(ctx.ticket, vault, ctx);
   if (folder === null || !opts.useOverviews) return ctx;
   const name = opts.overviewName;
   for (const dir of folderChain(opts.startFolder, folder)) {
@@ -123,7 +157,39 @@ export function composeOpening(template: (key: OpeningPartKey) => string, ctx: L
   const parts: string[] = [];
   if (agent) parts.push(fill("agent"));
   if (ctx.overviews.length) parts.push(fill("overviews"));
+  // A ticket's reads go with the ticket's own part: emptying that part leaves them out.
+  const own = fill(kind);
+  if (own) parts.push(readsSentence(ctx.reads, absolute));
   if (ctx.repo) parts.push(fill("repo"));
-  parts.push(fill(kind));
+  parts.push(own);
   return parts.filter(Boolean).join(" ");
+}
+
+// "Also read: …" for a ticket's reads, notes and folders apart; "" for none.
+function readsSentence(reads: LaunchContext["reads"], absolute: (vaultPath: string) => string): string {
+  const q = (r: { path: string }) => `"${absolute(r.path).replace(/\s*\n\s*/g, " ")}"`;
+  const notes = reads.filter((r) => !r.folder).map(q), folders = reads.filter((r) => r.folder).map(q);
+  return [
+    notes.length ? `Also read ${notes.join(", ")}.` : "",
+    folders.length ? `Also look in the ${folders.length === 1 ? "folder" : "folders"} ${folders.join(", ")}.` : "",
+  ].filter(Boolean).join(" ");
+}
+
+// The context pinned to a session's system prompt (Claude's --append-system-prompt,
+// Codex's developer_instructions), so a compaction doesn't lose it: where the session
+// started, its overviews, its reads, and its repo, as paths, never the notes' text. Each
+// sentence only while its part of the opening is on (`on`), so emptying a part still
+// means the session isn't told it. "" when nothing applies.
+export function contextPrompt(ctx: LaunchContext, from: { kind: "ticket" | "note" | "folder"; path: string } | null, on: (key: OpeningPartKey) => boolean, absolute: (vaultPath: string) => string): string {
+  if (!from) return "";
+  const q = (p: string) => `"${absolute(p).replace(/\s*\n\s*/g, " ")}"`;
+  const own = on(from.kind);
+  const out: string[] = [];
+  if (own) out.push(`This session was started from the ${from.kind} at ${q(from.path)}.`);
+  if (ctx.overviews.length && on("overviews")) out.push(`Its project's ${ctx.overviews.length === 1 ? "overview is" : "overviews, broadest first, are"} ${ctx.overviews.map(q).join(", ")}.`);
+  if (own) out.push(readsSentence(ctx.reads, absolute));
+  if (ctx.repo && on("repo")) out.push(`Its repo is at "${ctx.repo.replace(/\s*\n\s*/g, " ")}".`);
+  const said = out.filter(Boolean);
+  if (!said.length) return "";
+  return `${said.join(" ")} Read them again whenever you lose track of them (after a compaction, say).`;
 }

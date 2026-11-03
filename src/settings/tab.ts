@@ -2,7 +2,7 @@
 
 import { import_obsidian } from "../externals.js";
 import { CLI_BACKENDS, REAL_BACKENDS, isBackendKey } from "../constants/backends.js";
-import { DEFAULT_DAILY_NAME, DEFAULT_NAMES, DEFAULT_OPENING, DEFAULT_OVERVIEW_NAME, DEFAULT_TICKET_TEMPLATE, NAME_LABELS, OPENING_LABELS } from "../constants/names.js";
+import { DEFAULT_DAILY_NAME, DEFAULT_NAMES, DEFAULT_NEW_BUTTON_NAME, DEFAULT_NEW_TICKET_BUTTON_NAME, DEFAULT_OPENING, DEFAULT_OVERVIEW_NAME, DEFAULT_TICKET_TEMPLATE, NAME_LABELS, OPENING_LABELS } from "../constants/names.js";
 import { AgentModal, FileSuggest, FolderSuggest } from "../ui/modals.js";
 import { AGENTS } from "../vault-terminal/agents";
 import { agentSettings, agentVariableSettings, appearanceSettings, linkSettings, pythonSettings } from "../vault-terminal/settings";
@@ -111,6 +111,30 @@ class AgentManagerSettingsTab extends import_obsidian.PluginSettingTab {
       });
     this.nameSetting(containerEl, "transcriptsFolder");
     new import_obsidian.Setting(containerEl)
+      .setName("Show the new session button")
+      .setDesc("A row in the sidebar, under the daily chat button, that opens a card for naming and starting a session. Turned off, sessions still start from the command palette, a note's or folder's menu, and the daily chat button.")
+      .addToggle((toggle) => toggle
+        .setValue(this.plugin.pluginData.newButton !== false)
+        .onChange(async (value) => {
+          if (value) delete this.plugin.pluginData.newButton; else this.plugin.pluginData.newButton = false;
+          await this.save();
+          this.rerenderSidebars();
+          this.drawSettings();
+        }));
+    if (this.plugin.pluginData.newButton !== false) this.textSetting(containerEl, "newButtonName", "New session button name", "What the row says, after its icon.", DEFAULT_NEW_BUTTON_NAME, () => this.rerenderSidebars());
+    this.displayCustomButton(containerEl);
+    new import_obsidian.Setting(containerEl)
+      .setName("Show the daily chat button")
+      .setDesc("A button at the top of the sidebar that opens today's chat, resuming or starting it.")
+      .addToggle((toggle) => toggle
+        .setValue(this.plugin.pluginData.dailyChatButton !== false)
+        .onChange(async (value) => {
+          if (value) delete this.plugin.pluginData.dailyChatButton; else this.plugin.pluginData.dailyChatButton = false;
+          await this.save();
+          this.rerenderSidebars();
+          this.drawSettings();
+        }));
+    if (this.plugin.pluginData.dailyChatButton !== false) new import_obsidian.Setting(containerEl)
       .setName("Daily chat name")
       .setDesc("The day's chat is found and named by this. {{date}} is today's date, as 2026-10-19. Once there are agent profiles, each one's own daily chat name is used instead.")
       .addText((text) => {
@@ -225,20 +249,33 @@ class AgentManagerSettingsTab extends import_obsidian.PluginSettingTab {
         }));
     if (!this.plugin.ticketsOn()) return;
     this.pathSetting(containerEl, "ticketTemplate", "Ticket template", "The note a new ticket is made from. It's never counted as a ticket itself.", DEFAULT_TICKET_TEMPLATE);
+    this.pathSetting(containerEl, "ticketsNote", "Tickets note", "The note or base the Open tickets command opens, and the sidebar's custom button unless it's set to something else: such as a dashboard that embeds the tickets base. Empty is the tickets base in the AGENTS.md folder.", "Tickets.base", () => this.rerenderSidebars());
     new import_obsidian.Setting(containerEl)
-      .setName("Show the tickets button")
-      .setDesc("A button at the top of the sidebar that opens your tickets.")
+      .setName("Show the new ticket button")
+      .setDesc("A row in the sidebar, under new session, that opens a card for making a ticket: its name, its project, notes, and the CLI it starts on. While agent profiles are on, it offers the switched profile's projects.")
       .addToggle((toggle) => toggle
-        .setValue(this.plugin.pluginData.ticketsButton !== false)
+        .setValue(this.plugin.pluginData.newTicketButton !== false)
         .onChange(async (value) => {
-          if (value) delete this.plugin.pluginData.ticketsButton; else this.plugin.pluginData.ticketsButton = false;
+          if (value) delete this.plugin.pluginData.newTicketButton; else this.plugin.pluginData.newTicketButton = false;
           await this.save();
           this.rerenderSidebars();
           this.drawSettings();
         }));
-    if (this.plugin.pluginData.ticketsButton === false) return;
-    this.textSetting(containerEl, "ticketsButtonName", "Tickets button name", "What the button says.", "Tickets", () => this.rerenderSidebars());
-    this.pathSetting(containerEl, "ticketsNote", "Tickets button opens", "The note or base the button opens, such as a dashboard that embeds the tickets base. Empty is the tickets base in the AGENTS.md folder.", "Tickets.base");
+    // Hidden with the button, as every button's settings are; a session's menu still opens
+    // the card with them as set.
+    if (this.plugin.pluginData.newTicketButton === false) return;
+    this.textSetting(containerEl, "newTicketButtonName", "New ticket button name", "What the row says, after its icon.", DEFAULT_NEW_TICKET_BUTTON_NAME, () => this.rerenderSidebars());
+    new import_obsidian.Setting(containerEl)
+      .setName("Show the launch button on the new ticket card")
+      .setDesc("A second button on the new ticket card that makes the ticket and starts its main session on the CLI picked, named for the ticket. The first only makes the ticket and opens it.")
+      .addToggle((toggle) => toggle
+        .setValue(this.plugin.pluginData.ticketLaunchButton !== false)
+        .onChange(async (value) => {
+          if (value) delete this.plugin.pluginData.ticketLaunchButton; else this.plugin.pluginData.ticketLaunchButton = false;
+          await this.save();
+          this.rerenderSidebars();
+        }));
+    this.textSetting(containerEl, "ticketNotesHeading", "Where the card's notes go", "A heading in the ticket template for the new ticket card's notes to go under, written as it is in the template, such as ## Notes. Empty, or a heading the template doesn't have, puts them first, right under the properties.", "Under the properties");
   }
   // Agents: none until one is added. Add an agent and the Default agent first, then each
   // agent's name, instructions note, home folder, and Daily Chat name.
@@ -373,7 +410,7 @@ class AgentManagerSettingsTab extends import_obsidian.PluginSettingTab {
     });
   }
   // A text setting, saved on change (blur or Enter); empty removes it, for its default.
-  textSetting(containerEl: HTMLElement, key: "overviewName" | "ticketsButtonName", name: string, desc: string, placeholder: string, after?: () => void): void {
+  textSetting(containerEl: HTMLElement, key: "overviewName" | "newButtonName" | "newTicketButtonName" | "ticketNotesHeading" | "customButtonName" | "customButtonIcon", name: string, desc: string, placeholder: string, after?: () => void): void {
     new import_obsidian.Setting(containerEl)
       .setName(name)
       .setDesc(desc)
@@ -388,7 +425,7 @@ class AgentManagerSettingsTab extends import_obsidian.PluginSettingTab {
       });
   }
   // A vault path setting, saved on change (blur or Enter); empty removes it, for its default.
-  pathSetting(containerEl: HTMLElement, key: "ticketsNote" | "overviewTemplate" | "ticketTemplate", name: string, desc: string, placeholder: string): void {
+  pathSetting(containerEl: HTMLElement, key: "ticketsNote" | "overviewTemplate" | "ticketTemplate", name: string, desc: string, placeholder: string, after?: () => void): void {
     new import_obsidian.Setting(containerEl)
       .setName(name)
       .setDesc(desc)
@@ -399,6 +436,38 @@ class AgentManagerSettingsTab extends import_obsidian.PluginSettingTab {
           const v = String(text.inputEl.value || "").trim();
           if (v) this.plugin.pluginData[key] = (0, import_obsidian.normalizePath)(v); else delete this.plugin.pluginData[key];
           await this.save();
+          after?.();
+        })(); });
+      });
+  }
+  // The custom button: whether it shows, then its icon, text, and what it opens.
+  displayCustomButton(containerEl: HTMLElement): void {
+    new import_obsidian.Setting(containerEl)
+      .setName("Show the custom button")
+      .setDesc("A button at the top of the sidebar, under the daily chat button, that opens a note, a base, or a link. While tickets are on, it opens the tickets note unless you set it to something else; otherwise it shows once it has something to open.")
+      .addToggle((toggle) => toggle
+        .setValue(this.plugin.pluginData.customButton !== false)
+        .onChange(async (value) => {
+          if (value) delete this.plugin.pluginData.customButton; else this.plugin.pluginData.customButton = false;
+          await this.save();
+          this.rerenderSidebars();
+          this.drawSettings();
+        }));
+    if (this.plugin.pluginData.customButton === false) return;
+    this.textSetting(containerEl, "customButtonIcon", "Custom button icon", "A Lucide icon's name, as on lucide.dev, such as ticket or layout-dashboard. Empty, or a name Obsidian doesn't have, is a ticket while it opens the tickets note, else a link.", "", () => this.rerenderSidebars());
+    this.textSetting(containerEl, "customButtonName", "Custom button text", "What the button says beside its icon. Empty says Tickets while it opens the tickets note, else the name of what it opens.", "", () => this.rerenderSidebars());
+    new import_obsidian.Setting(containerEl)
+      .setName("Custom button opens")
+      .setDesc("A note or base in this vault, or a web or Obsidian link. Empty is the tickets note while tickets are on.")
+      .addText((text) => {
+        text.setPlaceholder(this.plugin.ticketsOn() ? this.plugin.ticketsNotePath() : "").setValue(stringOf(this.plugin.pluginData.customButtonTarget || ""));
+        new FileSuggest(this.app, text.inputEl, ["md", "base"]);
+        text.inputEl.addEventListener("change", () => { void (async () => {
+          const v = String(text.inputEl.value || "").trim();
+          if (!v) delete this.plugin.pluginData.customButtonTarget;
+          else this.plugin.pluginData.customButtonTarget = /^[a-z][a-z0-9+.-]*:/i.test(v) ? v : (0, import_obsidian.normalizePath)(v);
+          await this.save();
+          this.rerenderSidebars();
         })(); });
       });
   }
@@ -515,6 +584,38 @@ class AgentManagerSettingsTab extends import_obsidian.PluginSettingTab {
       .setDesc("Starts a session that helps you set this vault up for agents: an AGENTS.md, where files go, and more if you'd like. You choose whether it asks before each change or sets things up itself and reports back; either way, it asks before changing anything already in the vault. You can close it and resume it later. An AI does the work, so results vary with the CLI and model.")
       .addButton((b) => b.setButtonText("Set up").setClass("agent-manager-button").onClick(() => { void this.plugin.openVaultSetup(); }));
     if (this.plugin.terminal) pythonSettings(containerEl, this.plugin.terminal);
+    // The Claude Code mods that ship with the plugin (plugin/claude-mod.ts): here rather than
+    // under Claude Code, since a mod changes how Claude Code itself draws. Shown while Claude is enabled.
+    if (this.storedBackends().includes("claude")) {
+      new import_obsidian.Setting(containerEl)
+        .setName("Show pictures Claude sends you")
+        .setDesc("When Claude sends you a picture (with its send-file tool), it's drawn right in the session, framed, with buttons to open it, save it to your downloads folder, or copy its path. It works through a small Claude Code mod that comes with Agent Manager and is loaded only into sessions Agent Manager starts; nothing is installed in Claude Code itself. It also needs the terminal's picture setting to be on. Applies to sessions started or resumed afterwards.")
+        .addToggle((toggle) => toggle
+          .setValue(this.plugin.pluginData.claudePictures !== false)
+          .onChange(async (value) => {
+            this.plugin.pluginData.claudePictures = value;
+            await this.save();
+          }));
+      new import_obsidian.Setting(containerEl)
+        .setName("Fold tool output")
+        .setDesc("Adds /quiet to Claude sessions, and a Quiet button to the strip above them: it folds each tool's output (a file edit's diff, a command's output, a file read) into one line, and back again, for the whole session at once. Only the tools that produce output fold (file edits, commands, file reads, web fetches and searches, MCP tools); what Claude writes to you stays: its text, its questions, plans, task lists, links, and subagents' reports, and any errors. The transcript is untouched, and Ctrl+O still shows everything in full. Claude Code remembers whether it's on between sessions. It needs Claude Code's fullscreen rendering (/tui fullscreen) to fold output already shown. It works through a second small Claude Code mod that comes with Agent Manager, loaded only into sessions Agent Manager starts. Applies to sessions started or resumed afterwards.")
+        .addToggle((toggle) => toggle
+          .setValue(this.plugin.pluginData.claudeQuietTools !== false)
+          .onChange(async (value) => {
+            this.plugin.pluginData.claudeQuietTools = value;
+            await this.save();
+          }));
+      new import_obsidian.Setting(containerEl)
+        .setName("Show Remote Control on the strip")
+        .setDesc("A dot on a Claude session's strip: green while you can reach the session from claude.ai or the Claude app, grey while you can't, and hollow until Claude says. Claude reports it after each turn, so a session that disconnects while idle shows it at its next turn. Clicking a grey dot connects the session (it types /remote-control). Claude's own Remote Control setting decides which sessions connect; this only shows it.")
+        .addToggle((toggle) => toggle
+          .setValue(this.plugin.pluginData.remoteControlDot !== false)
+          .onChange(async (value) => {
+            this.plugin.pluginData.remoteControlDot = value;
+            await this.save();
+            for (const s of this.plugin.sessionObjects()) s.rebuildStrip();
+          }));
+    }
     new import_obsidian.Setting(containerEl)
       .setName("Load every session tab on restart")
       .setDesc("Off: Obsidian restores session tabs unloaded, and each resumes when you open it. On: every restored session resumes at once, so they're running (and reachable through Claude's Remote Control) right after a restart, at the cost of a slower start.")
