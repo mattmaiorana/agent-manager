@@ -1,47 +1,30 @@
-// Pictures in a terminal: the program's output goes
-// through kitty.ts's filter, which takes out kitty graphics commands for
-// KittyGraphics and passes the rest to xterm.js; and a canvas laid over
-// xterm's screen paints each placeholder cell's background and its slice of
-// the picture. Placeholders are text in xterm's buffer, so a picture moves
-// with its text: every paint reads where they are now. Nothing of xterm.js
-// is changed; its DOM renderer draws the text, and the canvas covers the
-// placeholder cells.
 
 import type { IBufferCell, IBufferLine, IDisposable, ITheme, Terminal } from "@xterm/xterm";
 import { GraphicsFilter, KittyGraphics, PLACEHOLDER, PLACEHOLDER_TEXT, diacriticValue, readPlaceholder, type PlaceholderCell, type StoredImage, type CellColors } from "./kitty";
-import { cellSize, underlineColor } from "./xterm-internals";
+import { blankPlaceholders, cellSize, unblankPlaceholders, underlineColor } from "./xterm-internals";
 
 type Decoded = ImageBitmap | "pending" | "failed";
 
-/** A placeholder cell found on screen: where it is, what it shows, and its background. */
 export interface FoundCell extends PlaceholderCell {
   x: number;
   y: number;
 }
 
 const EVENTS_KEPT = 400;
-// A picture is decoded once it has been on screen this long, a few at a time.
 const DECODE_SETTLE_MS = 40;
 const DECODES_AT_ONCE = 4;
+const CLUSTER = new RegExp(`${PLACEHOLDER_TEXT}\\p{M}*`, "gu");
 
-/** Neighboring cells of one placement on one row, drawn with a single clip. */
 interface PictureRun { x0: number; x1: number; c: FoundCell; bmp: ImageBitmap; width: number; height: number; cols: number; rows: number }
 
 export class PictureLayer {
   readonly filter: GraphicsFilter;
   readonly graphics: KittyGraphics;
   private decoded = new Map<StoredImage, Decoded>();
-  /**
-   * A replaced picture's last pixels, by id, shown until the new data's are
-   * ready: animation replaces under one id at its frame rate, and without
-   * these every frame would show blank cells while it decodes.
-   */
   private previous = new Map<number, { bmp: ImageBitmap; width: number; height: number }>();
   private disposed = false;
-  /** Output, scrolling or a cleared buffer since the last sweep: without one, no cell can have stopped showing a picture. */
   private changedSinceSweep = true;
 
-  /** The buffer changed without output or scrolling (Cmd+K clears the scrollback). */
   bufferChanged(): void {
     this.changedSinceSweep = true;
     this.schedule();
@@ -51,15 +34,12 @@ export class PictureLayer {
   private frame = 0;
   private frameWin: Window | null = null;
   private sweepTimer = 0;
-  /** Whether the canvas has anything on it, so a terminal without pictures never repaints it. */
   private painted = false;
-  /** For the self-test: what happened, newest last; the paths opened; the cells the last paint drew. */
   readonly events: string[] = [];
   readonly opened: string[] = [];
   lastPaint: FoundCell[] = [];
   paints = 0;
 
-  /** filter: one already part way through a command, when pictures come back on mid-command. */
   constructor(private term: Terminal, reply: (text: string) => void, filter?: GraphicsFilter) {
     this.filter = filter ?? new GraphicsFilter();
     this.graphics = new KittyGraphics({
@@ -70,8 +50,6 @@ export class PictureLayer {
         this.decoded.delete(img);
         const ready = d && typeof d === "object" ? d : null;
         if (replaced) {
-          // The newest pixels ready stay on screen until newer ones are: a
-          // frame replaced before it decoded leaves the one before it showing.
           if (ready) {
             this.forgetPrevious(img.id);
             this.previous.set(img.id, { bmp: ready, width: img.width, height: img.height });
@@ -91,11 +69,9 @@ export class PictureLayer {
       term.onRender(() => this.paint()),
       term.onScroll(() => {
         this.changedSinceSweep = true;
-        this.schedule();
       }),
       term.onResize(() => {
         this.changedSinceSweep = true;
-        this.schedule();
       }),
     );
   }
@@ -105,12 +81,6 @@ export class PictureLayer {
     if (this.events.length > EVENTS_KEPT) this.events.splice(0, this.events.length - EVENTS_KEPT);
   }
 
-  /**
-   * One chunk of the program's output: the text goes to xterm, and each
-   * graphics command is handled between the text before and after it, in
-   * the order xterm parses, so a reply comes before the answer to whatever
-   * the program asked next. done runs once the whole chunk is parsed.
-   */
   write(chunk: Uint8Array, done: () => void): void {
     this.changedSinceSweep = true;
     for (const piece of this.filter.push(chunk)) {
@@ -118,7 +88,6 @@ export class PictureLayer {
       else if (piece.kind === "graphics") {
         const body = piece.body;
         this.term.write("", () => {
-          // Turned off since: a command queued before then does nothing.
           if (this.disposed) return;
           try {
             this.graphics.handle(body);
@@ -139,7 +108,6 @@ export class PictureLayer {
     this.term.write("", done);
   }
 
-  /** Everything off: pictures gone, canvas removed, nothing listening. */
   dispose(): void {
     this.disposed = true;
     for (const l of this.listeners) l.dispose();
@@ -151,9 +119,9 @@ export class PictureLayer {
     for (const id of [...this.previous.keys()]) this.forgetPrevious(id);
     this.canvas?.remove();
     this.canvas = null;
+    unblankPlaceholders(this.term);
   }
 
-  /** The canvas, for the self-test's pixel checks. */
   get surface(): HTMLCanvasElement | null {
     return this.canvas;
   }
@@ -174,7 +142,6 @@ export class PictureLayer {
     this.frame = 0;
   }
 
-  /** The placeholder cells on one buffer line, with inheritance applied left to right. */
   private cellsOn(line: IBufferLine, y: number, scratch?: IBufferCell, theme?: ITheme): (FoundCell & { bg: string })[] {
     const out: (FoundCell & { bg: string })[] = [];
     if (!line.translateToString(false).includes(PLACEHOLDER_TEXT)) return out;
@@ -196,13 +163,11 @@ export class PictureLayer {
       const colors: CellColors = { fg: cell.isFgDefault() ? -1 : cell.getFgColor(), underline: underlineColor(cell) ?? -1 };
       const ph = readPlaceholder(marks, colors, left);
       left = ph;
-      // Read now: the cell object is reused for the next one.
       out.push({ x, y, id: ph.id, placement: ph.placement, row: ph.row, col: ph.col, bg: theme ? background(cell, theme) : "" });
     }
     return out;
   }
 
-  /** Which of these images any cell in either buffer, the scrollback included, still shows: one pass for all of them. */
   private inUse(ids: number[]): Set<number> {
     const want = new Set(ids);
     const shown = new Set<number>();
@@ -221,16 +186,9 @@ export class PictureLayer {
     this.previous.delete(id);
   }
 
-  /**
-   * The picture's decoded pixels, or null while they aren't ready. Decoding
-   * waits until the picture is still on screen a moment later, and runs a
-   * few at a time: a flood of pictures scrolling past would otherwise decode
-   * every one, megabytes each, for a single frame.
-   */
   private bitmap(img: StoredImage): ImageBitmap | null {
     const have = this.decoded.get(img);
     if (have !== undefined) return typeof have === "object" ? have : null;
-    // A replacement shows the picture it replaced meanwhile: decoded at once, not after the settle.
     if (this.previous.has(img.id) && this.decoding < DECODES_AT_ONCE) {
       this.decode(img);
       return null;
@@ -253,7 +211,6 @@ export class PictureLayer {
       if (this.graphics.images.get(img.id) !== img || !onScreen.has(img.id) || this.decoded.has(img)) continue;
       this.decode(img);
     }
-    // Still wanted ones are asked for again by the next paint that shows them.
     this.wanted.clear();
   }
 
@@ -262,7 +219,10 @@ export class PictureLayer {
     this.decoding++;
     const win = this.term.element?.ownerDocument.defaultView ?? window;
     let made: Promise<ImageBitmap>;
-    if (img.png) made = win.createImageBitmap(new win.Blob([img.png as Uint8Array<ArrayBuffer>], { type: "image/png" }));
+    if (img.png) {
+      const blob = new win.Blob([img.png as Uint8Array<ArrayBuffer>], { type: "image/png" });
+      made = img.decode ? win.createImageBitmap(blob, { resizeWidth: img.decode.width, resizeHeight: img.decode.height, resizeQuality: "medium" }) : win.createImageBitmap(blob);
+    }
     else {
       const px = new Uint8ClampedArray(img.width * img.height * 4);
       px.set(img.rgba!.subarray(0, px.length));
@@ -282,25 +242,16 @@ export class PictureLayer {
       },
       (e) => {
         this.decoding--;
-        // Replaced or dropped meanwhile: nothing to keep.
         if (this.graphics.images.get(img.id) !== img) return;
         this.forgetPrevious(img.id);
         this.decoded.set(img, "failed");
-        // A PNG is first fully checked here, off the main thread: one that
-        // doesn't load is dropped, with the error its sender asked for.
         this.graphics.failedToLoad(img);
         this.note(`couldn't decode ${img.id}: ${(e as Error)?.message ?? e}`);
-        // The picture it replaced may still be painted: paint again without it.
         this.schedule();
       },
     );
   }
 
-  /**
-   * Paints every placeholder cell on screen: its background, which also
-   * hides the placeholder's own glyph and marks, then its slice of the
-   * picture, fit into its placement with the aspect ratio kept.
-   */
   paint(): void {
     const term = this.term;
     const screen = term.element?.querySelector(".xterm-screen") as HTMLElement | null;
@@ -310,6 +261,7 @@ export class PictureLayer {
     }
     const cell = cellSize(term);
     if (!cell) return;
+    const blanked = blankPlaceholders(term, PLACEHOLDER_TEXT, CLUSTER);
     const doc = screen.ownerDocument;
     let canvas = this.canvas;
     if (!canvas || canvas.parentElement !== screen) {
@@ -334,19 +286,14 @@ export class PictureLayer {
     const theme = term.options.theme ?? {};
     const buf = term.buffer.active;
     const found: FoundCell[] = [];
-    // Pictures with a placement among the cells on screen: the only ones whose old pixels can still show.
     const placed = new Set<number>();
     const scratch = buf.getNullCell();
-    // Device-pixel edges, so neighboring cells meet exactly with no seam.
     const px = (v: number) => Math.round(v * dpr);
     for (let r = 0; r < term.rows; r++) {
       const line = buf.getLine(buf.viewportY + r);
       if (!line) continue;
       const cells = this.cellsOn(line, r, scratch, theme);
-      // A placeholder's glyph, drawn by xterm under this canvas, spills a little into the cell
-      // after it. Inside a run that cell is painted too; after a run's last one a blank cell is
-      // painted with its own background, or the spill shows as a sliver in the id's color.
-      for (let i = 0; i < cells.length; i++) {
+      for (let i = 0; i < (blanked ? 0 : cells.length); i++) {
         const c = cells[i];
         if (cells[i + 1]?.x === c.x + 1) continue;
         const next = c.x + 1 < line.length ? line.getCell(c.x + 1, scratch) : undefined;
@@ -355,10 +302,6 @@ export class PictureLayer {
         ctx.fillStyle = background(next, theme);
         ctx.fillRect(nx0, px(r * cell.height), px((c.x + 2) * cell.width) - nx0, px((r + 1) * cell.height) - px(r * cell.height));
       }
-      // Each cell's background, then the picture once per run of neighboring cells of one
-      // placement on this row, clipped to the run: one draw per row, not one per cell, so a
-      // large picture scrolls without a draw for each of its thousands of cells.
-      // In an object, not a variable: a closure's writes aren't seen by TypeScript's narrowing.
       const at: { run: PictureRun | null } = { run: null };
       const flush = () => {
         const run = at.run;
@@ -402,7 +345,6 @@ export class PictureLayer {
         const rows = place.rows || Math.ceil(height / cell.height);
         if (c.row >= rows || c.col >= cols) { flush(); continue; }
         this.graphics.touch(img);
-        // The same picture, row and placement, one cell on: the run grows. Otherwise a new run.
         const r0 = at.run;
         if (r0 && r0.bmp === bmp && r0.c.row === c.row && r0.c.placement === c.placement && r0.c.id === c.id && x0 === r0.x1 && c.col - r0.c.col === c.x - r0.c.x) {
           r0.x1 = x1;
@@ -415,11 +357,7 @@ export class PictureLayer {
     }
     this.lastPaint = found;
     this.painted = found.length > 0;
-    // A replaced picture's old pixels are kept only to show while the new
-    // ones decode: one not on screen now (its replacement has no placement,
-    // or scrolled away) is let go, since nothing counts it against the cap.
     if (this.previous.size) for (const id of [...this.previous.keys()]) if (!placed.has(id)) this.forgetPrevious(id);
-    // An image deleted while its cells still showed: freed once they're gone.
     if (this.graphics.pendingFree.size && !this.sweepTimer && this.changedSinceSweep) {
       this.sweepTimer = window.setTimeout(() => {
         this.sweepTimer = 0;
@@ -437,7 +375,6 @@ export class PictureLayer {
   }
 }
 
-// xterm's 256 colors past the theme's 16: a 6x6x6 cube, then 24 grays.
 const LEVELS = [0, 95, 135, 175, 215, 255];
 const ANSI: (keyof ITheme)[] = ["black", "red", "green", "yellow", "blue", "magenta", "cyan", "white", "brightBlack", "brightRed", "brightGreen", "brightYellow", "brightBlue", "brightMagenta", "brightCyan", "brightWhite"];
 
@@ -455,7 +392,6 @@ export function paletteColor(index: number, theme: ITheme): string {
   return hex((g << 16) | (g << 8) | g);
 }
 
-/** The cell's background as xterm draws it: shows behind a picture's transparent pixels. */
 function background(cell: IBufferCell, theme: ITheme): string {
   if (cell.isBgRGB()) return hex(cell.getBgColor());
   if (cell.isBgPalette()) return paletteColor(cell.getBgColor(), theme);

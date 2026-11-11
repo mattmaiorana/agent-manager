@@ -1,7 +1,4 @@
-// Small decisions about keys, kept free of Obsidian and xterm so
-// test/harness.ts can check them.
 
-/** The parts of a key event these decisions read. */
 export interface KeyLike {
   key: string;
   ctrlKey: boolean;
@@ -10,60 +7,29 @@ export interface KeyLike {
   shiftKey: boolean;
 }
 
-/**
- * Whether Ctrl+C copies the terminal's selection instead of going to the
- * program as the interrupt (a setting, off by default).
- * Off ("Ctrl+C always interrupts" unset), Ctrl+C copies only when the
- * terminal has a selection of its own, and otherwise interrupts. On, it
- * always interrupts. Never the program's copy (Super+C): with nothing
- * selected, Ctrl+C must stay the way to interrupt Claude.
- */
 export function ctrlCCopies(e: KeyLike, hasSelection: boolean, alwaysInterrupts: boolean): boolean {
   const ctrlC = e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && e.key.toLowerCase() === "c";
   return ctrlC && hasSelection && !alwaysInterrupts;
 }
 
-/** What a key typed after the program ended does. */
 export type AfterExit = "restart" | "shell" | "nothing";
 
-/**
- * After the program ends, Enter starts it again and S starts a shell. A
- * terminal a host controls never gets the shell (a session tab with its
- * strip and controls would be holding a shell instead), and its Enter goes
- * to the host, which may refuse it.
- */
 export function afterExitKey(data: string, hosted: boolean): AfterExit {
   if (data === "\r") return "restart";
   if (!hosted && data.toLowerCase() === "s") return "shell";
   return "nothing";
 }
 
-/**
- * Whether a key types a character (a letter, a digit, a symbol, Space): what
- * replaces a selection in claude's input, as typing does in a text field.
- * Never with Ctrl or Cmd, and never with Option while it acts as Meta (then
- * it's a shortcut, Option+B a word back). Enter, Tab and the arrows have
- * names, not characters, so they never count.
- */
 export function typesCharacter(e: KeyLike, optionIsMeta: boolean): boolean {
   if (e.ctrlKey || e.metaKey || (e.altKey && optionIsMeta)) return false;
   return [...e.key].length === 1;
 }
 
-/** A cell of the buffer: its column and its row (0-based, the buffer's rows, not the screen's). */
 export interface Cell {
   col: number;
   row: number;
 }
 
-/**
- * Whether a press and release of the left button leave claude's own selection
- * (its full screen, which has the mouse) in its input box: a drag that starts
- * and ends inside the box, or a double click (a word) or triple click (a line)
- * in it. A single click without moving selects nothing. `box`: the rows of the
- * box's two borders, null when there's no box (a dialog, say). `clicks`: the
- * release's click count (MouseEvent.detail).
- */
 export function selectsInBox(down: Cell, up: Cell, clicks: number, box: { top: number; bottom: number } | null): boolean {
   if (!box) return false;
   const inside = (row: number) => row > box.top && row < box.bottom;
@@ -71,54 +37,155 @@ export function selectsInBox(down: Cell, up: Cell, clicks: number, box: { top: n
   return clicks >= 2 || down.row !== up.row || down.col !== up.col;
 }
 
-/**
- * How claude's own selection in its input was made, so it can be made again
- * after a copy, which clears it: a drag from one cell to another (clicks 1),
- * or a double or triple click at `to` (clicks 2 or 3).
- */
 export interface Gesture {
   from: Cell;
   to: Cell;
   clicks: number;
-  /** Cmd+A's drag, over the whole input. */
   whole: boolean;
+  keys?: SelectMove[];
+  focus?: Cell | null;
+  top?: number;
 }
 
-/** The left button's presses and releases that make a gesture, in order, each its own report. */
+export type SelectMove = "left" | "right" | "up" | "down" | "lineStart" | "lineEnd";
+
+export function selectMove(e: KeyLike): SelectMove | null {
+  if (!e.shiftKey || e.ctrlKey || e.altKey || e.metaKey) return null;
+  const keys: Record<string, SelectMove> = { ArrowLeft: "left", ArrowRight: "right", ArrowUp: "up", ArrowDown: "down" };
+  return keys[e.key] ?? null;
+}
+
+export const SELECT_MOVE_KEYS: Record<SelectMove, string> = {
+  left: "\x1b[1;2D",
+  right: "\x1b[1;2C",
+  up: "\x1b[1;2A",
+  down: "\x1b[1;2B",
+  lineStart: "\x1b[1;2H",
+  lineEnd: "\x1b[1;2F",
+};
+
+export interface TextArea {
+  first: number;
+  last: number;
+  x1: number;
+  cols: number;
+  limits: number[];
+  empty: boolean;
+}
+
+export function compareCells(a: Cell, b: Cell): number {
+  return a.row !== b.row ? a.row - b.row : a.col - b.col;
+}
+
+function textEnd(area: TextArea): Cell {
+  return { col: area.limits[area.last - area.first] ?? area.x1, row: area.last };
+}
+
+function limit(area: TextArea, row: number): number {
+  return area.limits[row - area.first] ?? area.x1;
+}
+
+function onText(f: Cell, area: TextArea): Cell {
+  const row = Math.max(area.first, Math.min(area.last, f.row));
+  if (f.col < area.x1 && row > area.first) return { col: limit(area, row - 1), row: row - 1 };
+  return { col: Math.max(area.x1, Math.min(limit(area, row), f.col)), row };
+}
+
+export function textMove(f: Cell, move: SelectMove, area: TextArea): Cell {
+  const at = onText(f, area);
+  const { first, last, x1 } = area;
+  switch (move) {
+    case "left":
+      if (at.col > x1) return { col: at.col - 1, row: at.row };
+      return at.row > first ? { col: limit(area, at.row - 1), row: at.row - 1 } : at;
+    case "right":
+      if (at.col < limit(area, at.row)) return { col: at.col + 1, row: at.row };
+      return at.row < last ? { col: x1, row: at.row + 1 } : at;
+    case "up":
+      return at.row > first ? { col: Math.min(Math.max(x1, f.col), limit(area, at.row - 1)), row: at.row - 1 } : { col: x1, row: first };
+    case "down":
+      return at.row < last ? { col: Math.min(Math.max(x1, f.col), limit(area, at.row + 1)), row: at.row + 1 } : { col: limit(area, last), row: last };
+    case "lineStart":
+      return { col: x1, row: at.row };
+    case "lineEnd":
+      return { col: limit(area, at.row), row: at.row };
+  }
+}
+
+export function movesTo(from: Cell, to: Cell, cols: number): SelectMove[] {
+  const rows = to.row - from.row;
+  const moves: SelectMove[] = Array<SelectMove>(Math.abs(rows)).fill(rows < 0 ? "up" : "down");
+  const step = (n: number): SelectMove[] => Array<SelectMove>(Math.abs(n)).fill(n < 0 ? "left" : "right");
+  const direct = step(to.col - from.col);
+  const viaStart: SelectMove[] = ["lineStart", ...step(to.col)];
+  const viaEnd: SelectMove[] = ["lineEnd", ...step(to.col - (cols - 1))];
+  const cols3 = [direct, viaStart, viaEnd].sort((a, b) => a.length - b.length)[0] ?? direct;
+  return [...moves, ...cols3];
+}
+
+export function dragSelection(anchor: Cell, focus: Cell, cols: number): Gesture {
+  if (compareCells(anchor, focus) !== 0) return { from: anchor, to: focus, clicks: 1, whole: false, focus };
+  const edge = anchor.col >= cols - 1;
+  return { from: anchor, to: { col: anchor.col + (edge ? -1 : 1), row: anchor.row }, clicks: 1, whole: false, keys: [edge ? "right" : "left"], focus };
+}
+
+export function startSelection(move: SelectMove, caret: Cell, area: TextArea): Gesture | null {
+  if (area.empty) return null;
+  const forward = move === "right" || move === "down" || move === "lineEnd";
+  const end = textEnd(area);
+  if (forward) {
+    if (compareCells(caret, end) > 0) return null;
+    const lands = textMove(caret, move, area);
+    const focus = move === "right" || compareCells(lands, caret) <= 0 ? caret : lands.col === limit(area, lands.row) ? lands : textMove(lands, "left", area);
+    return dragSelection(caret, compareCells(focus, caret) < 0 ? caret : focus, area.cols);
+  }
+  if (caret.row <= area.first && caret.col <= area.x1) return null;
+  const anchor = compareCells(caret, end) > 0 ? end : textMove(caret, "left", area);
+  const lands = move === "left" ? anchor : textMove(caret, move, area);
+  return dragSelection(anchor, compareCells(lands, anchor) > 0 ? anchor : lands, area.cols);
+}
+
+export interface InputRow {
+  end: number;
+  nextWord: number;
+  oneWord: boolean;
+}
+
+export function rowBreaks(rows: InputRow[], cols: number): string[] {
+  return rows.map((r) => (r.end + 1 + r.nextWord <= cols - 5 ? "\n" : r.oneWord ? "" : " "));
+}
+
+export function unwrapCopy(text: string, breaks: string[], indent: number): string {
+  const lines = text.split("\n");
+  if (lines.length !== breaks.length + 1) return text;
+  const pad = " ".repeat(indent);
+  return lines.map((line, i) => (i > 0 && line.startsWith(pad) ? line.slice(indent) : line)).reduce((all, line, i) => all + (breaks[i - 1] ?? "") + line);
+}
+
+export function dedentCopy(text: string): string {
+  const lines = text.split("\n");
+  const lead = (l: string) => l.length - l.trimStart().length;
+  const rest = lines.slice(1).filter((l) => l.trim());
+  const indent = rest.length ? Math.min(...rest.map(lead)) : lead(lines[0]);
+  if (!indent) return text;
+  return lines.map((l) => l.slice(Math.min(indent, lead(l)))).join("\n");
+}
+
+export function gestureFocus(g: Gesture): Cell | null {
+  if (g.focus !== undefined) return g.focus;
+  return g.clicks < 2 ? g.to : null;
+}
+
 export function gestureReports(g: Gesture): { at: Cell; action: "down" | "move" | "up" }[] {
   if (g.clicks < 2) return [{ at: g.from, action: "down" }, { at: g.to, action: "move" }, { at: g.to, action: "up" }];
   const pair: { at: Cell; action: "down" | "up" }[] = [{ at: g.to, action: "down" }, { at: g.to, action: "up" }];
   return Array.from({ length: Math.min(3, g.clicks) }, () => pair).flat();
 }
 
-/**
- * Claude's rule for a repeat click (Claude Code 2.1.317's bundle, `L2n` and
- * `Ts`): a press within this long of the last one, and within this many cells
- * of it in both directions, adds to the click count; any other starts it again.
- */
 export const CLAUDE_MULTI_CLICK_MS = 500;
 export const CLAUDE_MULTI_CLICK_CELLS = 1;
-/**
- * Claude times a press when it reads the report, which can trail the plugin's
- * mousedown while it's busy drawing a turn: the wait covers that much more.
- */
 const CLICK_MARGIN_MS = 150;
 
-/**
- * How Cut remakes a selection its copy cleared without claude reading the
- * replay as more of the user's clicks: what to replay and how long to wait
- * first. A triple click needs no wait, since claude selects the line for any
- * count of three or more. A double click is replayed two or three cells along
- * from the last press, inside the same word (only letters, digits and _ from
- * the click to there, which every word boundary keeps together), so claude
- * counts it from one; with no room for that it waits. Claude's own word class
- * (2.1.317's bundle, `P1`) is letters, digits, and `_/.-+~\\`, so a run of
- * letters, digits and _ is always inside one of its words; a wide
- * character's second cell has no text, so it's never counted as one. A drag waits only when
- * its press would land near the last one. `lastPress`: where and when
- * (performance.now()) the user last pressed; `wordChar(col)`: whether that
- * column of the gesture's row is a letter, a digit or _.
- */
 export function replayPlan(g: Gesture, lastPress: Cell & { at: number }, now: number, wordChar: (col: number) => boolean): { gesture: Gesture; wait: number } {
   const near = (c: Cell) => Math.abs(c.col - lastPress.col) <= CLAUDE_MULTI_CLICK_CELLS && Math.abs(c.row - lastPress.row) <= CLAUDE_MULTI_CLICK_CELLS;
   const left = Math.max(0, lastPress.at + CLAUDE_MULTI_CLICK_MS + CLICK_MARGIN_MS - now);
@@ -142,27 +209,17 @@ export function replayPlan(g: Gesture, lastPress: Cell & { at: number }, now: nu
   return { gesture: g, wait: near(g.from) ? left : 0 };
 }
 
-/**
- * What a key queue sends: text, or a step run in its turn (a mouse report,
- * say), each a gap from the next; or a wait, a pause of its own before the
- * next item.
- */
-export type QueueItem = string | (() => void) | { wait: number };
+export type QueueItem = string | (() => void) | { wait: number } | QueueHold;
+export interface QueueHold {
+  hold: (done: (go: boolean) => boolean) => void;
+  then: QueueItem[];
+}
 
-/**
- * Sends keys one at a time, a gap apart, so a program reads each as a key and
- * never as a paste; while it's busy, every other input waits its turn at the
- * end (push), so a key typed right after a selection is replaced lands after
- * the keys that delete it, never between them. Busy until the gap after the
- * last key has passed. The timer is the caller's, so Node can test it. A
- * send or a step may push or clear: a push waits its turn, and a clear stops
- * the queue there.
- */
 export class KeyQueue {
   private items: QueueItem[] = [];
   private timer: unknown = null;
   private stepping = false;
-  /** Counts clears, so a step can tell it was cleared while it ran. */
+  private holding = false;
   private cleared = 0;
 
   constructor(
@@ -173,20 +230,19 @@ export class KeyQueue {
   ) {}
 
   get busy(): boolean {
-    return this.timer !== null || this.items.length > 0 || this.stepping;
+    return this.timer !== null || this.items.length > 0 || this.stepping || this.holding;
   }
 
-  /** Adds to the end, and starts sending when idle. */
   push(...items: QueueItem[]): void {
     this.items.push(...items);
-    if (this.timer === null && !this.stepping) this.step();
+    if (this.timer === null && !this.stepping && !this.holding) this.step();
   }
 
-  /** Drops whatever is still to send. */
   clear(): void {
     if (this.timer !== null) this.cancel(this.timer);
     this.timer = null;
     this.items = [];
+    this.holding = false;
     this.cleared++;
   }
 
@@ -200,11 +256,23 @@ export class KeyQueue {
     try {
       if (typeof item === "function") item();
       else if (typeof item === "string") this.send(item);
-      else wait = item.wait;
+      else if ("wait" in item) wait = item.wait;
+      else return this.hold(item, cleared);
     } finally {
       this.stepping = false;
     }
     if (this.cleared !== cleared) return;
     this.timer = this.schedule(() => this.step(), wait);
+  }
+
+  private hold(item: QueueHold, cleared: number): void {
+    this.holding = true;
+    item.hold((go) => {
+      if (!this.holding || this.cleared !== cleared) return false;
+      this.holding = false;
+      if (go) this.items.unshift(...item.then);
+      this.timer = this.schedule(() => this.step(), 0);
+      return true;
+    });
   }
 }

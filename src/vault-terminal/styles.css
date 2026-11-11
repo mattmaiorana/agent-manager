@@ -1,8 +1,4 @@
-/* vault-terminal's own rules. Every selector is scoped to a vault-terminal
-   class, so nothing outside its own terminals changes. */
 
-/* The pane: the terminal fills it edge to edge. Above it, a host's slot
-   (Agent Manager's strip), which the terminal's area shrinks to fit. */
 .workspace-leaf-content > .view-content.vault-terminal-content {
   padding: 0;
   overflow: hidden;
@@ -30,8 +26,6 @@
   position: absolute;
   inset: 0;
   overflow: hidden;
-  /* Set from the theme by the view, so the space past the last row and
-     column matches the terminal. */
   background-color: var(--vault-terminal-background, var(--background-primary));
 }
 
@@ -40,13 +34,10 @@
   padding: 0;
 }
 
-/* xterm.css paints the viewport black, and comes later in styles.css, so this
-   needs the extra class to win. */
 .vault-terminal-content .vault-terminal-view .xterm .xterm-viewport {
   background-color: transparent;
 }
 
-/* Cmd+F: a small find bar over the terminal's top right corner. */
 .vault-terminal-content .vault-terminal-search {
   position: absolute;
   top: var(--size-4-2);
@@ -73,26 +64,16 @@
   white-space: nowrap;
 }
 
-/* Settings: the agents' environment variables, one per line. */
 .vault-terminal-variables {
   width: 100%;
   min-width: 18em;
   font-family: var(--font-monospace);
 }
 
-/* The close confirm: a hover anyone can see, since the default theme's
-   buttons barely show one. A color change only, the same
-   for both buttons: no ring, which made a button look bigger, and no focus
-   ring on Cancel, which has the focus from the start so Enter cancels. The
-   buttons otherwise keep Obsidian's look. */
 .vault-terminal-confirm {
-  /* The color mixed into a button's own on hover, and how much: a host or a theme can change either (PORTING.md). */
   --vault-terminal-hover-toward: var(--text-normal);
   --vault-terminal-hover-amount: 20%;
 }
-/* In the dark theme the light text color grays the red Close more than it
-   lightens it, which hardly shows: both buttons go toward white instead, by
-   the same amount. */
 .theme-dark .vault-terminal-confirm {
   --vault-terminal-hover-toward: white;
   --vault-terminal-hover-amount: 28%;
@@ -112,9 +93,10 @@
   background-color: color-mix(in srgb, var(--background-modifier-error), var(--vault-terminal-hover-toward) var(--vault-terminal-hover-amount));
 }
 
-/* Pictures: a canvas over xterm's screen paints each
-   placeholder cell's background and its slice of the picture, covering the
-   placeholder's own glyph. Clicks and selection go through to xterm. */
+.vault-terminal-view .xterm-rows > div {
+  overflow: visible clip !important;
+}
+
 .vault-terminal-view .xterm-screen .vault-terminal-pictures {
   position: absolute;
   top: 0;
@@ -123,7 +105,23 @@
   z-index: 1;
 }
 
-/* Hovering a link: where it goes, and how to open it. */
+.vault-terminal-view .xterm-rows .vault-terminal-placeholder {
+  text-decoration: none !important;
+}
+
+.vault-terminal-view .xterm-rows .vault-terminal-link-plain {
+  color: #b1b9f9;
+}
+.theme-light .vault-terminal-view .xterm-rows .vault-terminal-link {
+  color: var(--text-accent) !important;
+}
+.vault-terminal-view .xterm-rows .vault-terminal-link-plain.xterm-dim {
+  color: rgb(177 185 249 / 50%);
+}
+.theme-light .vault-terminal-view .xterm-rows .vault-terminal-link.xterm-dim {
+  color: color-mix(in srgb, var(--text-accent) 50%, transparent) !important;
+}
+
 .vault-terminal-view .vault-terminal-link-tip {
   position: absolute;
   z-index: 10;
@@ -141,4 +139,123 @@
 
 .vault-terminal-view .vault-terminal-link-tip-how {
   color: var(--text-muted);
+}
+
+.vault-terminal-view .vault-terminal-link-tip-target {
+  font-weight: var(--font-semibold);
+}
+.vault-terminal-view .vault-terminal-link-tip-target + .vault-terminal-link-tip-address {
+  color: var(--text-muted);
+}
+
+.vault-terminal-view .vault-terminal-toasts {
+  position: absolute;
+  z-index: 10;
+  top: var(--size-4-2);
+  right: var(--size-4-4);
+  max-width: min(48ch, 80%);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--size-2-2);
+  pointer-events: none;
+}
+
+.vault-terminal-view .vault-terminal-toast {
+  position: relative;
+  max-width: min(36ch, 100%);
+  padding: 2px 1ch;
+  border: 1px solid var(--text-faint);
+  border-radius: var(--radius-s);
+  background: var(--vault-terminal-background, var(--background-primary));
+  color: var(--text-normal);
+  line-height: 1.3;
+  pointer-events: none;
+}
+
+.vault-terminal-view .vault-terminal-toast.is-clickable {
+  pointer-events: auto;
+  cursor: pointer;
+}
+
+.vault-terminal-view .vault-terminal-toast-title {
+  color: var(--text-muted);
+}
+
+.vault-terminal-view .vault-terminal-toast-text {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.vault-terminal-view .vault-terminal-toast.is-info {
+  max-width: 100%;
+}
+.vault-terminal-view .vault-terminal-toast.is-info .vault-terminal-toast-text {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.notice.vault-terminal-notice {
+  max-width: min(48ch, 90vw);
+  padding: 2px 1ch;
+  border: 1px solid var(--text-faint);
+  border-radius: var(--radius-s);
+  background: var(--vault-terminal-background, var(--background-primary));
+  box-shadow: none;
+  color: var(--text-normal);
+  font-family: var(--font-monospace);
+  line-height: 1.3;
+}
+
+.notice.vault-terminal-notice .vault-terminal-toast-title {
+  color: var(--text-muted);
+}
+
+.notice.vault-terminal-notice .vault-terminal-toast-text {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+}
+
+.notice.vault-terminal-notice.is-info .vault-terminal-toast-text {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.vault-terminal-view .vault-terminal-toast.has-close-x {
+  padding-right: calc(1ch + 18px);
+}
+
+.notice.has-close-x {
+  position: relative;
+  padding-right: calc(var(--size-4-3) + 18px);
+}
+
+.notice.vault-terminal-notice.has-close-x {
+  padding-right: calc(1ch + 18px);
+}
+
+.vault-terminal-close-x {
+  position: absolute;
+  cursor: pointer;
+  top: 3px;
+  right: 3px;
+  display: flex;
+  color: var(--text-faint);
+}
+
+.vault-terminal-close-x svg {
+  width: 12px;
+  height: 12px;
+}
+
+.has-close-x:hover .vault-terminal-close-x {
+  color: var(--text-normal);
+}
+
+.vault-terminal-selecting .xterm-rows .xterm-cursor {
+  box-shadow: none !important;
+  outline: none !important;
 }

@@ -1,6 +1,3 @@
-// The plugin's shared data types: its saved data, session records, the types of the
-// session tab and the sidebar (re-exported from where they're made), and what the
-// transcript writer is given and returns. Types only: nothing here runs.
 
 import type { WorkspaceLeaf } from "obsidian";
 import type { Browser } from "./browser/view.js";
@@ -10,132 +7,81 @@ import type { Session } from "./sessions/controller.js";
 import type { TerminalSettings } from "./vault-terminal/settings";
 import type { VaultTerminalState } from "./vault-terminal/host";
 
-// ---- Saved data ----
-
-// data.json: settings, session renames, and pins. Each field is what the plugin writes.
-// The file can be older than this build or edited by hand, so a field whose reader checks
-// its shape (Array.isArray, typeof) is `unknown` here and narrowed where it's read. The
-// rest are used as written, as they always were.
 export interface PluginData {
-  // The backend the sidebar starts sessions on.
   cliBackend?: unknown;
-  // The backends the sidebar offers (settings).
   browserBackends?: unknown;
-  // Folder names by NameKey (constants/names.ts), each read with a typeof check.
   names?: Record<string, unknown>;
-  // Opening templates by OpeningKey, each read with a typeof check.
   opening?: Record<string, unknown>;
-  // Folders outside the vault given to every session, as the user wrote them.
   addedFolders?: unknown;
-  // The "AGENTS.md folder" setting, a vault path; "" or unset for the root.
   startFolder?: unknown;
-  // Every folder a session of this plugin has run in, as absolute paths.
   sessionFolders?: unknown;
-  // Today's chat's name template.
   dailyChatName?: unknown;
-  // Show the sidebar's Daily Chat button (on unless false).
   dailyChatButton?: unknown;
-  // Show the sidebar's New session button (on unless false), and what it says.
   newButton?: unknown;
   newButtonName?: unknown;
-  // Show the sidebar's New ticket button (on unless false, and only while tickets are
-  // on), what it says, and the heading its card's notes go under.
+  notesOpenIn?: unknown;
   newTicketButton?: unknown;
   newTicketButtonName?: unknown;
   ticketNotesHeading?: unknown;
-  // The New ticket card's Launch button, beside Create (on unless false).
   ticketLaunchButton?: unknown;
-  // Read the overviews above a note or folder a session starts from (off by default).
   useOverviews?: unknown;
-  // Treat notes with `type: ticket` as tickets (off by default).
   useTickets?: unknown;
-  // An overview's file name; unset for Overview.md.
   overviewName?: unknown;
-  // The ticket template's vault path; unset for Templates/Ticket.md.
   ticketTemplate?: unknown;
-  // What the strip's Wrap button types; "" hides it, unset is the default.
+  useScheduledTasks?: unknown;
+  scheduledFolder?: unknown;
+  taskTemplate?: unknown;
+  scheduler?: unknown;
+  neverRead?: unknown;
   wrapMessage?: unknown;
-  // Files a session sends: "off", "own" (sentFilesFolder), else Obsidian's attachment rule.
   sentFiles?: unknown;
-  // The plugin's own rule: a folder, "./" at its start for beside the note.
   sentFilesFolder?: unknown;
-  // The sidebar's custom button (on unless false): its icon (a Lucide name), its text,
-  // and what it opens (a vault path or a URL; unset for the tickets note).
   customButton?: unknown;
   customButtonIcon?: unknown;
   customButtonName?: unknown;
   customButtonTarget?: unknown;
-  // The note Open tickets (and the custom button, unset) opens, a vault path; unset for
-  // the tickets base.
   ticketsNote?: unknown;
-  // The note a new overview is made from, a vault path; unset for the built-in one.
   overviewTemplate?: unknown;
-  // Starting folders whose AGENTS.md offer was dismissed.
   agentsFileDismissed?: unknown;
-  // Use agent profiles (off by default), the agents (context/agents.ts, readAgents), the
-  // switch's pick, and the Default agent, by id.
   useAgents?: unknown;
   agents?: unknown;
   currentAgent?: unknown;
   defaultAgent?: unknown;
-  // Each session's agent, by session id: an agent's id, or "" for none (plugin/agents.ts).
   sessionAgents?: Record<string, string>;
-  // The agent each session's conversation launched as, by session id: what a resume or a
-  // fork passes the CLI, which keeps it whatever Move to files the session under.
   sessionLaunchAgents?: Record<string, string>;
-  // Where each session's context comes from, by session id, recorded at launch: what a
-  // resume pins and the note icon shows (plugin/config.ts). Never a ticket attached or
-  // bound later, which sent the conversation nothing.
   sessionSources?: Record<string, ContextSource>;
-  // Renames, by session id.
   sessionNames?: Record<string, string>;
-  // The Antigravity conversations started in this vault, by id.
   antigravitySessions?: string[];
-  // Side chats, by id, to their source's id ("" when it isn't known).
   sideChats?: Record<string, string>;
-  // Pins, by session id, to a sort key.
   pinnedSessions?: Record<string, number>;
   eagerLoadOnRestart?: boolean;
   dedicatedTerminalSplit?: boolean;
   showSidebarTitle?: boolean;
   codexServer?: boolean;
-  // "Show pictures Claude sends you": load the bundled Claude mod (plugin/claude-mod.ts). On unless false.
+  keepDrafts?: boolean;
+  draftClipboard?: boolean;
   claudePictures?: boolean;
-  // "Fold tool output": load the bundled quiet-tools mod, for /quiet (plugin/claude-mod.ts). On unless false.
   claudeQuietTools?: boolean;
-  // "Show Remote Control on the strip": the dot on a Claude session's strip (sessions/remote-control.ts). On unless false.
   remoteControlDot?: boolean;
-  // The terminal's settings (src/vault-terminal/), defaults filled in by terminalSettings().
   terminal?: unknown;
-  // The terminal's own small state.
   terminalState?: VaultTerminalState;
 }
 
-// What the setup check found (plugin/setup.ts): Python 3, and which CLIs are installed.
 export interface SetupStatus {
   python: boolean;
   installed: Partial<Record<BackendKey, boolean>>;
 }
 
-// ---- Session records ----
-
-// One session as a store reader finds it (plugin/sessions.ts).
 export interface StoreRecord {
-  // The name it was launched with, from its head, or null.
   rawTitle: string | null;
-  // The first message a person typed, for a session started outside the plugin.
   firstMessage: string;
   sessionId: string;
   mtime: number;
-  // Its transcript file.
   file: string;
   backend: BackendKey;
-  // Its working directory; null for the vault's root, or unknown (Antigravity).
   cwd: string | null;
 }
 
-// A session as the sidebar lists it: a store record, classified, or an open tab's own
-// row before its transcript can be read (openSessionRecord).
 export interface SessionRecord {
   rawTitle?: string | null;
   firstMessage?: string;
@@ -144,18 +90,13 @@ export interface SessionRecord {
   file: string | null;
   backend: BackendKey;
   cwd: string | null;
-  // Listed in this vault (Antigravity's store is shared by every vault).
   listed: boolean;
-  // Its name: a rename, else the launch name, else its first message or short id.
   displayName: string;
   title: string;
 }
 
-// A record read from a store (the session index, findSessionById): it has its id and its
-// file, as every store record does (StoreRecord).
 export type IndexRecord = SessionRecord & { sessionId: string; file: string };
 
-// An open session tab, for the sidebar's dots and rows (plugin/workspace.ts).
 export interface OpenSession {
   title: string;
   backendKey: string;
@@ -164,10 +105,6 @@ export interface OpenSession {
   sessionId: string | null;
 }
 
-// A session tab's saved fields, kept under its view state's `host` key: what the
-// controller's getState writes (sessions/controller.ts), read back by its setState and
-// for a tab Obsidian hasn't loaded yet. A type rather than an interface, so it is one of
-// the terminal's state records (Record<string, unknown>) as it is.
 export type SavedSessionState = {
   sessionTitle?: string;
   workingDir?: string;
@@ -180,35 +117,25 @@ export type SavedSessionState = {
   noteReplaces?: boolean;
   forkFrom?: ForkFrom;
   daily?: boolean;
-  // Set up this vault's session (plugin/guides.ts).
   setup?: boolean;
   started?: boolean;
   launchToken?: string;
   rehostedFrom?: RehostedFrom;
   sessionId?: string;
-  // Tickets the session writes its lines to besides its source, with each one's kind.
+  draft?: string;
   ticketLinks?: Record<string, LinkKind | null>;
-  // The agent it's filed under, and the one its conversation launched as when that
-  // differs (a fork of a moved session), by id ("" for none), until its id is recorded.
   agent?: string;
   launchAgent?: string;
-  // Where its context comes from, until its id is recorded (sessionSources).
   contextSource?: ContextSource;
-  // Never saved: set by openSessionLeaf for a tab its caller launches.
   awaitLaunch?: boolean;
 };
 
-// Where a session's context comes from: `from` is the note's vault path, or a folder's
-// with a trailing slash, or null for a session started from neither (plain, Daily Chat);
-// `pinned` is whether its launch pinned that context to the system prompt (Claude and
-// Codex, with something to pin), rather than sending it in the opening only.
 export interface ContextSource {
   from: string | null;
   pinned: boolean;
+  run?: boolean;
 }
 
-// A session that followed its conversation to a new id (sessions/identity.ts), shown on
-// its strip.
 export interface RehostedFrom {
   from: string;
   to: string;
@@ -216,14 +143,12 @@ export interface RehostedFrom {
   kind: "rehost" | "continued";
 }
 
-// A side chat's source: the session it forks.
 export interface ForkFrom {
   id: string;
   backend: string;
   cwd?: string | null;
 }
 
-// What startSession is told about a launch.
 export interface LaunchOptions {
   backendOverride?: string | null;
   notePath?: string | null;
@@ -234,34 +159,17 @@ export interface LaunchOptions {
   handoffNote?: string | null;
   handoffFromBackend?: string | null;
   handoffIntent?: string | null;
-  // How the new session is told about the handoff note (controller.ts, _handoffOpeningSuffix):
-  // a side chat that couldn't fork, read the transcript in full, read only its last
-  // message, or just know where it is.
   handoffMode?: HandoffMode | null;
-  // Continue Session's new main session: it takes the note's main-session over from the
-  // one it continues, so a ticket's one-main check lets it start.
   newMain?: boolean;
-  // The agent, by id ("" for none), when it comes from the session this one continues
-  // rather than from where it starts.
   agentId?: string;
-  // Set up this vault: the opening points at the setup guide (plugin/guides.ts).
   setup?: boolean;
 }
 export type HandoffMode = "side-chat" | "transcript" | "last" | "pointer";
 
-// ---- The session controller (sessions/controller.ts) ----
-
-// A session: the controller and its parts.
 export type { Session };
 
-// ---- The sidebar (browser/view.ts) ----
-
-// A loaded sidebar: the view and every part's methods.
 export type { Browser };
 
-// The New ticket card: open or not, what's typed and picked in it (a project's folder
-// path, "" for none yet; the backend, null for the default), and the session it was
-// opened from, which Create attaches to the new ticket.
 export interface TicketDraft {
   name: string;
   project: string;
@@ -274,9 +182,6 @@ export interface TicketCard {
   from?: Session;
 }
 
-// ---- The transcript writer (transcripts/transcript-core.ts) ----
-
-// The vault I/O the writer is given: vault-relative paths.
 export interface TranscriptIO {
   exists(rel: string): Promise<boolean>;
   read(rel: string): Promise<string>;
@@ -286,7 +191,6 @@ export interface TranscriptIO {
   list(rel: string): Promise<string[]>;
 }
 
-// What a write did: the records added, and the note's vault path.
 export interface TranscriptWrite {
   added: number;
   path: string;
@@ -299,25 +203,16 @@ export interface TranscriptWriteOptions {
   transcriptFile: string | null;
   sessionTitle?: string | null;
   source?: string | null;
-  // The agent's name, for a new note's `agent` property.
   agent?: string | null;
-  // Finds the session's note wherever it is under the transcripts folder, asked inside
-  // the writer's lock (a move takes the same lock): the writer appends to it rather than
-  // look in transcriptDir.
   findExisting?: () => string | null;
-  // The folder the writer's lock is keyed on (the transcripts folder), so a note moved
-  // between agents' folders mid-write isn't written twice.
   lockDir?: string;
+  sidechain?: boolean;
 }
 
-// One transcript record, parsed (parseTranscriptRecord): a turn of either side, or the
-// mark where the context was compacted. `uuid` is the record's own key in its backend:
-// undefined for a Claude or Codex record that has none, which the writer skips.
 export type TranscriptPart = { kind: "md"; text: string } | { kind: "tool"; name: string; hint: string };
 export type TranscriptMessage =
   | { role: "boundary"; uuid: string }
   | { role: "user"; text: string; uuid: string | undefined }
   | { role: "assistant"; parts: TranscriptPart[]; uuid: string | undefined };
 
-// The terminal's settings as they sit in pluginData once filled in.
 export type { TerminalSettings };

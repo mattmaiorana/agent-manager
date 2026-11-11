@@ -1,4 +1,3 @@
-/* A setting with a text area (the opening instructions): stacked, so the text area spans the full width */
 .agent-manager-env-setting {
 	display: block;
 }
@@ -19,8 +18,6 @@
 	font-family: var(--font-monospace);
 }
 
-/* ---- Agent browser (empty state) ------------------------------------- */
-
 .agent-manager-browser {
 	height: 100%;
 	min-height: 0;
@@ -34,9 +31,6 @@
 	width: 100%;
 }
 
-/* Home: the title. */
-/* Centered, and the same whether the New session card is open or not, so nothing in
-   it moves when the card opens. The title starts on the same edge as "Pinned" below it. */
 .agent-manager-home-head {
 	display: flex;
 	align-items: center;
@@ -44,8 +38,6 @@
 	padding: 6px 0 0 8px;
 }
 
-/* Each block on Home (the card rows, Today's chat, the setup note, Pinned, Recent) sits
-   well apart from the next, so the sections read as sections. */
 .agent-manager-home-head + .agent-manager-sublabel,
 .agent-manager-today + .agent-manager-sublabel,
 .agent-manager-card-row + .agent-manager-sublabel,
@@ -55,7 +47,6 @@
 	margin-top: 16px;
 }
 
-/* The header's button, the custom button, sits at its right. */
 .agent-manager-head-buttons {
 	display: flex;
 	align-items: center;
@@ -64,15 +55,11 @@
 	margin-left: auto;
 }
 
-/* The header's button can shrink, a long name cut short. It's transparent with no
-   visible border (one the color of nothing keeps it as tall as the rows below it).
-   Scoped under Home to outrank Obsidian's own button color. */
 .agent-manager-home .agent-manager-head-button {
 	background-color: transparent;
 	border: 1px solid transparent;
 }
 
-/* The rows' text size, a little less padding than theirs. */
 .agent-manager-head-button {
 	display: flex;
 	align-items: center;
@@ -100,26 +87,18 @@
 	white-space: nowrap;
 }
 
-/* Obsidian's own button hover is --interactive-hover, which the default theme sets
-   to the same color as --interactive-normal in dark mode, so it shows nothing. The
-   hover mixes the text color into the button's own color instead: a lighter shade
-   in the dark theme, a darker one in the light, and it works in any theme. */
 .agent-manager-head-button:hover {
 	background-color: color-mix(in srgb, var(--interactive-normal), var(--text-normal) 14%);
 	color: var(--text-normal);
 	cursor: pointer;
 }
 
-/* The card grows down as it opens, pushing what's below, and folds back up as it
-   closes: a one-row grid whose row animates between nothing and the
-   card's height, the card clipped inside it. */
 .agent-manager-newcard-reveal {
 	display: grid;
 	grid-template-rows: 1fr;
 	margin-top: 8px;
 }
 
-/* The switch sits as far under the header as Pinned and Recent sit under what's above them. */
 .agent-manager-home-head + .agent-manager-agent-switch {
 	margin-top: 16px;
 }
@@ -155,7 +134,6 @@
 	}
 }
 
-/* The title keeps its width; a long button name is cut short first. */
 .agent-manager-home-title {
 	flex-shrink: 0;
 	min-width: 0;
@@ -168,8 +146,6 @@
 }
 
 .agent-manager-sublabel {
-	/* A top margin sets the sections (Pinned, Recent) apart; the gap does the
-	   separating, with no rule above. */
 	margin: 16px 0 2px;
 	padding: 14px 8px 4px;
 	font-size: 13px;
@@ -178,23 +154,16 @@
 	color: var(--text-normal);
 }
 
-/* Two classes so these beat the later `.agent-manager-row` rule — otherwise its 6px
-   radius wins and bends the divider up at the ends. */
 .agent-manager-row.agent-manager-session-row {
 	padding: 9px 8px;
 	border-radius: 0;
 	border-bottom: 1px solid var(--background-modifier-border);
 }
 
-/* Round the hover highlight too, matching the active-row highlight (the row is
-   square at rest so its divider stays straight; the rounding only shows with the
-   hover/active background behind it). */
 .agent-manager-row.agent-manager-session-row:hover {
 	border-radius: 6px;
 }
 
-/* One session row: dot, then the name over the backend and date. All actions live in
-   the right-click menu. */
 .agent-manager-row-body {
 	flex: 1;
 	min-width: 0;
@@ -203,8 +172,6 @@
 	gap: 8px;
 }
 
-/* The title + metadata stack: title on top (full width, truncated), the backend
-   badge and time on a quieter line below. */
 .agent-manager-row-col {
 	flex: 1;
 	min-width: 0;
@@ -219,7 +186,6 @@
 	gap: 5px;
 }
 
-/* Middle dot between the backend name and the "time ago", matched to the time. */
 .agent-manager-row-sep {
 	color: var(--text-muted);
 	font-size: 0.8em;
@@ -229,8 +195,6 @@
 	border-bottom: none;
 }
 
-/* Recent is two lists, open sessions over closed ones, so the open list's last row
-   isn't the last row while closed ones show below it (the plugin sets the class). */
 .agent-manager-recent-open.has-rows-below > .agent-manager-row.agent-manager-session-row:last-child {
 	border-bottom: 1px solid var(--background-modifier-border);
 }
@@ -266,14 +230,8 @@
 	background-color: var(--background-modifier-hover);
 }
 
-/* The row of the currently focused session tab is highlighted, like the file
-   explorer marks the active note; it clears when focus moves elsewhere. Hover
-   still wins so the row gives feedback under the pointer. */
 .agent-manager-row.agent-manager-session-row.is-active {
 	background-color: var(--nav-item-background-active);
-	/* Session rows are square (border-radius: 0) so their dividers stay straight,
-	   but the active-row highlight should read like Obsidian's rounded nav-item
-	   highlight rather than a hard rectangle. */
 	border-radius: 6px;
 }
 
@@ -306,9 +264,6 @@
 	margin: 0 0 10px;
 }
 
-/* The inline rename reuses a session/open row, which is a `.agent-manager-row` with
-   `align-items: center` — that centered and narrowed the field. Stretch it so
-   the label is left-aligned and the input spans the full width. */
 .agent-manager-row.agent-manager-newform {
 	align-items: stretch;
 	text-align: left;
@@ -329,26 +284,16 @@
 	flex: none;
 }
 
-/* Reveal the browser's tab title, when the setting is on.
-   Scoped by data-type so no other plugin's sidebar icon is affected. */
 body.agent-manager-show-tab-title .workspace-tab-header[data-type="agent-manager-browser"] .workspace-tab-header-inner-title {
 	display: flex;
 	margin-left: 5px;
 }
 
-/* ---- Backend switcher (new-session CLI) -------------------------------- */
-
-/* Full-width dropdown directly under New session; it only picks the CLI a new
-   session launches as. */
 .agent-manager-backend-select {
 	width: 100%;
 	margin: 0 0 4px;
 	font-size: 13px;
 }
-
-/* ---- Open dot ---------------------------------------------------------
-   An empty ring on a closed session, filled green on one that has a tab. What a session is doing
-   shows on its tab, not here. */
 
 .agent-manager-status-dot {
 	flex: none;
@@ -359,9 +304,6 @@ body.agent-manager-show-tab-title .workspace-tab-header[data-type="agent-manager
 	box-shadow: inset 0 0 0 1.5px var(--text-faint);
 }
 
-/* A session row's body is top-aligned, so its dot is nudged down to sit centered on
-   the title line. Agent rows center their items and need no nudge. */
-/* A pinned row's pin, faint, at the right, centered on the whole row. */
 .agent-manager-row-pin {
 	flex: none;
 	display: flex;
@@ -383,23 +325,15 @@ body.agent-manager-show-tab-title .workspace-tab-header[data-type="agent-manager
 	box-shadow: none;
 }
 
-/* ---- Session rows on the agent list --------------------------------- */
-
-/* Unnamed sessions read as a muted, italic "Untitled" wherever a name would go. */
 .agent-manager-row-untitled {
 	color: var(--text-muted);
 	font-style: italic;
 }
 
-/* ---- Drag to pin and reorder sessions --------------------------------- */
-
 .agent-manager-row.is-dragging {
 	opacity: 0.4;
 }
 
-/* Drop indicators: a flat accent line above/below the row under the cursor, or a
-   ring around an empty section, while a session row is dragged to pin or reorder.
-   `border-radius: 0` keeps the line from curling at the row's rounded corners. */
 .agent-manager-row.drop-before,
 .agent-manager-row.drop-after {
 	border-radius: 0;
@@ -418,8 +352,6 @@ body.agent-manager-show-tab-title .workspace-tab-header[data-type="agent-manager
 	border-radius: 6px;
 }
 
-/* ---- Terminal status strip (wrapper chrome) ---------------------------- */
-
 .agent-manager-strip {
 	flex: none;
 	display: flex;
@@ -432,27 +364,20 @@ body.agent-manager-show-tab-title .workspace-tab-header[data-type="agent-manager
 	font-size: 12px;
 }
 
-/* The strip in a session of the new terminal: in the slot above it, edge to edge. */
 .vault-terminal-content.agent-manager-session > .vault-terminal-top > .agent-manager-strip {
 	margin: 0;
 }
 
-/* The old terminal's padding around the text (12px at the sides, 20px at the bottom to
-   clear the status bar), on xterm's own element so the fit subtracts it. The pane behind
-   it has the terminal's background, so the padding reads as part of the terminal. */
 .vault-terminal-content.agent-manager-session .vault-terminal-view > .xterm {
 	box-sizing: border-box;
 	height: 100%;
 	padding: 6px 12px 20px;
 }
 
-/* A session tab has no view header (back and forward, the title, the "more options"
-   menu): the strip is its header, as in the old terminal, which emptied its container. */
 .workspace-leaf-content[data-type="agent-manager-session"] > .view-header {
 	display: none;
 }
 
-/* The name keeps a few characters in a narrow strip, rather than shrink away first. */
 .agent-manager-strip-title {
 	flex: 0 1 auto;
 	min-width: 4em;
@@ -460,12 +385,9 @@ body.agent-manager-show-tab-title .workspace-tab-header[data-type="agent-manager
 	text-overflow: ellipsis;
 	white-space: nowrap;
 	color: var(--text-normal);
-	/* Selectable so the session name can be copied (the full name is in the DOM even
-	   when the ellipsis truncates it visually) — saves hand-retyping names. */
 	user-select: text;
 	cursor: text;
 }
-/* Info icon (common commands menu): the transcript toggle's treatment. */
 .agent-manager-strip-info {
 	flex: none;
 	display: inline-flex;
@@ -480,7 +402,6 @@ body.agent-manager-show-tab-title .workspace-tab-header[data-type="agent-manager
 	width: 14px;
 	height: 14px;
 }
-/* Short session id beside the name; blank (no box) until the id is known. */
 .agent-manager-strip-id {
 	flex: none;
 	margin-left: 6px;
@@ -500,26 +421,39 @@ body.agent-manager-show-tab-title .workspace-tab-header[data-type="agent-manager
 .agent-manager-strip-id.is-empty {
 	display: none;
 }
+.agent-manager-strip-agent {
+	flex: none;
+	margin-left: -5px;
+	padding: 0 5px;
+	border-radius: 4px;
+	font-size: 10px;
+	line-height: 1.5;
+	color: var(--text-faint);
+	background: var(--background-modifier-hover);
+	white-space: nowrap;
+	user-select: none;
+}
+.agent-manager-strip-id.is-empty + .agent-manager-strip-agent {
+	margin-left: 0;
+}
+.agent-manager-strip-agent.is-empty,
+.agent-manager-strip.is-renaming .agent-manager-strip-agent {
+	display: none;
+}
 .agent-manager-strip-spacer {
 	flex: 1;
 	min-width: 8px;
 }
-/* Inline rename (click the title): prefix + input in the title's slot. */
 .agent-manager-strip-title.is-renaming {
-	flex: 6; /* outweighs the spacer so the input gets the room */
+	flex: 6;
 	display: inline-flex;
 	align-items: center;
 	gap: 2px;
 	overflow: visible;
 }
-/* While renaming, the session id chip steps aside: in a narrow strip the input's
-   minimum width would otherwise spill over it. The strip's class is
-   set by _startStripRename, since the review lint flags the has() selector. */
 .agent-manager-strip.is-renaming .agent-manager-strip-id {
 	display: none;
 }
-/* Obsidian's own text-input rule (30px tall, 4px 8px padding) outranks a single class,
-   and made the strip grow when the rename box opened: input and the strip's class win. */
 .agent-manager-strip input.agent-manager-strip-title-input {
 	flex: 1;
 	min-width: 120px;
@@ -546,15 +480,6 @@ body.agent-manager-show-tab-title .workspace-tab-header[data-type="agent-manager
 	cursor: help;
 }
 
-/* CLI backend badge: a small pill naming the session's CLI, color-coded per
-   backend. Used on the terminal status strip and in the cross-CLI "Open now"
-   list. Claude and Codex get distinct tints; other backends fall back to a
-   neutral pill. Colors go through Obsidian's theme vars so they track the theme. */
-/* One color for every CLI: a muted purple pill. The badge names the backend;
-   the text carries the identity, so the color stays uniform. */
-/* Distinct per-CLI colors for quick recognition: Claude clay/orange, Codex blue
-   (a warm/cool split that also stays clear of the green "open" dots). Other
-   backends fall back to a neutral purple. */
 .agent-manager-backend-badge {
 	flex: none;
 	font-size: 10px;
@@ -576,8 +501,6 @@ body.agent-manager-show-tab-title .workspace-tab-header[data-type="agent-manager
 	color: #6ba7e8;
 }
 
-/* The session's model, next to the backend badge: muted so the backend and title
-   read first. Hidden when empty (model not yet known, or Antigravity). */
 .agent-manager-strip-model {
 	flex: none;
 	font-size: 10px;
@@ -590,9 +513,6 @@ body.agent-manager-show-tab-title .workspace-tab-header[data-type="agent-manager
 	display: none;
 }
 
-/* Remote Control on a Claude session (sessions/remote-control.ts): a 7px dot, no text.
-   Green connected, grey not, hollow not yet known. A wider box than the dot, so it's
-   easy to hit. */
 .agent-manager-strip-rc {
 	flex: none;
 	display: inline-flex;
@@ -624,7 +544,6 @@ body.agent-manager-show-tab-title .workspace-tab-header[data-type="agent-manager
 	cursor: pointer;
 }
 
-/* The strip's Side chat button. Small and unobtrusive next to the backend badge. */
 .agent-manager-strip-new {
 	flex: none;
 	padding: 1px 7px;
@@ -641,9 +560,6 @@ body.agent-manager-show-tab-title .workspace-tab-header[data-type="agent-manager
 	background-color: var(--background-modifier-hover);
 }
 
-/* ---- Rendered transcript overlay (the strip's toggle) ---- */
-/* An absolute overlay inside the terminal host, so the terminal keeps its size
-   and the fit machinery never notices the toggle. */
 .agent-manager-transcript-overlay {
 	position: absolute;
 	inset: 0;
@@ -692,11 +608,9 @@ body.agent-manager-show-tab-title .workspace-tab-header[data-type="agent-manager
 	font-style: italic;
 	margin-bottom: 10px;
 }
-/* Keep rendered code blocks from forcing horizontal page scroll. */
 .agent-manager-transcript-md pre {
 	overflow-x: auto;
 }
-/* Quiet (sends /quiet): the transcript toggle's treatment. */
 .agent-manager-strip-quiet {
 	flex: none;
 	cursor: pointer;
@@ -711,7 +625,6 @@ body.agent-manager-show-tab-title .workspace-tab-header[data-type="agent-manager
 	width: 14px;
 	height: 14px;
 }
-/* The strip toggle button. */
 .agent-manager-strip-transcript {
 	cursor: pointer;
 	display: inline-flex;
@@ -728,8 +641,6 @@ body.agent-manager-show-tab-title .workspace-tab-header[data-type="agent-manager
 	width: 14px;
 	height: 14px;
 }
-/* The note icon: same treatment as the transcript toggle so the two read as a pair
-   (muted, centered on the strip's baseline, 14px). */
 .agent-manager-strip-note {
 	cursor: pointer;
 	display: inline-flex;
@@ -743,7 +654,6 @@ body.agent-manager-show-tab-title .workspace-tab-header[data-type="agent-manager
 	width: 14px;
 	height: 14px;
 }
-/* The note icon's context list: left-aligned, since it's a list rather than a label. */
 .tooltip.agent-manager-context-tip {
 	text-align: left;
 }
@@ -759,11 +669,7 @@ body.agent-manager-show-tab-title .workspace-tab-header[data-type="agent-manager
 	padding-top: 8px;
 }
 
-/* ---- The sidebar -------------------------------------------------------- */
 
-
-/* The card's agent profile dropdown has a row of its own, under the name; the CLI
-   shares the last row with Start. */
 .agent-manager-card-agent-select {
 	width: 100%;
 	min-width: 0;
@@ -774,8 +680,6 @@ body.agent-manager-show-tab-title .workspace-tab-header[data-type="agent-manager
 	margin: 0;
 }
 
-/* The card is the dropdowns' own color, so inside it they take the name field's,
-   which stands out from it, and the name field takes their height and inset. */
 .agent-manager-newcard .agent-manager-name-input {
 	flex: none;
 	height: 30px;
@@ -787,15 +691,12 @@ body.agent-manager-show-tab-title .workspace-tab-header[data-type="agent-manager
 	background-color: var(--background-modifier-form-field);
 }
 
-/* The form's backend and Start share a row. */
 .agent-manager-newform-controls .agent-manager-backend-select {
 	flex: 1;
 	width: auto;
 	margin: 0;
 }
 
-/* The New session card has the header buttons' color, which doesn't change while it
-   shows; the search sits under "Recent". */
 .agent-manager-newcard {
 	margin-bottom: 0;
 	gap: 7px;
@@ -812,14 +713,11 @@ body.agent-manager-show-tab-title .workspace-tab-header[data-type="agent-manager
 	justify-content: flex-end;
 }
 
-/* The New ticket card's dropdowns span the card, styled as the New session card's are
-   (the rule above), so they don't change color on hover either. */
 .agent-manager-ticket-select {
 	width: 100%;
 	font-size: 13px;
 }
 
-/* Beside the buttons, the CLI takes the room they leave. */
 .agent-manager-newform-controls .agent-manager-ticket-select {
 	flex: 1;
 	width: auto;
@@ -838,25 +736,20 @@ body.agent-manager-show-tab-title .workspace-tab-header[data-type="agent-manager
 	resize: vertical;
 }
 
-/* Create beside Launch is a plain button, which in the card would be the card's own
-   color: it takes the fields' color instead, so it reads as a button. */
 .agent-manager-ticketcard .agent-manager-start-btn:not(.mod-cta) {
 	background-color: var(--background-modifier-form-field);
 }
 
-/* Its hover mixes in the text color, as the header button's does. */
 .agent-manager-ticketcard .agent-manager-start-btn:not(.mod-cta):hover {
 	background-color: color-mix(in srgb, var(--background-modifier-form-field), var(--text-normal) 12%);
 	color: var(--text-normal);
 }
 
-/* Opened from a session's menu: which session Create attaches. */
 .agent-manager-ticketcard-from {
 	font-size: var(--font-ui-smaller);
 	color: var(--text-muted);
 }
 
-/* Daily Chat: one row under the header that opens, resumes, or starts the day's chat. */
 .agent-manager-today {
 	display: flex;
 	align-items: center;
@@ -872,8 +765,6 @@ body.agent-manager-show-tab-title .workspace-tab-header[data-type="agent-manager
 	background-color: var(--background-modifier-hover);
 }
 
-/* The rows under the switch (Today's chat, then New session and New ticket) sit as close
-   to it, to each other, and to an open card as the card sits under its row. */
 .agent-manager-card-row {
 	display: flex;
 	align-items: center;
@@ -889,6 +780,7 @@ body.agent-manager-show-tab-title .workspace-tab-header[data-type="agent-manager
 .agent-manager-agent-switch + .agent-manager-today,
 .agent-manager-card-row + .agent-manager-card-row,
 .agent-manager-today + .agent-manager-card-row,
+.agent-manager-tasks-row + .agent-manager-card-row,
 .agent-manager-card-row + .agent-manager-today,
 .agent-manager-newcard-reveal + .agent-manager-card-row,
 .agent-manager-newcard-reveal + .agent-manager-today {
@@ -899,8 +791,6 @@ body.agent-manager-show-tab-title .workspace-tab-header[data-type="agent-manager
 	background-color: var(--background-modifier-hover);
 }
 
-/* New session and New ticket on one line, while both are shown (a trial): each takes
-   half, a long name cut short. */
 .agent-manager-card-rows {
 	display: flex;
 	gap: 8px;
@@ -914,11 +804,11 @@ body.agent-manager-show-tab-title .workspace-tab-header[data-type="agent-manager
 }
 
 .agent-manager-agent-switch + .agent-manager-card-rows,
-.agent-manager-today + .agent-manager-card-rows {
+.agent-manager-today + .agent-manager-card-rows,
+.agent-manager-tasks-row + .agent-manager-card-rows {
 	margin-top: 8px;
 }
 
-/* While its card is open, the row takes the card's color. */
 .agent-manager-card-row.is-open {
 	background-color: var(--interactive-normal);
 }
@@ -939,8 +829,6 @@ body.agent-manager-show-tab-title .workspace-tab-header[data-type="agent-manager
 	height: 16px;
 }
 
-/* The sun is grey until the day's chat has run, yellow once it has and is closed, and
-   green while it has a tab, like the open dots. */
 .agent-manager-today-icon {
 	display: flex;
 	color: var(--text-faint);
@@ -983,7 +871,6 @@ body.agent-manager-show-tab-title .workspace-tab-header[data-type="agent-manager
 	gap: 6px;
 }
 
-/* What to install before a session can start, under Today's chat. */
 .agent-manager-setup {
 	display: flex;
 	flex-direction: column;
@@ -1001,9 +888,6 @@ body.agent-manager-show-tab-title .workspace-tab-header[data-type="agent-manager
 	color: var(--text-normal);
 }
 
-/* Settings buttons (Set up, Add an agent profile): Obsidian's own hover barely shows on a
-   plain button, so the color moves toward the text color, as the terminal's confirm
-   dialogs do (src/vault-terminal/styles.css). */
 .agent-manager-button {
 	--agent-manager-hover-toward: var(--text-normal);
 	--agent-manager-hover-amount: 20%;
@@ -1018,7 +902,6 @@ body.agent-manager-show-tab-title .workspace-tab-header[data-type="agent-manager
 	}
 }
 
-/* "Experimental", beside the setup note's title and the setup setting's name. */
 .agent-manager-badge {
 	display: inline-block;
 	margin-left: 6px;
@@ -1079,14 +962,6 @@ body.agent-manager-show-tab-title .workspace-tab-header[data-type="agent-manager
 	font-size: 0.8em;
 }
 
-/* Agent Manager links in a note's text (a resume link pasted in a note) read as
-   grey pills with a terminal icon, on Obsidian's interactive colors so they follow the
-   theme. Never inside a base, an embedded one included: the base's
-   Resume and Launch buttons keep their own look. Reading view
-   matches the link's URL; Live Preview draws a link without it, so the plugin's editor
-   extension marks a resume link's label (agent-manager-session-link). The Live Preview
-   selectors need the .markdown-source-view.mod-cm6 prefix to beat Obsidian's link
-   color and underline. */
 body {
 	--agent-manager-link-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m7 11 2-2-2-2'/%3E%3Cpath d='M11 13h4'/%3E%3Crect width='18' height='18' x='3' y='3' rx='2' ry='2'/%3E%3C/svg%3E");
 }
@@ -1133,9 +1008,6 @@ body {
 	outline: 2px solid var(--interactive-accent);
 	outline-offset: 2px;
 }
-/* Obsidian's external-link arrow: an ::after in reading view; in Live Preview a
-   separate widget after the link, hidden for any line holding a session link (the
-   plugin's lines hold nothing else; link-pills.js marks the line). */
 .markdown-rendered a.external-link[href^="obsidian://agent-manager"]:not(.bases-rendered-value *)::after {
 	display: none;
 }
@@ -1143,10 +1015,6 @@ body {
 	display: none;
 }
 
-/* Agent Manager links in a base (a link() formula), as pills: Resume accent-filled,
-   a new-session link neutral, on Obsidian's interactive colors so they follow the
-   theme. Base cells only, embedded bases included; a note's own agent-manager links
-   are styled above. */
 .bases-rendered-value a.external-link[href^="obsidian://agent-manager"] {
 	display: inline-flex;
 	align-items: center;
@@ -1165,8 +1033,6 @@ body {
 	color: var(--text-on-accent);
 	background: var(--interactive-accent);
 }
-/* Launch hover brightens, since --interactive-hover barely shows on the grey; Resume
-   uses the theme's accent hover. */
 .bases-rendered-value a.external-link[href^="obsidian://agent-manager"]:hover {
 	filter: brightness(1.25);
 	text-decoration: none;
@@ -1183,15 +1049,10 @@ body {
 	display: none;
 }
 
-/* ---- Agent switch -----------------------------------------------------
-   Under the header, once there's an agent: two agents are a pair of pills sharing
-   one track, more a full-width dropdown, and one is just its name. */
-
 .agent-manager-agent-switch {
 	margin: 18px 0 0;
 }
 
-/* The buttons under the switch sit as close to it as to each other. */
 .agent-manager-agent-switch + .agent-manager-today {
 	margin-top: 8px;
 }
@@ -1205,8 +1066,6 @@ body {
 	border: 1px solid var(--background-modifier-border);
 }
 
-/* The thumb: the picked agent's purple, under the two pills, sliding to the one
-   clicked. */
 .agent-manager-agent-thumb {
 	position: absolute;
 	top: 2px;
@@ -1219,7 +1078,6 @@ body {
 	transition: transform 200ms ease;
 }
 
-/* Under the switch's class, so it wins over Obsidian's own button style. */
 .agent-manager-agent-switch .agent-manager-agent-pill {
 	position: relative;
 	z-index: 1;
@@ -1228,7 +1086,6 @@ body {
 	overflow: hidden;
 	text-overflow: ellipsis;
 	white-space: nowrap;
-	/* Like the buttons below it: 35px tall with the track, and their titles' type. */
 	height: 29px;
 	padding: 0 8px;
 	border: none;
@@ -1253,7 +1110,6 @@ body {
 	color: var(--text-on-accent);
 }
 
-/* No glow from a mouse click; the keyboard focus ring stays. */
 .agent-manager-agent-switch .agent-manager-agent-pill:focus:not(:focus-visible) {
 	box-shadow: none;
 	outline: none;
@@ -1277,4 +1133,828 @@ body {
 .agent-manager-agent-single {
 	font-size: var(--font-ui-small);
 	color: var(--text-muted);
+}
+
+.agent-manager-tasks-row {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	margin: 8px 0 0;
+	padding: 8px 10px;
+	border-radius: 8px;
+	border: 1px solid var(--background-modifier-border);
+	cursor: pointer;
+}
+
+.agent-manager-tasks-row:hover {
+	background-color: var(--background-modifier-hover);
+}
+
+.agent-manager-tasks-row-icon,
+.agent-manager-tasks-row-go {
+	display: flex;
+	color: var(--text-muted);
+}
+
+.agent-manager-tasks-row-icon svg {
+	width: 16px;
+	height: 16px;
+}
+
+.agent-manager-tasks-row-go {
+	margin-left: auto;
+	color: var(--text-faint);
+}
+
+.agent-manager-tasks-row-go svg {
+	width: 14px;
+	height: 14px;
+}
+
+.agent-manager-tasks-row-title {
+	font-size: var(--font-ui-small);
+	font-weight: 600;
+	color: var(--text-normal);
+}
+
+.agent-manager-tasks-row + .agent-manager-sublabel {
+	margin-top: 16px;
+}
+
+.agent-manager-task-why.is-fix,
+.agent-manager-task-why.is-held {
+	color: var(--color-orange);
+}
+
+.agent-manager-task-why.is-approve {
+	color: var(--color-yellow);
+}
+
+.agent-manager-tasks-row-text {
+	flex: 1;
+	min-width: 0;
+}
+
+.agent-manager-tasks-row-running {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+}
+
+.agent-manager-tasks-row-line {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 6px;
+	font-size: var(--font-ui-smaller);
+	color: var(--text-muted);
+}
+
+.agent-manager-task-tag {
+	padding: 0 7px;
+	border-radius: 9px;
+	font-size: 11px;
+	font-weight: 600;
+	line-height: 16px;
+}
+
+.agent-manager-task-tag.is-new {
+	background-color: hsla(var(--accent-h), var(--accent-s), var(--accent-l), 0.22);
+	color: var(--text-accent);
+}
+
+.agent-manager-task-name-line {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	min-width: 0;
+}
+
+.agent-manager-task-name-line .agent-manager-row-name {
+	min-width: 0;
+}
+
+.agent-manager-task-profile {
+	flex: none;
+	padding: 0 6px;
+	border-radius: 9px;
+	font-size: 11px;
+	line-height: 16px;
+	color: var(--text-muted);
+	background-color: var(--background-modifier-hover);
+}
+
+.agent-manager-task-needs {
+	color: var(--color-orange);
+	background-color: rgba(var(--color-orange-rgb), 0.15);
+}
+
+.agent-manager-task-needs.is-approve {
+	color: var(--color-yellow);
+	background-color: rgba(var(--color-yellow-rgb), 0.15);
+}
+
+.agent-manager-row-name.is-unread {
+	font-weight: 600;
+}
+
+.agent-manager-task-newdot {
+	flex: none;
+	align-self: center;
+	width: 7px;
+	height: 7px;
+	border-radius: 50%;
+	background-color: var(--interactive-accent);
+}
+
+.agent-manager-task-tag.is-fix {
+	background-color: rgba(var(--color-orange-rgb), 0.18);
+	color: var(--color-orange);
+}
+
+.agent-manager-tasks-summary {
+	display: flex;
+	flex-direction: column;
+	margin: 12px 8px 0;
+	padding: 14px;
+	border-radius: 10px;
+	border: 1px solid var(--background-modifier-border);
+}
+
+.agent-manager-tasks-label {
+	font-size: 11px;
+	font-weight: 600;
+	letter-spacing: 0.06em;
+	text-transform: uppercase;
+	color: var(--text-faint);
+}
+
+.agent-manager-tasks-next {
+	margin-top: 4px;
+	font-size: 20px;
+	font-weight: 600;
+	line-height: 1.25;
+	color: var(--text-normal);
+	overflow-wrap: anywhere;
+}
+
+.agent-manager-tasks-when {
+	margin-top: 2px;
+	font-size: 13px;
+	color: var(--text-muted);
+}
+
+.agent-manager-tasks-counts {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 14px;
+	margin-top: 12px;
+	font-size: 12px;
+	color: var(--text-muted);
+}
+
+.agent-manager-tasks-counts b {
+	font-size: 15px;
+	color: var(--text-normal);
+}
+
+.agent-manager-tasks-counts b.is-active {
+	color: var(--color-green);
+}
+
+.agent-manager-tasks-counts b.is-pending {
+	color: var(--color-orange);
+}
+
+.agent-manager-tasks-head {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 4px 12px;
+}
+
+.agent-manager-tasks-machine {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	font-size: 12px;
+	color: var(--text-muted);
+}
+
+.agent-manager-tasks-machine.is-off {
+	color: var(--color-orange);
+}
+
+.agent-manager-tasks-machine.is-off .agent-manager-status-dot {
+	background-color: var(--color-orange);
+}
+
+.agent-manager-tasks-fold {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	cursor: pointer;
+	list-style: none;
+}
+
+.agent-manager-tasks-fold::-webkit-details-marker {
+	display: none;
+}
+
+.agent-manager-tasks-fold-chevron {
+	display: flex;
+	color: var(--text-muted);
+	transition: transform 120ms ease;
+}
+
+.agent-manager-tasks-fold-chevron svg {
+	width: 14px;
+	height: 14px;
+}
+
+.agent-manager-tasks-paused[open] .agent-manager-tasks-fold-chevron {
+	transform: rotate(90deg);
+}
+
+.agent-manager-tasks-paused {
+	margin-bottom: 16px;
+}
+
+.agent-manager-tasks-paused[open] > .agent-manager-tasks-fold {
+	margin-bottom: 8px;
+}
+
+.agent-manager-task-dot.is-ok {
+	background-color: var(--color-green);
+	box-shadow: none;
+}
+
+.agent-manager-task-dot.is-fix {
+	background-color: var(--color-orange);
+	box-shadow: none;
+}
+
+.agent-manager-task-dot.is-approve {
+	box-shadow: inset 0 0 0 1.5px var(--color-yellow);
+}
+
+.agent-manager-task-dot.is-held {
+	box-shadow: inset 0 0 0 1.5px var(--color-red);
+}
+
+.agent-manager-task-head {
+	padding-left: 0;
+	gap: 4px;
+}
+
+.agent-manager-task-back {
+	flex: 0 1 auto;
+	min-width: 0;
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	cursor: pointer;
+}
+
+.agent-manager-task-back-icon {
+	display: flex;
+	padding: 4px;
+	border-radius: 6px;
+	color: var(--text-muted);
+}
+
+.agent-manager-task-back:hover .agent-manager-task-back-icon {
+	background-color: var(--background-modifier-hover);
+	color: var(--text-normal);
+}
+
+.agent-manager-task-title {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.agent-manager-task-summary-label {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+}
+
+.agent-manager-task-summary .agent-manager-tasks-when.is-warn {
+	color: var(--color-orange);
+}
+
+.agent-manager-task-summary .agent-manager-task-actions {
+	margin: 12px 0 0;
+}
+
+.agent-manager-task-problems {
+	margin: 6px 0 0 18px;
+	padding: 0;
+	font-size: 13px;
+	color: var(--color-orange);
+}
+
+.agent-manager-task-problems li + li {
+	margin-top: 4px;
+}
+
+.agent-manager-task-facts {
+	display: grid;
+	grid-template-columns: 7.5em 1fr;
+	gap: 4px 10px;
+	padding: 0 8px;
+	font-size: 12px;
+}
+
+.agent-manager-task-key {
+	color: var(--text-muted);
+}
+
+.agent-manager-task-value {
+	min-width: 0;
+	overflow-wrap: anywhere;
+}
+
+.agent-manager-task-never {
+	margin: 8px 8px 0;
+	font-size: 12px;
+	color: var(--text-muted);
+}
+
+.agent-manager-task-never summary {
+	cursor: pointer;
+}
+
+.agent-manager-task-path {
+	padding-left: 12px;
+	overflow-wrap: anywhere;
+	font-family: var(--font-monospace);
+	font-size: 11px;
+}
+
+.agent-manager-task-approval {
+	display: flex;
+	justify-content: space-between;
+	gap: 8px;
+	margin: 10px 8px 0;
+	padding: 8px;
+	border-radius: 6px;
+	background-color: var(--background-modifier-hover);
+	font-size: 12px;
+}
+
+.agent-manager-task-hash {
+	color: var(--text-muted);
+	font-family: var(--font-monospace);
+}
+
+.agent-manager-run-row .agent-manager-row-name {
+	font-size: 12px;
+}
+
+.agent-manager-task-new {
+	margin: 8px 8px 0;
+}
+
+.agent-manager-outputs-list {
+	margin-top: 12px;
+}
+
+.agent-manager-outputs-dot {
+	flex: none;
+	align-self: flex-start;
+	width: 7px;
+	height: 7px;
+	margin-top: 7px;
+	border-radius: 50%;
+}
+
+.agent-manager-outputs-dot.is-unread {
+	background-color: var(--interactive-accent);
+}
+
+.agent-manager-outputs-note {
+	margin-top: 2px;
+	font-size: var(--font-ui-smaller);
+	color: var(--text-normal);
+	display: -webkit-box;
+	-webkit-line-clamp: 2;
+	-webkit-box-orient: vertical;
+	overflow: hidden;
+}
+
+.agent-manager-tasks-running {
+	display: flex;
+	flex: none;
+	align-items: center;
+	gap: 6px;
+	margin-left: auto;
+	margin-right: 8px;
+	padding: 2px 10px;
+	border-radius: 11px;
+	font-size: var(--font-ui-smaller);
+	font-weight: 600;
+	color: var(--color-green);
+	background-color: rgba(var(--color-green-rgb), 0.15);
+	cursor: pointer;
+}
+
+.agent-manager-tasks-running:hover {
+	background-color: rgba(var(--color-green-rgb), 0.25);
+}
+
+.agent-manager-tasks-running-dot {
+	width: 7px;
+	height: 7px;
+	border-radius: 50%;
+	background-color: var(--color-green);
+}
+
+@keyframes agent-manager-pulse {
+	50% { opacity: 0.35; }
+}
+
+.agent-manager-task-newcount {
+	flex: none;
+	min-width: 18px;
+	height: 18px;
+	padding: 0 5px;
+	border-radius: 5px;
+	font-size: 11px;
+	font-weight: 600;
+	line-height: 18px;
+	text-align: center;
+	color: var(--text-on-accent);
+	background-color: var(--interactive-accent);
+}
+
+.agent-manager-outputs-rowcount {
+	margin-left: auto;
+}
+
+.agent-manager-task-newcount {
+	align-self: center;
+}
+
+.agent-manager-task-new-reveal {
+	grid-template-columns: minmax(0, 1fr);
+	margin: 8px 8px 0;
+}
+
+.agent-manager-task-new-reveal > .agent-manager-newcard {
+	min-width: 0;
+}
+
+.agent-manager-taskcard-where {
+	flex: 1 1 auto;
+	min-width: 0;
+	font-size: 12px;
+	line-height: 1.35;
+	color: var(--text-faint);
+	overflow-wrap: anywhere;
+}
+
+.agent-manager-ticketcard-where:empty {
+	display: none;
+}
+
+.agent-manager-task-picker {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+
+.agent-manager-task-picker-row,
+.agent-manager-task-picker-time {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px;
+}
+
+.agent-manager-task-picker-days {
+	display: flex;
+	gap: 4px;
+}
+
+.agent-manager-task-picker-day {
+	width: 28px;
+	height: 28px;
+	padding: 0;
+	border-radius: 50%;
+	font-size: 12px;
+}
+
+.agent-manager-task-picker-day.is-on {
+	background-color: var(--interactive-accent);
+	color: var(--text-on-accent);
+}
+
+.agent-manager-task-picker-note {
+	font-size: 12px;
+	color: var(--text-muted);
+}
+
+.agent-manager-taskcard-hint {
+	font-size: 12px;
+	line-height: 1.35;
+	color: var(--text-muted);
+}
+
+.agent-manager-taskcard-box {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	border: 1px solid var(--background-modifier-border-hover);
+	border-radius: var(--radius-m);
+	padding: 4px 10px 6px;
+}
+
+.agent-manager-taskcard > .agent-manager-taskcard-seg {
+	align-self: flex-start;
+}
+
+.agent-manager-taskcard-row {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 10px;
+	padding: 5px 0;
+}
+
+.agent-manager-taskcard-label {
+	min-width: 0;
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+}
+
+.agent-manager-taskcard-label-name {
+	font-size: var(--font-ui-small);
+}
+
+.agent-manager-taskcard-label-desc {
+	font-size: 12px;
+	line-height: 1.35;
+	color: var(--text-muted);
+}
+
+.agent-manager-taskcard-seg {
+	display: flex;
+	flex: none;
+	gap: 2px;
+	padding: 2px;
+	border-radius: var(--radius-s);
+	background: var(--background-modifier-form-field);
+}
+
+.agent-manager-taskcard-seg button {
+	height: auto;
+	padding: 3px 8px;
+	font-size: 12px;
+	box-shadow: none;
+	background: transparent;
+	color: var(--text-muted);
+}
+
+.agent-manager-taskcard-seg button.is-active {
+	background: var(--interactive-normal);
+	color: var(--text-normal);
+}
+
+.agent-manager-taskcard-seg button:disabled {
+	opacity: 0.5;
+	cursor: default;
+}
+
+.agent-manager-taskcard-fixed {
+	flex: none;
+	font-size: 12px;
+	color: var(--text-muted);
+}
+
+.agent-manager-taskcard-chips {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px;
+}
+
+.agent-manager-taskcard-chip {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	padding: 2px 4px 2px 9px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 12px;
+	font-size: 12px;
+	color: var(--text-muted);
+}
+
+.agent-manager-taskcard-chip-x {
+	padding: 0 4px;
+	height: auto;
+	background: none;
+	box-shadow: none;
+	color: var(--text-faint);
+	font-size: 13px;
+	line-height: 1;
+}
+
+.agent-manager-taskcard-chip-x:hover {
+	color: var(--text-normal);
+}
+
+.agent-manager-taskcard-check {
+	display: flex;
+	align-items: flex-start;
+	gap: 8px;
+	padding: 5px 0;
+	font-size: var(--font-ui-small);
+}
+
+.agent-manager-taskcard-check input {
+	margin: 2px 0 0;
+}
+
+.agent-manager-taskcard-more {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+	height: auto;
+	width: 100%;
+	padding: 8px 10px;
+	text-align: left;
+	font-size: var(--font-ui-small);
+	box-shadow: none;
+	background: transparent;
+	border: 1px solid var(--background-modifier-border-hover);
+	border-radius: var(--radius-m);
+	white-space: normal;
+}
+
+.agent-manager-taskcard-more-summary {
+	margin-top: 2px;
+	font-size: 12px;
+	line-height: 1.35;
+	color: var(--text-muted);
+}
+
+.agent-manager-taskcard-more-chevron {
+	flex: none;
+	display: flex;
+	color: var(--text-muted);
+}
+
+.agent-manager-hidden {
+	display: none;
+}
+
+.agent-manager-task-actions {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	margin: 10px 8px 0;
+}
+
+.agent-manager-task-followup {
+	margin: 4px 0 8px;
+	font-size: var(--font-ui-small);
+	color: var(--text-muted);
+}
+
+.agent-manager-task-why.is-running {
+	color: var(--color-green);
+}
+
+.agent-manager-safety-results {
+	margin: 0 0 12px;
+	font-size: var(--font-ui-small);
+	color: var(--text-muted);
+}
+
+.agent-manager-safety-phase {
+	margin-top: 8px;
+	font-weight: var(--font-semibold);
+	color: var(--text-normal);
+}
+
+.agent-manager-safety-phase.is-failed,
+.agent-manager-safety-case.is-fail .agent-manager-safety-mark {
+	color: var(--text-error);
+}
+
+.agent-manager-safety-phase.is-inconclusive,
+.agent-manager-safety-phase.is-couldn-t-run,
+.agent-manager-safety-case.is-not-tried .agent-manager-safety-mark {
+	color: var(--color-orange);
+}
+
+.agent-manager-safety-case.is-pass .agent-manager-safety-mark {
+	color: var(--color-green);
+}
+
+.agent-manager-safety-mark {
+	font-weight: var(--font-semibold);
+}
+
+.agent-manager-tasks-safety {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	margin: 8px 8px 0;
+	font-size: var(--font-ui-small);
+	color: var(--text-muted);
+}
+
+.agent-manager-tasks-safety.is-warn {
+	color: var(--color-orange);
+}
+
+.agent-manager-tasks-safety.is-bad {
+	color: var(--text-error);
+}
+
+.agent-manager-tasks-safety-text {
+	flex: 1;
+}
+
+.agent-manager-approval .agent-manager-task-facts {
+	margin: 0 0 12px;
+}
+
+.agent-manager-approval-verbatim {
+	font-family: var(--font-monospace);
+	font-size: 12px;
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+}
+
+.agent-manager-approval .agent-manager-approval-buttons {
+	justify-content: flex-start;
+	margin: 0 0 16px;
+}
+
+.agent-manager-approval-notes li.mod-warning {
+	color: var(--text-error);
+	font-weight: 600;
+}
+
+.agent-manager-approval-notes {
+	margin: 12px 0;
+	padding-left: 18px;
+	font-size: 13px;
+	color: var(--text-muted);
+}
+
+.agent-manager-task-picker-row > select {
+	flex: 1 1 100%;
+}
+
+.agent-manager-task-picker-time {
+	flex: 1 1 100%;
+	flex-wrap: nowrap;
+}
+
+.agent-manager-task-picker-time > select {
+	flex: 1 1 0;
+	width: auto;
+	min-width: 0;
+}
+
+.agent-manager-task-actions button:not(.mod-cta):hover,
+.agent-manager-approval .modal-button-container button:not(.mod-cta):hover {
+	background-color: var(--background-modifier-border-hover);
+}
+
+.agent-manager-task-approve-card {
+	margin: 12px 8px 0;
+	padding: 12px 14px 14px;
+	border-radius: 10px;
+	background-color: var(--background-modifier-hover);
+}
+
+.agent-manager-task-approve-title {
+	font-weight: 600;
+	color: var(--text-normal);
+}
+
+.agent-manager-task-approve-why {
+	margin-top: 2px;
+	font-size: 13px;
+	color: var(--text-muted);
+}
+
+.agent-manager-task-approve-card .agent-manager-task-actions {
+	margin: 10px 0 0;
+}
+
+.view-action.agent-manager-ticket-action {
+  display: flex;
+  align-items: center;
+  gap: var(--size-2-2);
+  width: auto;
+  padding-inline: var(--size-2-3);
+  font-size: var(--font-ui-small);
 }

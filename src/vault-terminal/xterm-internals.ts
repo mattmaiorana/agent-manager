@@ -1,25 +1,6 @@
-// The few parts of xterm.js 6.0.0 that the terminal reaches past its public
-// API for, each found in its source at the 6.0.0 tag (the package ships it),
-// each checked before use. If a later xterm moves one, the accessor returns
-// null and the caller falls back to xterm's own behavior; the self-test's
-// "xterm internals are where expected" check fails so the move is noticed.
-//
-// - Mouse reports: xterm turns a mouse event into a report in whichever
-//   protocol and encoding the program asked for (X10, SGR, SGR pixels, with
-//   their restrictions). Sending wheel reports through the same function keeps
-//   that exact, rather than tracking the program's mouse modes a second time.
-// - The cell height in CSS pixels, which xterm measures from the font.
-// - The viewport's scroll position: after a resize, xterm 6.0.0 can keep the
-//   scroll bar's position from before (its issue #6172), and its public
-//   scrollLines moves from there, so the next wheel event jumps. Scrolling
-//   the buffer itself and resyncing the scroll bar to it avoids that.
-// - A cell's underline color, as sent (SGR 58): kitty's placement id for a
-//   picture's placeholder cell. The public IBufferCell has
-//   no underline color; the object getCell returns is xterm's own CellData,
-//   which does. xterm keeps the color only when the cell has an underline
-//   style or a link (kitty.ts, PICTURE_LINK).
 
 import type { IBufferCell, Terminal } from "@xterm/xterm";
+import { linkPieces } from "./links";
 
 interface MouseEvent {
   col: number;
@@ -33,9 +14,13 @@ interface MouseEvent {
   shift: boolean;
 }
 
+interface RowFactory {
+  createRow: (this: RowFactory, ...args: unknown[]) => HTMLSpanElement[];
+}
+
 interface Core {
   coreMouseService?: { triggerMouseEvent?(e: MouseEvent): boolean };
-  _renderService?: { dimensions?: { css?: { cell?: { width: number; height: number } } } };
+  _renderService?: { dimensions?: { css?: { cell?: { width: number; height: number } } }; _renderer?: { value?: { _rowFactory?: RowFactory } } };
   _viewport?: { _latestYDisp?: number; queueSync?(ydisp?: number): void };
   _bufferService?: { scrollLines?(disp: number, suppressScrollEvent?: boolean): void };
 }
@@ -45,7 +30,6 @@ function core(term: Terminal): Core | null {
   return c && typeof c === "object" ? c : null;
 }
 
-// CoreMouseButton.LEFT and WHEEL, and CoreMouseAction.UP, DOWN and MOVE, in xterm's common/Types.ts.
 const LEFT = 0;
 const WHEEL = 4;
 const WHEEL_UP = 0;
@@ -54,11 +38,6 @@ const BUTTON_UP = 0;
 const BUTTON_DOWN = 1;
 const BUTTON_MOVE = 32;
 
-/**
- * Sends one left-button report at a cell (0-based): a press, a drag to it, or
- * the release, in the program's own mouse encoding, as sendWheelReport does.
- * False if xterm wouldn't send it, null if the internals have moved.
- */
 export function sendButtonReport(term: Terminal, col: number, row: number, action: "down" | "move" | "up", px: { x: number; y: number }): boolean | null {
   const service = core(term)?.coreMouseService;
   if (typeof service?.triggerMouseEvent !== "function") return null;
@@ -66,17 +45,9 @@ export function sendButtonReport(term: Terminal, col: number, row: number, actio
   return service.triggerMouseEvent({ col, row, x: px.x, y: px.y, button: LEFT, action: code, ctrl: false, alt: false, shift: false });
 }
 
-/**
- * Sends one wheel report at a cell (0-based), in the program's own mouse
- * encoding, through xterm's input path (so it arrives as term.onData). False
- * if xterm wouldn't send it (the protocol has no wheel), null if the internals
- * have moved.
- */
 export function sendWheelReport(term: Terminal, col: number, row: number, up: boolean, mods: { shift: boolean; alt: boolean; ctrl: boolean }, px: { x: number; y: number }): boolean | null {
   const service = core(term)?.coreMouseService;
   if (typeof service?.triggerMouseEvent !== "function") return null;
-  // xterm sends the report as user input, which with scrollOnUserInput would
-  // take a scrolled-up normal screen to the bottom; the wheel is no typing.
   const follows = term.options.scrollOnUserInput;
   term.options.scrollOnUserInput = false;
   try {
@@ -86,31 +57,19 @@ export function sendWheelReport(term: Terminal, col: number, row: number, up: bo
   }
 }
 
-/** A cell's size in CSS pixels, as xterm measured it; null if not measured or moved. */
 export function cellSize(term: Terminal): { width: number; height: number } | null {
   const cell = core(term)?._renderService?.dimensions?.css?.cell;
   return cell && cell.width > 0 && cell.height > 0 ? { width: cell.width, height: cell.height } : null;
 }
 
-/**
- * Puts the scroll bar back in step with the line at the top of the view, on
- * the next frame. Returns false if the internals have moved.
- */
 export function resyncViewport(term: Terminal): boolean {
   const viewport = core(term)?._viewport;
   if (!viewport || typeof viewport.queueSync !== "function") return false;
-  // xterm syncs to its last remembered line, which a resize leaves stale;
-  // forgetting it makes the sync read the buffer's own.
   viewport._latestYDisp = undefined;
   viewport.queueSync();
   return true;
 }
 
-/**
- * Scrolls the view by lines from where the buffer says it is, not from the
- * scroll bar's position (which a resize can leave stale), then puts the
- * scroll bar in step. Falls back to xterm's public scrollLines.
- */
 export function scrollBuffer(term: Terminal, lines: number): void {
   const buffer = core(term)?._bufferService;
   if (typeof buffer?.scrollLines !== "function" || !resyncViewport(term)) {
@@ -119,8 +78,6 @@ export function scrollBuffer(term: Terminal, lines: number): void {
   }
   buffer.scrollLines(lines);
   resyncViewport(term);
-  // What xterm's own scrollLines does after scrolling; the DOM renderer
-  // repaints anyway, other renderers might not.
   term.refresh(0, term.rows - 1);
 }
 
@@ -130,13 +87,8 @@ interface CellInternals {
   extended?: { underlineColor: number; urlId?: number };
 }
 
-// Attributes.CM_MASK in xterm's common/buffer/Constants.ts: the color mode bits.
 const CM_MASK = 0x3000000;
 
-/**
- * A cell's underline color as sent: a 256-color index or a 24-bit value; -1
- * for none or the default; null if xterm's internals have moved.
- */
 export function underlineColor(cell: IBufferCell): number | null {
   const c = cell as unknown as CellInternals;
   if (typeof c.hasExtendedAttrs !== "function" || typeof c.getUnderlineColor !== "function") return null;
@@ -146,14 +98,149 @@ export function underlineColor(cell: IBufferCell): number | null {
   return c.getUnderlineColor();
 }
 
-/** The OSC 8 link a cell is in: xterm's id for it, 0 for none. For the self-test. */
 export function linkIdOf(cell: IBufferCell): number {
   const c = cell as unknown as CellInternals;
   if (typeof c.hasExtendedAttrs !== "function" || !c.hasExtendedAttrs()) return 0;
   return c.extended?.urlId ?? 0;
 }
 
-/** Whether every internal above is where 6.0.0 has it. For the self-test. */
+function rowFactory(term: Terminal): RowFactory | null {
+  const f = core(term)?._renderService?._renderer?.value?._rowFactory;
+  return f && typeof f.createRow === "function" ? f : null;
+}
+
+interface RowHook {
+  blank?: { placeholder: string; cluster: RegExp };
+  links?: (row: number) => readonly (readonly [number, number])[];
+}
+const hooks = new WeakMap<RowFactory, RowHook>();
+const unexpected = new WeakSet<RowFactory>();
+
+interface WidthCache {
+  get(c: string, bold: boolean, italic: boolean): number;
+}
+
+interface RowLine {
+  length: number;
+  getWidth(x: number): number;
+  getString(x: number): string;
+}
+
+const isRowLine = (v: unknown): v is RowLine => {
+  const l = v as Partial<RowLine> | null;
+  return !!l && typeof l.length === "number" && typeof l.getWidth === "function" && typeof l.getString === "function";
+};
+
+function hookRows(term: Terminal): { factory: RowFactory; hook: RowHook } | null {
+  const factory = rowFactory(term);
+  if (!factory || unexpected.has(factory)) return null;
+  let hook = hooks.get(factory);
+  if (hook) return { factory, hook };
+  hook = {};
+  hooks.set(factory, hook);
+  const create = (Object.getPrototypeOf(factory) as RowFactory).createRow;
+  factory.createRow = function (this: RowFactory, ...args: unknown[]): HTMLSpanElement[] {
+    const widths = args[8] as Partial<WidthCache> | undefined;
+    const own = hooks.get(this);
+    if (!own || typeof args[1] !== "number" || !isRowLine(args[0]) || typeof args[7] !== "number" || typeof widths?.get !== "function") {
+      unexpected.add(this);
+      delete (this as Partial<RowFactory>).createRow;
+      hooks.delete(this);
+      return create.apply(this, args);
+    }
+    const blank = own.blank;
+    if (blank) {
+      const cache = widths as WidthCache;
+      args[8] = { get: (c: string, bold: boolean, italic: boolean) => cache.get(c.startsWith(blank.placeholder) ? " " : c, bold, italic) };
+    }
+    let spans = create.apply(this, args);
+    const links = own.links?.(args[1]);
+    if (links?.length) spans = underlineSpans(spans, args[0], links);
+    if (blank) {
+      for (const span of spans) {
+        const text = span.textContent;
+        if (!text || !text.includes(blank.placeholder)) continue;
+        const blanked = text.replace(blank.cluster, " ");
+        span.textContent = blanked;
+        if (!blanked.trim()) span.classList.add("vault-terminal-placeholder");
+      }
+    }
+    return spans;
+  };
+  return { factory, hook };
+}
+
+function unhookIfIdle(factory: RowFactory, hook: RowHook): void {
+  if (hook.blank || hook.links) return;
+  delete (factory as Partial<RowFactory>).createRow;
+  hooks.delete(factory);
+}
+
+function underlineSpans(spans: HTMLSpanElement[], line: RowLine, links: readonly (readonly [number, number])[]): HTMLSpanElement[] {
+  const columns: number[] = [];
+  let expected = "";
+  for (let x = 0; x < line.length; x++) {
+    if (line.getWidth(x) === 0) continue;
+    const chars = line.getString(x) || " ";
+    expected += chars;
+    for (let i = 0; i < chars.length; i++) columns.push(x);
+  }
+  const texts = spans.map((s) => s.textContent ?? "");
+  if (!expected.startsWith(texts.join("").replace(/\u00a0/g, " "))) return spans;
+  const pieces = linkPieces(texts, columns, links);
+  if (!pieces) return spans;
+  const out: HTMLSpanElement[] = [];
+  spans.forEach((span, i) => {
+    const parts = pieces[i];
+    const underlined = [...span.classList].some((c) => c.startsWith("xterm-underline-"));
+    if (underlined || !parts.some((p) => p.link)) return void out.push(span);
+    const plain = ![...span.classList].some((c) => c.startsWith("xterm-fg-")) && !span.style.color;
+    for (const part of parts) {
+      const piece = span.cloneNode(false) as HTMLSpanElement;
+      piece.textContent = part.text;
+      if (part.link) piece.classList.add("xterm-underline-1", "vault-terminal-link");
+      if (part.link && plain) piece.classList.add("vault-terminal-link-plain");
+      out.push(piece);
+    }
+  });
+  return out;
+}
+
+export function blankPlaceholders(term: Terminal, placeholder: string, cluster: RegExp): boolean {
+  const hooked = hookRows(term);
+  if (!hooked) return false;
+  if (hooked.hook.blank) return true;
+  hooked.hook.blank = { placeholder, cluster };
+  term.refresh(0, term.rows - 1);
+  return false;
+}
+
+export function unblankPlaceholders(term: Terminal): void {
+  const factory = rowFactory(term);
+  const hook = factory && hooks.get(factory);
+  if (!factory || !hook?.blank) return;
+  hook.blank = undefined;
+  unhookIfIdle(factory, hook);
+}
+
+export function underlineLinks(term: Terminal, links: (row: number) => readonly (readonly [number, number])[]): boolean {
+  const hooked = hookRows(term);
+  if (!hooked) return false;
+  if (hooked.hook.links === links) return true;
+  hooked.hook.links = links;
+  term.refresh(0, term.rows - 1);
+  return true;
+}
+
+export function stopUnderliningLinks(term: Terminal): void {
+  const factory = rowFactory(term);
+  const hook = factory && hooks.get(factory);
+  if (!factory || !hook?.links) return;
+  hook.links = undefined;
+  unhookIfIdle(factory, hook);
+  term.refresh(0, term.rows - 1);
+}
+
 export function internalsPresent(term: Terminal): string[] {
   const c = core(term);
   const missing: string[] = [];
@@ -161,6 +248,7 @@ export function internalsPresent(term: Terminal): string[] {
   if (!c?._renderService?.dimensions?.css?.cell) missing.push("_renderService.dimensions.css.cell");
   if (typeof c?._viewport?.queueSync !== "function") missing.push("_viewport.queueSync");
   if (typeof c?._bufferService?.scrollLines !== "function") missing.push("_bufferService.scrollLines");
+  if (!rowFactory(term)) missing.push("_renderService._renderer.value._rowFactory.createRow");
   const cell = term.buffer.active.getLine(0)?.getCell(0) as unknown as CellInternals | undefined;
   if (typeof cell?.hasExtendedAttrs !== "function" || typeof cell.getUnderlineColor !== "function" || !cell.extended) missing.push("CellData underline color");
   return missing;

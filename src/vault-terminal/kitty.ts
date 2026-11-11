@@ -1,35 +1,21 @@
-// Kitty's graphics protocol, the part the terminal draws: catching its sequences in a program's output before xterm.js sees
-// them, reading what each says, keeping each terminal's pictures, and
-// answering. No Obsidian or xterm code here, so test/harness.ts can drive it
-// from plain Node. Drawing is pictures.ts.
-//
-// Protocol: https://sw.kovidgoyal.net/kitty/graphics-protocol/.
-// What claude was seen to send: a=T,U=1 with c and r, from
-// a PNG file (t=f), PNG bytes, or RGBA in 4,096-byte chunks; a=d,d=I to
-// remove; placeholders with the image id in a true-color foreground and both
-// row and column marks.
 
 import { closeSync, constants, fstatSync, openSync, readSync, realpathSync, statSync, unlinkSync } from "fs";
 import { tmpdir } from "os";
 import { basename, dirname, isAbsolute, join, normalize } from "path";
 import { inflateSync } from "zlib";
 
-/** The character a picture's cells hold. */
 export const PLACEHOLDER = 0x10eeee;
 export const PLACEHOLDER_TEXT = String.fromCodePoint(PLACEHOLDER);
 
-// kitty's rowcolumn-diacritics.txt, in order: the nth is the number n.
 const DIACRITIC_HEX =
   "0305,030D,030E,0310,0312,033D,033E,033F,0346,034A,034B,034C,0350,0351,0352,0357,035B,0363,0364,0365,0366,0367,0368,0369,036A,036B,036C,036D,036E,036F,0483,0484,0485,0486,0487,0592,0593,0594,0595,0597,0598,0599,059C,059D,059E,059F,05A0,05A1,05A8,05A9,05AB,05AC,05AF,05C4,0610,0611,0612,0613,0614,0615,0616,0617,0657,0658,0659,065A,065B,065D,065E,06D6,06D7,06D8,06D9,06DA,06DB,06DC,06DF,06E0,06E1,06E2,06E4,06E7,06E8,06EB,06EC,0730,0732,0733,0735,0736,073A,073D,073F,0740,0741,0743,0745,0747,0749,074A,07EB,07EC,07ED,07EE,07EF,07F0,07F1,07F3,0816,0817,0818,0819,081B,081C,081D,081E,081F,0820,0821,0822,0823,0825,0826,0827,0829,082A,082B,082C,082D,0951,0953,0954,0F82,0F83,0F86,0F87,135D,135E,135F,17DD,193A,1A17,1A75,1A76,1A77,1A78,1A79,1A7A,1A7B,1A7C,1B6B,1B6D,1B6E,1B6F,1B70,1B71,1B72,1B73,1CD0,1CD1,1CD2,1CDA,1CDB,1CE0,1DC0,1DC1,1DC3,1DC4,1DC5,1DC6,1DC7,1DC8,1DC9,1DCB,1DCC,1DD1,1DD2,1DD3,1DD4,1DD5,1DD6,1DD7,1DD8,1DD9,1DDA,1DDB,1DDC,1DDD,1DDE,1DDF,1DE0,1DE1,1DE2,1DE3,1DE4,1DE5,1DE6,1DFE,20D0,20D1,20D4,20D5,20D6,20D7,20DB,20DC,20E1,20E7,20E9,20F0,2CEF,2CF0,2CF1,2DE0,2DE1,2DE2,2DE3,2DE4,2DE5,2DE6,2DE7,2DE8,2DE9,2DEA,2DEB,2DEC,2DED,2DEE,2DEF,2DF0,2DF1,2DF2,2DF3,2DF4,2DF5,2DF6,2DF7,2DF8,2DF9,2DFA,2DFB,2DFC,2DFD,2DFE,2DFF,A66F,A67C,A67D,A6F0,A6F1,A8E0,A8E1,A8E2,A8E3,A8E4,A8E5,A8E6,A8E7,A8E8,A8E9,A8EA,A8EB,A8EC,A8ED,A8EE,A8EF,A8F0,A8F1,AAB0,AAB2,AAB3,AAB7,AAB8,AABE,AABF,AAC1,FE20,FE21,FE22,FE23,FE24,FE25,FE26,10A0F,10A38,1D185,1D186,1D187,1D188,1D189,1D1AA,1D1AB,1D1AC,1D1AD,1D242,1D243,1D244";
 export const DIACRITICS = DIACRITIC_HEX.split(",").map((h) => parseInt(h, 16));
 const DIACRITIC_VALUE = new Map(DIACRITICS.map((c, i) => [c, i]));
 
-/** The number a row or column mark stands for, or undefined if it isn't one. */
 export function diacriticValue(cp: number): number | undefined {
   return DIACRITIC_VALUE.get(cp);
 }
 
-/** Text with every placeholder and the marks that belong to it taken out; other marks stay. */
 export function withoutPlaceholders(text: string): string {
   if (!text.includes(PLACEHOLDER_TEXT)) return text;
   let out = "";
@@ -48,51 +34,24 @@ export function withoutPlaceholders(text: string): string {
 }
 
 const u16 = (s: string) => Array.from({ length: s.length }, (_, k) => `\\u${s.charCodeAt(k).toString(16).padStart(4, "0")}`).join("");
-// The table's marks as a regex alternative, in UTF-16 escapes: the search addon's regexes have no u flag.
 const MARKS_PATTERN = DIACRITICS.map((cp) => u16(String.fromCodePoint(cp))).join("|");
 
-/**
- * Find: a query holding one of the table's marks, as a regex that never
- * matches inside a picture's cells (right after a placeholder and its marks);
- * null for any other query, which can't match there anyway.
- */
 export function findPattern(query: string): string | null {
   if (![...query].some((ch) => DIACRITIC_VALUE.has(ch.codePointAt(0)!))) return null;
   const escaped = query.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
   return `(?<!${u16(PLACEHOLDER_TEXT)}(?:${MARKS_PATTERN})*)${escaped}`;
 }
 
-/**
- * How often the picture code has run, for the self-test: with "Show
- * pictures" off, neither count moves.
- */
 export const pictureCalls = { filter: 0, commands: 0 };
 
-// --- limits ---
-
-/**
- * One picture's pixels, width times height times four: claude's largest
- * (a 4,096-square raw file) fits. Checked from the keys or the PNG header
- * before anything is decoded.
- */
 export const PICTURE_LIMIT = 64 * 1024 * 1024;
-/**
- * Each terminal's pictures, stored data and decoded pixels together.
- * kitty's is 320 MB per screen buffer; this is per terminal, both buffers.
- */
+export const PNG_SHRINK_FACTOR = 4;
+export const PNG_DECODED_SHARE = 4;
 export const STORE_CAP = 256 * 1024 * 1024;
-/**
- * What a picture and each of its placements count against the cap beyond
- * their pixels, so many tiny ones can't grow memory under it. A picture keeps at most PLACEMENTS_KEPT placements, the
- * oldest going first.
- */
 export const IMAGE_COST = 4096;
 export const PLACEMENT_COST = 256;
 export const PLACEMENTS_KEPT = 1024;
-// An upload's chunks count this much each on top of their data, so empty ones can't pile up.
 const CHUNK_COST = 64;
-
-// --- catching the sequences ---
 
 const ESC = 0x1b;
 const CAN = 0x18;
@@ -104,53 +63,29 @@ export type Piece =
   | { kind: "graphics"; body: string }
   | { kind: "cancelled"; why: "CAN" | "SUB" | "ESC" | "size" };
 
-/**
- * The OSC 8 link wrapped around a run of placeholder cells. xterm.js 6.0.0
- * keeps a cell's underline color (the placement id) only when the cell has
- * an underline style or a link (its ExtendedAttrs.isEmpty), and kitty's
- * placeholders carry the color with no style. A link of the terminal's own,
- * with a fixed id so xterm keeps one entry for it, makes xterm keep the
- * color, without changing xterm or drawing anything. The link does nothing
- * when clicked (openUri ignores its scheme), and the picture covers its cells.
- */
 export const PICTURE_LINK = "vault-terminal:picture";
 const LINK_OPEN = Buffer.from(`\x1b]8;id=vault-terminal-picture;${PICTURE_LINK}\x1b\\`, "latin1");
 const LINK_CLOSE = Buffer.from("\x1b]8;;\x1b\\", "latin1");
-// How much of an OSC is kept to see whether it's a link of the program's own.
 const OSC_KEEP = 4096;
 
-/**
- * Splits a program's output into what xterm.js should parse and the kitty
- * graphics commands it would drop. Keeps its place across chunks: a
- * sequence split between two reads is found whole. A command cut short by
- * CAN, SUB or another escape is dropped, as any unterminated control string
- * is; one past the size limit is dropped whole, its rest swallowed.
- */
 export class GraphicsFilter {
   private carry: Uint8Array = new Uint8Array(0);
   private apc: Buffer[] | null = null;
   private apcSize = 0;
   private discarding = false;
-  /** Inside some other control string (OSC, DCS, SOS, PM, another APC), whose bytes pass through. */
   private string: "osc" | "other" | null = null;
   private osc = "";
-  /** The program has its own OSC 8 link open. */
   private programLink = false;
-  /** The terminal's link around a placeholder run is open. */
   private linked = false;
-  /** Set once pictures are turned off while a command was half-received: the rest is swallowed, nothing added. */
   draining = false;
-  /** A placeholder has been seen: until then, nothing needs painting. */
   sawPlaceholder = false;
 
   constructor(readonly maxSequence = Math.ceil((PICTURE_LIMIT * 4) / 3) + 4096, private keepPlacementIds = true) {}
 
-  /** Mid-command or holding bytes for the next chunk: switching the filter off now would print the rest. */
   get busy(): boolean {
     return this.apc !== null || this.carry.length > 0;
   }
 
-  /** Closes the terminal's link if a placeholder run left it open, so later text isn't inside it; what xterm should read, if anything. */
   closeLink(): Uint8Array | null {
     if (!this.linked) return null;
     this.linked = false;
@@ -194,7 +129,6 @@ export class GraphicsFilter {
             run = i;
             continue;
           }
-          // Another escape starts: the command is cut short, and the escape is the program's.
           pieces.push({ kind: "cancelled", why: "ESC" });
           this.apc = null;
           run = i;
@@ -222,7 +156,6 @@ export class GraphicsFilter {
         continue;
       }
       if (this.string) {
-        // Passes through; only the end is looked for.
         if (b === BEL && this.string === "osc") {
           this.endString();
           i++;
@@ -244,7 +177,7 @@ export class GraphicsFilter {
             continue;
           }
           this.string = null;
-          continue; // the escape starts something new
+          continue;
         }
         if (this.string === "osc" && this.osc.length < OSC_KEEP) this.osc += String.fromCharCode(b);
         i++;
@@ -303,7 +236,6 @@ export class GraphicsFilter {
         i++;
         continue;
       }
-      // A character beyond ASCII: is it a placeholder, or a mark of one?
       const len = b >= 0xf0 ? 4 : b >= 0xe0 ? 3 : b >= 0xc0 ? 2 : 1;
       if (len > 1 && i + len > n) {
         hold(i);
@@ -339,8 +271,6 @@ export class GraphicsFilter {
   }
 }
 
-// --- commands ---
-
 export interface Command {
   keys: Map<string, string>;
   payload: string;
@@ -364,13 +294,11 @@ function num(keys: Map<string, string>, k: string): number {
   return Number.isFinite(n) ? n : 0;
 }
 
-/** Base64, strictly (Node's own decoder never fails): null if it isn't. */
 export function base64(text: string): Buffer | null {
   if (!/^[A-Za-z0-9+/]*={0,2}$/.test(text) || text.length % 4 === 1) return null;
   return Buffer.from(text, "base64");
 }
 
-/** A PNG's width and height from its header, or null if it isn't a PNG. Nothing is decoded. */
 export function pngSize(data: Uint8Array): { width: number; height: number } | null {
   const sig = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
   if (data.length < 24 || sig.some((v, k) => data[k] !== v)) return null;
@@ -381,7 +309,6 @@ export function pngSize(data: Uint8Array): { width: number; height: number } | n
   return width > 0 && height > 0 ? { width, height } : null;
 }
 
-/** Pixel data's size, in bytes after inflating, for a PNG of this header: one filter byte per row, Adam7's passes for an interlaced one. */
 function pngDataSize(width: number, height: number, bitsPerPixel: number, interlaced: boolean): number {
   const rowBytes = (w: number) => 1 + Math.ceil((w * bitsPerPixel) / 8);
   if (!interlaced) return height * rowBytes(width);
@@ -397,12 +324,6 @@ function pngDataSize(width: number, height: number, bitsPerPixel: number, interl
 
 const PNG_CHANNELS: Record<number, number> = { 0: 1, 2: 3, 3: 1, 4: 2, 6: 4 };
 
-/**
- * Whether a PNG would load (75, 76): its chunks are whole, through IEND,
- * and its pixel data inflates to at least what its header needs. The
- * header's size has already been checked against the limit, so inflating
- * is bounded. A truncated or corrupt PNG fails here, before any reply.
- */
 export function pngLoads(data: Uint8Array, width: number, height: number): boolean {
   const dv = new DataView(data.buffer, data.byteOffset, data.byteLength);
   const ihdr = data.subarray(16, 29);
@@ -410,8 +331,6 @@ export function pngLoads(data: Uint8Array, width: number, height: number): boole
   const depth = ihdr[8];
   const color = ihdr[9];
   const channels = PNG_CHANNELS[color];
-  // The header's own rules: the depths each color type allows, and the one
-  // compression and filter method PNG has; interlace 0 or 1.
   const depths: Record<number, number[]> = { 0: [1, 2, 4, 8, 16], 2: [8, 16], 3: [1, 2, 4, 8], 4: [8, 16], 6: [8, 16] };
   if (!channels || !depths[color].includes(depth) || ihdr[10] !== 0 || ihdr[11] !== 0 || ihdr[12] > 1) return false;
   const idat: Uint8Array[] = [];
@@ -433,39 +352,23 @@ export function pngLoads(data: Uint8Array, width: number, height: number): boole
   try {
     return inflateSync(Buffer.concat(idat), { maxOutputLength: need }).length >= need;
   } catch (e) {
-    // More than the header needs is still a picture that loads.
     return (e as NodeJS.ErrnoException).code === "ERR_BUFFER_TOO_LARGE";
   }
 }
 
-// --- files ---
-
-/** Every failure to read a picture file gets this one reply, as kitty's docs require. */
 export const READ_ERROR = "EBADF:Failed to read image file";
 
-// Never read, whatever the file: kitty's docs name these as sensitive.
 const SENSITIVE = ["/dev", "/proc", "/sys", "/private/var/run"];
 
 export interface FileRead {
   data: Uint8Array | null;
-  /** Why it failed, for the log only; the program gets READ_ERROR. */
   why?: string;
 }
 
-/**
- * Reads a picture file a program named: only a regular file, with symlinks
- * followed and loops refused, checked on the path before anything opens it
- * (opening a pipe or a device can have side effects). size and offset are
- * kitty's S and O; a file shorter than claimed fails. opened is told every
- * path actually opened, for the self-test.
- */
 export function readPictureFile(path: string, size: number, offset: number, limit: number, opened?: (p: string) => void): FileRead {
   if (!isAbsolute(path) || path.includes("\0")) return { data: null, why: "not an absolute path" };
   const sensitive = (p: string) => SENSITIVE.some((s) => p === s || p.startsWith(`${s}/`));
   if (sensitive(normalize(path))) return { data: null, why: "a sensitive folder" };
-  // Where the symlinks lead, resolved once: the folder check, the type check
-  // and the open all use it, so a link can't lead past the first or be
-  // swapped between the second and the third (a loop fails here).
   let real: string;
   let st;
   try {
@@ -483,7 +386,6 @@ export function readPictureFile(path: string, size: number, offset: number, limi
   try {
     opened?.(path);
     fd = openSync(real, constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOCTTY | constants.O_NOFOLLOW);
-    // The same file the check saw: not swapped for something else between the two.
     const fst = fstatSync(fd);
     if (!fst.isFile() || fst.ino !== st.ino || fst.dev !== st.dev) return { data: null, why: "changed while being opened" };
     const buf = Buffer.alloc(want);
@@ -510,18 +412,11 @@ function realOrSame(p: string): string {
   }
 }
 
-/** Folders a temporary file (t=t) may be deleted from: the system's temporary folders. */
 export function tempFolders(): string[] {
   const dirs = [tmpdir(), process.env.TMPDIR ?? "", "/tmp", "/var/tmp", "/dev/shm"].filter(Boolean);
   return [...new Set(dirs.flatMap((d) => [normalize(d).replace(/\/+$/, ""), realOrSame(d).replace(/\/+$/, "")]))];
 }
 
-/**
- * The path to delete a temporary file by, after reading, or null if it
- * stays: in a temporary folder, with the protocol's marker in its path
- * (76). It's the checked folder's real path, so a folder swapped for a
- * symlink after the check can't move the delete elsewhere.
- */
 export function tempToDelete(path: string): string | null {
   if (!path.includes("tty-graphics-protocol")) return null;
   const dir = realOrSame(dirname(path));
@@ -532,65 +427,43 @@ export function deletableTemp(path: string): boolean {
   return tempToDelete(path) !== null;
 }
 
-// --- the store ---
-
 export interface StoredImage {
-  /** Its command's keys and quietness, for a failure found when it's decoded. */
   reply?: { keys: Map<string, string>; q: number };
   id: number;
-  /** kitty's image number (I), 0 if none. */
   number: number;
   width: number;
   height: number;
-  /** PNG bytes, decoded when drawn; or null for raw pixels. */
   png: Uint8Array | null;
-  /** RGBA pixels, four bytes each; or null for a PNG. */
+  decode?: { width: number; height: number };
   rgba: Uint8Array | null;
-  /** What it counts against the cap: its data, its decoded pixels (raw pixels are held twice, as data and decoded), its bookkeeping and its placements'. */
   bytes: number;
-  /** When it was stored, in order. */
   serial: number;
-  /** When it was last drawn, in the same order. */
   used: number;
 }
 
 export interface Placement {
-  /** 0: from the picture's size and the cell size. */
   cols: number;
   rows: number;
 }
 
 export interface GraphicsHost {
-  /** A reply to the program, through the terminal's input. */
   reply(text: string): void;
-  /** Which of these images cells in this terminal (the scrollback included) still show: one pass for all. */
   inUse?(ids: number[]): Set<number>;
-  /** An image left the store; replaced: new data came under its id, so its old pixels can show until the new ones are ready. */
   dropped?(img: StoredImage, replaced?: boolean): void;
-  /** What happened, in order, for the self-test. */
   log?(event: string): void;
-  /** Told every file path opened. */
   opened?(path: string): void;
 }
 
-/** Ids for images a program named only by number (I), out of the way of ids programs choose. */
 const ASSIGNED_BASE = 0xfff00000;
 
-/**
- * One terminal's pictures: what each graphics command does to them, and
- * the reply it gets. Pictures belong to their terminal.
- */
 export class KittyGraphics {
   readonly images = new Map<number, StoredImage>();
-  /** Virtual placements (U=1), by image id, then placement id (0 for none). */
   readonly placements = new Map<number, Map<number, Placement>>();
   stored = 0;
-  /** Freed by an uppercase delete while cells still showed them: freed once they don't. */
   readonly pendingFree = new Set<number>();
   private serial = 0;
   private nextAssigned = ASSIGNED_BASE;
   private upload: { keys: Map<string, string>; parts: string[]; size: number; q: number } | null = null;
-  /** Counts, for the self-test: how many commands were handled, and how many pictures decoded from data. */
   readonly counts = { commands: 0, refusedForSize: 0, decodedChecks: 0 };
 
   constructor(private host: GraphicsHost, readonly limit = PICTURE_LIMIT, readonly cap = STORE_CAP) {}
@@ -603,7 +476,6 @@ export class KittyGraphics {
     img.used = ++this.serial;
   }
 
-  /** Everything gone: the setting turned off, or the terminal closed. */
   clear(): void {
     for (const img of this.images.values()) this.host.dropped?.(img);
     this.images.clear();
@@ -658,7 +530,6 @@ export class KittyGraphics {
     this.run(cmd, num(cmd.keys, "q"));
   }
 
-  /** A stored PNG failed to load when decoded: it goes, with the error reply its command asked for. */
   failedToLoad(img: StoredImage): void {
     if (this.images.get(img.id) !== img) return;
     this.drop(img.id);
@@ -667,7 +538,6 @@ export class KittyGraphics {
     if (img.reply) this.answer(img.reply.keys, img.reply.q, "EBADPNG:the PNG doesn't load", img.id);
   }
 
-  /** A command cut short by CAN, SUB, an escape or the size limit: an upload it continued is dropped with it. */
   cancelled(why: string): void {
     if (!this.upload) return;
     this.upload = null;
@@ -701,7 +571,6 @@ export class KittyGraphics {
     const t = keys.get("t") ?? "d";
     if (f !== 24 && f !== 32 && f !== 100) return this.answer(keys, q, "EINVAL:unknown format");
     const bpp = f === 24 ? 3 : 4;
-    // Raw pixels' size is known from the keys before anything is read.
     if (f !== 100) {
       const s = num(keys, "s");
       const v = num(keys, "v");
@@ -720,7 +589,7 @@ export class KittyGraphics {
         try {
           unlinkSync(doomed);
         } catch {
-          // already gone
+          /* empty */
         }
       }
       if (!read.data) {
@@ -729,7 +598,6 @@ export class KittyGraphics {
       }
       data = read.data;
     } else {
-      // Shared memory (t=s) isn't read: the spike saw claude never use it.
       return this.answer(keys, q, READ_ERROR);
     }
     if (keys.get("o") === "z") {
@@ -743,15 +611,18 @@ export class KittyGraphics {
     let height: number;
     let png: Uint8Array | null = null;
     let rgba: Uint8Array | null = null;
+    let decode: { width: number; height: number } | undefined;
     if (f === 100) {
       const size = pngSize(data);
       if (!size) return this.answer(keys, q, "EBADPNG:not a PNG");
-      if (size.width * size.height * 4 > this.limit) return this.refuseSize(keys, q, `PNG header says ${size.width}x${size.height}`);
+      const pixels = size.width * size.height * 4;
+      if (pixels > this.limit * PNG_SHRINK_FACTOR) return this.refuseSize(keys, q, `PNG header says ${size.width}x${size.height}`);
       ({ width, height } = size);
-      // A query is answered now, so its PNG is loaded now. A picture sent
-      // is loaded when it's decoded, off the main thread, which reports a
-      // failure then (failedToLoad): inflating a large PNG here would stall
-      // the window, and the decode would do it again anyway.
+      const most = this.limit / PNG_DECODED_SHARE;
+      if (pixels > most) {
+        const k = Math.sqrt(most / pixels);
+        decode = { width: Math.max(1, Math.floor(width * k)), height: Math.max(1, Math.floor(height * k)) };
+      }
       if (a === "q" && !pngLoads(data, width, height)) return this.answer(keys, q, "EBADPNG:the PNG doesn't load");
       png = data;
     } else {
@@ -759,7 +630,6 @@ export class KittyGraphics {
       height = num(keys, "v");
       if (data.length < width * height * bpp) return this.answer(keys, q, "ENODATA:Insufficient image data");
       this.counts.decodedChecks++;
-      // A copy of exactly the pixels: a view would keep all the data received alive.
       rgba = bpp === 4 ? new Uint8Array(data.subarray(0, width * height * 4)) : rgbToRgba(data, width * height);
     }
     if (a === "q") return this.answer(keys, q, "OK");
@@ -767,20 +637,19 @@ export class KittyGraphics {
     const number = num(keys, "I");
     if (!id && number) id = this.nextAssigned++;
     if (id && this.images.has(id)) {
-      // Re-sent data replaces the image, and all its placements go.
       this.drop(id, true);
       this.placements.delete(id);
       this.log(`replaced ${id}`);
     }
-    // Only the keys a reply uses: a command's other keys can be any size, and nothing counts them.
     const replyKeys = new Map([...keys].filter(([k]) => k === "i" || k === "I" || k === "p"));
-    const img: StoredImage = { reply: { keys: replyKeys, q }, id, number, width, height, png, rgba, bytes: IMAGE_COST + (png ? png.length + width * height * 4 : width * height * 8), serial: ++this.serial, used: this.serial };
+    const shown = decode ?? { width, height };
+    const img: StoredImage = { reply: { keys: replyKeys, q }, id, number, width, height, png, decode, rgba, bytes: IMAGE_COST + (png ? png.length + shown.width * shown.height * 4 : width * height * 8), serial: ++this.serial, used: this.serial };
     if (id) {
       this.images.set(id, img);
       this.stored += img.bytes;
       this.evict(id);
     }
-    this.log(`stored ${id} ${width}x${height} ${png ? "png" : "rgba"}`);
+    this.log(`stored ${id} ${width}x${height} ${png ? "png" : "rgba"}${decode ? `, decoded at ${decode.width}x${decode.height}` : ""}`);
     if (a === "T") return this.place(keys, q, id);
     this.answer(keys, q, "OK", id);
   }
@@ -822,12 +691,6 @@ export class KittyGraphics {
     this.answer(keys, q, "OK", img.id);
   }
 
-  /**
-   * Deletes, as kitty specifies: only i, I, r, R, n and N reach
-   * virtual placements, which are the only placements here, so every other
-   * kind deletes nothing. Lowercase keeps the data; uppercase frees it
-   * unless cells still show it.
-   */
   private remove(keys: Map<string, string>): void {
     const d = keys.get("d") ?? "a";
     const free = d === d.toUpperCase();
@@ -867,7 +730,6 @@ export class KittyGraphics {
       else this.log(`delete ${d} ${id}${p !== null ? ` p=${p}` : ""}: placements removed`);
     }
     if (!toFree.length) return;
-    // One look through the scrollback for all of them.
     const shown = this.host.inUse?.(toFree) ?? new Set<number>();
     for (const id of toFree) {
       if (shown.has(id)) {
@@ -880,7 +742,6 @@ export class KittyGraphics {
     }
   }
 
-  /** Frees what an uppercase delete left while cells still showed it, once none do: one look for all of them. */
   sweep(): void {
     for (const id of this.pendingFree) if (this.placements.has(id) || !this.images.has(id)) this.pendingFree.delete(id);
     if (!this.pendingFree.size) return;
@@ -892,7 +753,6 @@ export class KittyGraphics {
     }
   }
 
-  /** Adds to what a picture counts against the cap. */
   private cost(img: StoredImage, n: number): void {
     img.bytes += n;
     if (this.images.get(img.id) === img) this.stored += n;
@@ -907,10 +767,6 @@ export class KittyGraphics {
     this.host.dropped?.(img, replaced);
   }
 
-  /**
-   * Past the cap, images with no placements go first, oldest first (kitty's
-   * rule), then the least recently drawn; never the one just stored.
-   */
   private evict(keep: number): void {
     if (this.stored <= this.cap) return;
     const order = [...this.images.values()]
@@ -925,7 +781,6 @@ export class KittyGraphics {
   }
 }
 
-/** One chunk of a chunked upload is base64 by itself; every chunk but the last a whole number of groups. */
 function chunkIsBase64(text: string, more: boolean): boolean {
   if (!/^[A-Za-z0-9+/]*={0,2}$/.test(text)) return false;
   return more ? text.length % 4 === 0 && !text.includes("=") : text.length % 4 !== 1;
@@ -942,29 +797,18 @@ function rgbToRgba(rgb: Uint8Array, pixels: number): Uint8Array {
   return out;
 }
 
-// --- placeholders ---
-
 export interface PlaceholderCell {
-  /** The image id: the foreground color, plus a third mark's byte on top. */
   id: number;
-  /** The placement id, from the underline color; 0 for any. */
   placement: number;
   row: number;
   col: number;
 }
 
 export interface CellColors {
-  /** The foreground color as sent: a 256-color index or a 24-bit value; -1 for the default. */
   fg: number;
-  /** The underline color as sent, -1 for none. */
   underline: number;
 }
 
-/**
- * Reads one placeholder cell, given its marks and colors and the cell to
- * its left, if that was a placeholder too. Missing marks are inherited from
- * the left by kitty's three rules; otherwise they count as 0.
- */
 export function readPlaceholder(marks: number[], colors: CellColors, left: (PlaceholderCell & { colors: CellColors; msb: number }) | null): PlaceholderCell & { colors: CellColors; msb: number } {
   const same = !!left && left.colors.fg === colors.fg && left.colors.underline === colors.underline;
   let row = marks[0] ?? 0;

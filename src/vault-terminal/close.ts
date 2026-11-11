@@ -1,16 +1,11 @@
-// What the confirm before closing a terminal says (core.ts, confirmClose),
-// kept free of Obsidian so test/harness.ts can check it.
 
-/** What keeps a terminal from closing without asking (view.ts, closeReason). */
 export interface CloseReason {
-  /** An agent working or waiting for the user, rather than a program running in a shell. */
   agent: boolean;
   name: string;
-  /** Text typed into the agent's prompt and not yet sent (a host's reason: the terminal can't tell). */
   draft?: boolean;
+  background?: boolean;
 }
 
-/** The confirm's title and its sentence, for one terminal or several. */
 export function closeText(reasons: CloseReason[]): { title: string; text: string } {
   const count = reasons.length;
   const title = count === 1 ? "Close this terminal?" : `Close ${count} terminals?`;
@@ -18,6 +13,7 @@ export function closeText(reasons: CloseReason[]): { title: string; text: string
   if (count === 1) {
     const r = reasons[0];
     if (r.draft) return { title, text: `${r.name} has text you haven't sent. Closing ends the session and loses it.` };
+    if (r.background) return { title, text: "Its agent still has work running in the background, such as a shell or a sub-agent. Closing ends it." };
     if (r.agent) return { title, text: "Its agent is working or waiting for you. Closing ends it." };
     return { title, text: `${r.name} is still running in it. Closing ends it.` };
   }

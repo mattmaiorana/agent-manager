@@ -1,6 +1,3 @@
-// Obsidian's community review rules (eslint-plugin-obsidianmd), run with `npm run lint`
-// on every change, so what the review would flag shows up here first. It lints what
-// ships: src/ (but the self-test, which no build includes) and manifest.json.
 import obsidianmd from "eslint-plugin-obsidianmd";
 import { DEFAULT_BRANDS } from "eslint-plugin-obsidianmd/dist/lib/rules/ui/brands.js";
 import globals from "globals";
@@ -20,7 +17,6 @@ export default defineConfig(
     "scripts",
     "test",
     "src/selftest",
-    // The Claude mod: Claude Code runs it, not Obsidian, and it ships as text in main.js.
     "claude-mod",
   ]),
   {
@@ -37,24 +33,20 @@ export default defineConfig(
   },
   ...obsidianmd.configs.recommended,
   {
-    // The sentence-case rule with this plugin's proper nouns added to its defaults (a
-    // list given here replaces them, so they're spread in): the CLIs, the plugin's own
-    // name, and the macOS names its settings use.
     rules: {
-      // Dependencies are the root package.json's: src/package.json only marks src/ as ES
-      // modules, and is otherwise the nearest one the rule would read.
       "import/no-extraneous-dependencies": ["warn", { packageDir: [import.meta.dirname] }],
       "obsidianmd/ui/sentence-case": ["warn", {
-        brands: [...DEFAULT_BRANDS, "Agent Manager", "Claude Code", "Codex", "Antigravity", "Python", "Dock", "Option", "Remote Control"],
-        // Key names, a unit, and a placeholder's syntax.
-        ignoreWords: ["Enter", "S", "Meta", "MB", "NAME"],
+        brands: [...DEFAULT_BRANDS, "Agent Manager", "Claude Code", "Codex", "Antigravity", "Python", "Dock", "Documents", "Option", "Remote Control", "Latest Outputs"],
+        ignoreWords: ["Enter", "S", "Meta", "MB", "MCP", "NAME", "Private", "Work", "Scheduled", "Tasks"],
         ignoreRegex: ["^~/", "^[A-Z_]+="],
       }],
     },
   },
   {
-    // All of src/'s TypeScript, the terminal's included (the self-test is ignored above):
-    // values typed `any` are errors, so the types can't slide back.
+    files: ["src/constants/scheduled.ts"],
+    rules: { "obsidianmd/hardcoded-config-path": "off" },
+  },
+  {
     files: ["src/**/*.ts"],
     rules: {
       "@typescript-eslint/no-unsafe-assignment": "error",

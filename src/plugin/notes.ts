@@ -1,5 +1,3 @@
-// Sessions started from a note or a folder, the plugin's side: the command, the file
-// menu, and the write-back state each view keeps.
 
 import type { TAbstractFile } from "obsidian";
 import { import_obsidian } from "../externals.js";
@@ -9,20 +7,14 @@ import { ChoicePickerModal } from "../ui/modals.js";
 import type { Session } from "../types.js";
 import type { AgentManagerPlugin } from "./main.js";
 class NoteMethods {
-  // Clear a view's note write-back state, so a fresh launch or a followed re-host
-  // writes its link again rather than keep the last one.
   resetNoteWriteback(this: AgentManagerPlugin, view: Session): void {
     view._noteUrlWritten = null;
     view._noteWritten = false;
     view._noteGone = false;
     view._noteTriedAt = 0;
-    // A write that began before this reset (a re-host mid-write) mustn't mark the new id done.
     view._noteGen = (view._noteGen || 0) + 1;
-    // Its ticket lines are written again too.
     view.resetTicketWriteback?.();
   }
-  // Was another session started from this note after `at`? It holds the note's links,
-  // even if this one learns its id later. Session tabs Obsidian hasn't loaded count too.
   newerLaunchFrom(this: AgentManagerPlugin, notePath: string, at: number | null | undefined, self: Session | null): boolean {
     const latest = this._noteLaunches?.get(notePath);
     if (typeof latest === "number" && latest > (at || 0)) return true;
@@ -34,20 +26,16 @@ class NoteMethods {
     }
     return false;
   }
-  // Can a session start from this file? A note, or a folder other than the vault's root.
   canStartFrom(this: AgentManagerPlugin, file: TAbstractFile): boolean {
     if (file instanceof import_obsidian.TFile) return file.extension === "md";
     return file instanceof import_obsidian.TFolder && !file.isRoot();
   }
-  // Start a session about a note or a folder, named for it. With more than one CLI
-  // offered and none named, a picker asks which, the default first.
   startFromFile(this: AgentManagerPlugin, file: TAbstractFile, backend: BackendKey | null = null): void {
     if (!this.canStartFrom(file)) return;
     const isNote = file instanceof import_obsidian.TFile;
     const title = isNote ? file.basename : file.name;
     const go = (key: BackendKey) => this.startSession(title, null, { backendOverride: key, ...(isNote ? { notePath: file.path } : { folderPath: file.path }) });
     const offered = this.getBrowserBackends();
-    // A ticket's backend property picks its CLI.
     const named = backend || (isNote ? this.ticketBackend(file.path) : null);
     if (named || offered.length < 2) { void go(named || offered[0]); return; }
     const def = this.getCurrentBackend();
@@ -58,7 +46,6 @@ class NoteMethods {
       onPick: go,
     }).open();
   }
-  // The command and the file menu's item.
   registerNoteLaunch(this: AgentManagerPlugin): void {
     this.addCommand({
       id: "start-session-from-note",

@@ -1,8 +1,5 @@
-// Tickets and overviews, the plugin's side: what turning tickets on writes where it's
-// missing, the one main session a ticket has, the Tickets button's note, and making a
-// new ticket or overview (a command and the folder menu).
 
-import type { TFile, TFolder, WorkspaceLeaf } from "obsidian";
+import type { MarkdownView, TFile, TFolder, WorkspaceLeaf } from "obsidian";
 import type { Session } from "../sessions/controller.js";
 import { isBrowser } from "../browser/view.js";
 import type { BackendKey } from "../constants/backends.js";
@@ -10,44 +7,37 @@ import { import_obsidian } from "../externals.js";
 import { MAIN_SESSION_PROPERTY } from "../constants/names.js";
 import { OVERVIEW_TEMPLATE, TICKET_TEMPLATE, TICKETS_BASE_NAME, ticketsBase } from "../constants/tickets.js";
 import { isTicket } from "../context/launch-context.js";
+import { FROM_TASK_PROPERTY, followUpName, linkTarget, wikilink, withRead } from "../scheduled/follow-up.js";
+import type { ScheduledTask } from "../scheduled/task-model.js";
 import { ticketFileName, withNotes } from "../tickets/new-ticket.js";
 import { errorMessage, stringOf, withinVault } from "../util/guards.js";
+import { isArchived } from "../util/paths.js";
 import { ChoicePickerModal } from "../ui/modals.js";
 import type { AgentManagerPlugin } from "./main.js";
 
-// Inside a folder named Archive, at any depth.
-function isArchived(path: string): boolean {
-  return path.split("/").includes("Archive");
-}
+export interface ProjectGroup { label: string | null; options: { text: string; value: string }[] }
+import { notice } from "../vault-terminal/notice";
+
 class TicketMethods {
-  // Is the note at this vault path a ticket (tickets on, `type: ticket`, not the template)?
   isTicketNote(this: AgentManagerPlugin, notePath: string | null | undefined): boolean {
     return !!notePath && isTicket(notePath, this.contextVault(), { useTickets: this.ticketsOn(), templatePath: this.ticketTemplatePath() });
   }
-  // A note's property, as a string ("" when it's missing or not text).
   noteProperty(this: AgentManagerPlugin, notePath: string, key: string): string {
     const v: unknown = this.contextVault().frontmatter(notePath)?.[key];
     return typeof v === "string" ? v.trim() : "";
   }
-  // The session id in a note's main-session link, or null.
   mainSessionIdOf(this: AgentManagerPlugin, notePath: string): string | null {
     const m = this.noteProperty(notePath, MAIN_SESSION_PROPERTY).match(/[?&]session=([^&#\s]+)/);
     if (!m) return null;
     try { return decodeURIComponent(m[1]); } catch { return null; }
   }
-  // The CLI a ticket names in its backend property, if it's one this vault offers.
   ticketBackend(this: AgentManagerPlugin, notePath: string | null | undefined): BackendKey | null {
     if (!notePath || !this.isTicketNote(notePath)) return null;
-    const key = this.backendFromName(this.noteProperty(notePath, "backend"));
+    const key = this.backendFromName(this.noteProperty(notePath, "cli"));
     return key && this.getBrowserBackends().includes(key) ? key : null;
   }
-  // The tab holding a ticket's main session, open or still starting, or null: the latest
-  // launch from the ticket (which holds its link, whether or not it has written it yet),
-  // else the tab whose session the ticket's main-session names (a resume). Tabs Obsidian
-  // hasn't loaded count too.
   ticketMainLeaf(this: AgentManagerPlugin, notePath: string): WorkspaceLeaf | null {
     const id = this.mainSessionIdOf(notePath);
-    // The latest launch from this note this load, which holds its link (newerLaunchFrom).
     const latest = this._noteLaunches?.get(notePath);
     let named: WorkspaceLeaf | null = null;
     let claim: { leaf: WorkspaceLeaf; at: number } | null = null;
@@ -57,8 +47,6 @@ class TicketMethods {
       const s = v ? null : this.savedSessionState(leaf);
       const sid = v ? v._ownSessionId() : s?.sessionId || null;
       if (id && sid === id && !named) named = leaf;
-      // A launch from the note that hasn't written its link yet (still starting, or a
-      // new main waiting to run): the newest one, and only if no later launch replaced it.
       const from = v ? v._notePath : s?.notePath;
       const at = v ? (v._noteClaim ? v._noteLaunchAt : null) : (s?.noteClaim ? s.noteLaunchAt : null);
       if (from !== notePath || typeof at !== "number") continue;
@@ -67,18 +55,14 @@ class TicketMethods {
     }
     return claim?.leaf ?? named;
   }
-  // The tickets base's vault path: in the AGENTS.md folder.
   ticketsBasePath(this: AgentManagerPlugin): string {
     const f = this.startFolder();
     return f ? `${f}/${TICKETS_BASE_NAME}` : TICKETS_BASE_NAME;
   }
-  // Make a folder and its parents, as needed.
   async ensureFolder(this: AgentManagerPlugin, dir: string): Promise<void> {
     if (!dir || this.app.vault.getAbstractFileByPath(dir)) return;
     await this.app.vault.createFolder(dir);
   }
-  // Turning tickets on writes the tickets base and the ticket template, each only where
-  // it's missing, and says what it wrote. Never overwrites.
   async ensureTicketFiles(this: AgentManagerPlugin): Promise<void> {
     const written: string[] = [];
     const write = async (p: string, text: string) => {
@@ -88,22 +72,17 @@ class TicketMethods {
         await this.app.vault.create(p, text);
         written.push(p);
       } catch (e) {
-        new import_obsidian.Notice(`Agent Manager: couldn't create ${p}: ${stringOf(errorMessage(e))}`);
+        notice(`Agent Manager: couldn't create ${p}: ${stringOf(errorMessage(e))}`);
       }
     };
     const template = this.ticketTemplatePath();
     await write(this.ticketsBasePath(), ticketsBase(this.app.vault.getName(), template));
     await write(template, TICKET_TEMPLATE);
-    if (written.length) new import_obsidian.Notice(`Agent Manager: tickets are on. Created ${written.join(" and ")}.`, 8000);
+    if (written.length) notice(`Agent Manager: tickets are on. Created ${written.join(" and ")}.`);
   }
-  // ---- Files sessions send ----
-  // Save them at all (on unless turned off).
   sentFilesOn(this: AgentManagerPlugin): boolean {
     return this.pluginData.sentFiles !== "off";
   }
-  // Where a sent file goes, as a free vault path: by Obsidian's attachment rule for the
-  // note, unless the plugin's own rule is set (a folder path; "./" at its start means
-  // beside the note). Its folder is made if it's missing.
   async sentFileDestination(this: AgentManagerPlugin, fileName: string, sourcePath: string): Promise<string> {
     const own = this.pluginData.sentFiles === "own" ? withinVault(stringOf(this.pluginData.sentFilesFolder ?? "").trim()) || "./Files" : "";
     let dest: string;
@@ -123,8 +102,6 @@ class TicketMethods {
     await this.ensureFolder(parent);
     return dest;
   }
-  // ---- The tickets note ----
-  // The note Open tickets opens: the setting, else the tickets base.
   ticketsNotePath(this: AgentManagerPlugin): string {
     const v = withinVault(stringOf(this.pluginData.ticketsNote ?? "").trim().replace(/^\/+/, ""));
     return v ? (0, import_obsidian.normalizePath)(v) : this.ticketsBasePath();
@@ -132,12 +109,9 @@ class TicketMethods {
   async openTicketsNote(this: AgentManagerPlugin): Promise<void> {
     const p = this.ticketsNotePath();
     const f = this.app.vault.getAbstractFileByPath(p);
-    if (!(f instanceof import_obsidian.TFile)) { new import_obsidian.Notice(`Agent Manager: there's no “${p}” in this vault. Set the tickets note in Settings → Agent Manager.`, 8000); return; }
+    if (!(f instanceof import_obsidian.TFile)) { notice(`Agent Manager: there's no “${p}” in this vault. Set the tickets note in Settings → Agent Manager.`); return; }
     await this.app.workspace.getLeaf(false).openFile(f);
   }
-  // ---- The custom button ----
-  // What it opens: the setting (a URL, or a vault path), else the tickets note while
-  // tickets are on, else nothing, and the button isn't shown.
   customButtonTarget(this: AgentManagerPlugin): { url: string } | { path: string } | null {
     const v = stringOf(this.pluginData.customButtonTarget ?? "").trim();
     if (/^[a-z][a-z0-9+.-]*:/i.test(v)) return { url: v };
@@ -145,8 +119,6 @@ class TicketMethods {
     if (p) return { path: (0, import_obsidian.normalizePath)(p) };
     return this.ticketsOn() ? { path: this.ticketsNotePath() } : null;
   }
-  // Its icon: the setting when it names one, else a ticket while it opens the tickets
-  // note, else a link.
   customButtonIcon(this: AgentManagerPlugin): string {
     const v = stringOf(this.pluginData.customButtonIcon ?? "").trim();
     if (v && import_obsidian.getIcon(v)) return v;
@@ -156,40 +128,31 @@ class TicketMethods {
     const t = this.customButtonTarget();
     if (!t) return;
     if ("url" in t) {
-      try { new URL(t.url); } catch { new import_obsidian.Notice(`Agent Manager: “${t.url}” isn't a link that can be opened. Set what the custom button opens in Settings → Agent Manager.`, 8000); return; }
+      try { new URL(t.url); } catch { notice(`Agent Manager: “${t.url}” isn't a link that can be opened. Set what the custom button opens in Settings → Agent Manager.`); return; }
       window.open(t.url);
       return;
     }
     const f = this.app.vault.getAbstractFileByPath(t.path);
-    if (!(f instanceof import_obsidian.TFile)) { new import_obsidian.Notice(`Agent Manager: there's no “${t.path}” in this vault. Set what the custom button opens in Settings → Agent Manager.`, 8000); return; }
+    if (!(f instanceof import_obsidian.TFile)) { notice(`Agent Manager: there's no “${t.path}” in this vault. Set what the custom button opens in Settings → Agent Manager.`); return; }
     await this.app.workspace.getLeaf(false).openFile(f);
   }
-  // ---- New ticket, new overview ----
-  // A file name not yet taken in a folder: "<base>.md", else "<base> 2.md", and so on.
   freeNotePath(this: AgentManagerPlugin, dir: string, base: string): string {
     for (let n = 1; ; n++) {
       const p = (0, import_obsidian.normalizePath)(`${dir ? dir + "/" : ""}${base}${n > 1 ? ` ${n}` : ""}.md`);
       if (!this.app.vault.getAbstractFileByPath(p)) return p;
     }
   }
-  // A template's text: the note at this path, else the built-in one.
   async templateText(this: AgentManagerPlugin, templatePath: string, builtIn: string): Promise<string> {
     const f = templatePath && this.app.vault.getAbstractFileByPath(templatePath);
     if (f instanceof import_obsidian.TFile) {
-      try { return await this.app.vault.read(f); } catch { /* the built-in one */ }
+      try { return await this.app.vault.read(f); } catch { /* empty */ }
     }
     return builtIn;
   }
-  // Where a new ticket for a folder goes: its Tickets folder (or the folder itself, when
-  // it's a Tickets folder).
   ticketsFolderFor(this: AgentManagerPlugin, folder: TFolder): string {
     const p = folder.isRoot() ? "" : folder.path;
     return folder.name === "Tickets" ? p : (p ? `${p}/Tickets` : "Tickets");
   }
-  // Make a ticket from the template in a folder's Tickets folder and open it. From the
-  // New ticket card it's named as typed, its notes go under the notes heading, and its
-  // backend property is the CLI picked; with no name, it's "Untitled ticket" with its
-  // name put up for editing, as a new note's is.
   async newTicket(this: AgentManagerPlugin, folder: TFolder, opts: { name?: string; backend?: BackendKey | null; notes?: string } = {}): Promise<TFile | null> {
     const dir = this.ticketsFolderFor(folder);
     const name = ticketFileName(opts.name || "");
@@ -198,40 +161,139 @@ class TicketMethods {
       const text = withNotes(await this.templateText(this.ticketTemplatePath(), TICKET_TEMPLATE), this.ticketNotesHeading(), opts.notes || "");
       const file = await this.app.vault.create(this.freeNotePath(dir, name || "Untitled ticket"), text);
       const backend = opts.backend;
-      if (backend) await this.app.fileManager.processFrontMatter(file, (fm: Record<string, unknown>) => { fm.backend = backend; });
+      if (backend) await this.app.fileManager.processFrontMatter(file, (fm: Record<string, unknown>) => { fm.cli = backend; });
       await this.app.workspace.getLeaf(false).openFile(file, name ? {} : { eState: { rename: "all" } });
       return file;
     } catch (e) {
-      new import_obsidian.Notice(`Agent Manager: couldn't make the ticket: ${stringOf(errorMessage(e))}`);
+      notice(`Agent Manager: couldn't make the ticket: ${stringOf(errorMessage(e))}`);
       return null;
     }
   }
-  // ---- The New ticket card ----
-  // The heading the card's notes go under: the setting, else none, and they go first.
+  canBeFollowUp(this: AgentManagerPlugin, notePath: string): boolean {
+    if (isArchived(notePath) || !this.isTicketNote(notePath)) return false;
+    const fm = this.contextVault().frontmatter(notePath) || {};
+    const origin = Object.keys(fm).find((k) => k.toLowerCase() === "origin");
+    if (origin && String(fm[origin]).trim().toLowerCase() === "external") return false;
+    for (const t of this.taskPaths()) {
+      const dir = t.slice(0, t.lastIndexOf("/"));
+      if (dir && notePath.startsWith(`${dir}/`)) return false;
+    }
+    return true;
+  }
+  fromTaskOf(this: AgentManagerPlugin, ticketPath: string): string | null {
+    const target = linkTarget(this.contextVault().frontmatter(ticketPath)?.[FROM_TASK_PROPERTY]);
+    if (!target) return null;
+    return this.app.metadataCache.getFirstLinkpathDest(target, ticketPath)?.path ?? null;
+  }
+  ticketIsDone(this: AgentManagerPlugin, fm: Record<string, unknown> | null | undefined): boolean {
+    const key = fm ? Object.keys(fm).find((k) => k.toLowerCase() === "done") : undefined;
+    return !!key && String(fm![key]).trim().toLowerCase() === "true";
+  }
+  followUpTicketOf(this: AgentManagerPlugin, task: Pick<ScheduledTask, "notePath">): TFile | null {
+    let best: TFile | null = null;
+    for (const f of this.app.vault.getMarkdownFiles()) {
+      if (!this.canBeFollowUp(f.path) || this.ticketIsDone(this.app.metadataCache.getFileCache(f)?.frontmatter)) continue;
+      if (this.fromTaskOf(f.path) !== task.notePath) continue;
+      if (!best || f.stat.ctime < best.stat.ctime) best = f;
+    }
+    return best;
+  }
+  followUpFolderOf(this: AgentManagerPlugin, task: Pick<ScheduledTask, "notePath" | "projectFolder">): string | null {
+    const at = task.projectFolder === "" ? this.app.vault.getRoot() : task.projectFolder != null ? this.app.vault.getAbstractFileByPath(task.projectFolder) : null;
+    const project = at instanceof import_obsidian.TFolder ? at : this.ticketProjectOf(task.notePath);
+    return project ? this.ticketsFolderFor(project) : null;
+  }
+  fileFollowUp(this: AgentManagerPlugin, task: Pick<ScheduledTask, "name" | "notePath" | "projectFolder">, resultRel: string): Promise<string | null> {
+    const next = (this._followUpQueue || Promise.resolve(null)).then(() => this._fileFollowUp(task, resultRel), () => this._fileFollowUp(task, resultRel));
+    this._followUpQueue = next;
+    return next;
+  }
+  async _fileFollowUp(this: AgentManagerPlugin, task: Pick<ScheduledTask, "name" | "notePath" | "projectFolder">, resultRel: string): Promise<string | null> {
+    const say = (m: string) => { this.notifyDesktop(`“${task.name}”'s result wasn't filed in a ticket`, m, task.notePath); return null; };
+    if (!this.ticketsOn()) return say("tickets are off.");
+    const label = resultRel.slice(resultRel.lastIndexOf("/") + 1).replace(/\.md$/i, "");
+    const link = wikilink(resultRel, label);
+    try {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        let file = attempt === 0 ? this.followUpTicketOf(task) : null;
+        if (!file) {
+          const dir = this.followUpFolderOf(task);
+          if (dir == null) return say("it has no project to put one in. Move the task into a project's folder.");
+          await this.ensureFolder(dir);
+          const text = await this.templateText(this.ticketTemplatePath(), TICKET_TEMPLATE);
+          file = await this.app.vault.create(this.freeNotePath(dir, followUpName(task.name)), text);
+          await this.app.fileManager.processFrontMatter(file, (fm: Record<string, unknown>) => { fm[FROM_TASK_PROPERTY] = wikilink(task.notePath, task.name); });
+        }
+        let stillOpen = false;
+        await this.app.fileManager.processFrontMatter(file, (fm: Record<string, unknown>) => {
+          if (this.ticketIsDone(fm) || this.fromTaskOfValue(fm[FROM_TASK_PROPERTY], file.path) !== task.notePath) return;
+          stillOpen = true;
+          const other = Object.keys(fm).find((k) => k !== "reads" && k.toLowerCase() === "reads");
+          const prior: unknown[] = !other ? [] : Array.isArray(fm[other]) ? (fm[other] as unknown[]) : fm[other] ? [fm[other]] : [];
+          if (other) delete fm[other];
+          const reads = withRead(fm.reads, link);
+          fm.reads = [...prior.filter((x) => !reads.some((y) => linkTarget(y) === linkTarget(x))), ...reads];
+        });
+        if (!stillOpen) continue;
+        return file.path;
+      }
+      return say("its ticket changed while it was being filed.");
+    } catch (e) {
+      return say(stringOf(errorMessage(e)));
+    }
+  }
+  fromTaskOfValue(this: AgentManagerPlugin, raw: unknown, from: string): string | null {
+    const target = linkTarget(raw);
+    return target ? this.app.metadataCache.getFirstLinkpathDest(target, from)?.path ?? null : null;
+  }
   ticketNotesHeading(this: AgentManagerPlugin): string {
     return stringOf(this.pluginData.ticketNotesHeading ?? "").trim();
   }
-  // The switched agent profile's home, while it has one: the card lists only its projects.
   ticketHome(this: AgentManagerPlugin): string | null {
     const home = this.switchedAgent()?.home;
     return home ? home : null;
   }
-  // The projects the card offers: every folder with a project overview, or with a Tickets
-  // folder (a folder that only gathers tickets has no overview), never a Tickets folder
-  // itself or one inside a folder named Archive (Matt: a ticket for an archived project
-  // starts by unarchiving it); while the switched profile has a home, only those in it.
-  // Sorted by path.
   ticketProjects(this: AgentManagerPlugin): TFolder[] {
+    return this.app.vault.getAllFolders(true).filter((f) => !isArchived(f.path) && this.isTicketProject(f)).sort((a, b) => a.path.localeCompare(b.path));
+  }
+  creationProjectGroups(this: AgentManagerPlugin): ProjectGroup[] {
+    const projects = this.ticketProjects();
+    const homed = this.agentList().filter((a) => a.home);
+    const switched = this.ticketHome();
+    const shown = switched ? homed.filter((a) => a.home === switched) : homed;
+    const inside = (f: TFolder, home: string) => f.path.startsWith(`${home}/`);
+    const shortName = (rel: string) => rel.replace(/^Projects\/(?=.)/i, "");
+    const groups: ProjectGroup[] = shown.map((a) => {
+      const home = a.home as string;
+      return {
+        label: homed.length ? a.name : null,
+        options: [
+          { text: `No Project - ${a.name}`, value: home },
+          ...projects.filter((f) => inside(f, home)).map((f) => ({ text: shortName(f.path.slice(home.length + 1)), value: f.path })),
+        ],
+      };
+    });
+    if (!switched) {
+      const rest = projects.filter((f) => !homed.some((a) => f.path === a.home || inside(f, a.home as string)));
+      if (rest.length) groups.push({ label: homed.length ? "Other projects" : null, options: rest.map((f) => ({ text: f.isRoot() ? this.app.vault.getName() : shortName(f.path), value: f.path })) });
+    }
+    return groups;
+  }
+  creationProjectDefault(this: AgentManagerPlugin, groups: ProjectGroup[], from = ""): string {
+    const all = groups.flatMap((g) => g.options.map((o) => o.value));
+    if (from && all.includes(from)) return from;
     const home = this.ticketHome();
-    const inHome = (f: TFolder) => !home || f.path === home || f.path.startsWith(`${home}/`);
-    return this.app.vault.getAllFolders(true).filter((f) => inHome(f) && !isArchived(f.path) && this.isTicketProject(f)).sort((a, b) => a.path.localeCompare(b.path));
+    if (home && all.includes(home)) return home;
+    return all[0] ?? "";
+  }
+  creationAgentName(this: AgentManagerPlugin, folderPath: string): string | null {
+    if (!this.agentList().length) return null;
+    return this.agentById(this.launchAgentId({ folderPath }))?.name ?? "no agent profile";
   }
   isTicketProject(this: AgentManagerPlugin, f: TFolder): boolean {
     if (f.name === "Tickets") return false;
     return f.children.some((c) => c instanceof import_obsidian.TFolder && c.name === "Tickets") || this.app.vault.getAbstractFileByPath(this.overviewPathOf(f)) instanceof import_obsidian.TFile;
   }
-  // The project a note or folder is in: the nearest folder at or above it that the card
-  // would offer, whatever profile is switched. Null when none is, or it's archived.
   ticketProjectOf(this: AgentManagerPlugin, path: string | null | undefined): TFolder | null {
     if (!path || isArchived(path)) return null;
     const at = this.app.vault.getAbstractFileByPath(path);
@@ -239,10 +301,6 @@ class TicketMethods {
     for (; f; f = f.parent) if (this.isTicketProject(f)) return f;
     return null;
   }
-  // Whether Obsidian has read a new note's properties, waiting up to ten seconds: a
-  // session attached before then wouldn't see the note as a ticket, and would stop trying
-  // to write its lines there. The wait is the plugin's, so unloading ends it, unresolved,
-  // and nothing after it runs against an unloaded plugin.
   whenIndexed(this: AgentManagerPlugin, file: TFile): Promise<boolean> {
     const cache = this.app.metadataCache;
     if (cache.getFileCache(file)?.frontmatter) return Promise.resolve(true);
@@ -254,10 +312,6 @@ class TicketMethods {
       timer = this.scheduleTimeout(() => done(false), 10000);
     });
   }
-  // The card opened from a session's menu, keeping what's already typed in it: the
-  // session's project filled in when none is picked and it started from a note or folder
-  // in one (a Daily Chat or a plain session has none), and the sidebar shown with the
-  // card open. A new object, so a close still finishing leaves it open (closeCard).
   async openTicketCardFrom(this: AgentManagerPlugin, from: Session): Promise<void> {
     const draft = this.ticketCard?.draft || { name: "", project: "", backend: null, notes: "" };
     const project = this.ticketProjectOf(from._notePath || from._folderPath);
@@ -269,25 +323,15 @@ class TicketMethods {
     (view._revealCard || (view._revealCard = {})).ticket = true;
     view.renderBrowser();
   }
-  // A project's name in the card: its path below the switched profile's home (the home
-  // itself, and a project outside it, by its full path), the vault's name for the root.
-  ticketProjectLabel(this: AgentManagerPlugin, folder: TFolder): string {
-    if (folder.isRoot()) return this.app.vault.getName();
-    const home = this.ticketHome();
-    return home && folder.path.startsWith(`${home}/`) ? folder.path.slice(home.length + 1) : folder.path;
-  }
-  // The project a note belongs to for a new ticket: its folder, or the folder above when
-  // it's in a Tickets folder.
+
   projectFolderOf(this: AgentManagerPlugin, file: TFile): TFolder | null {
     const parent = file.parent;
     if (!parent) return null;
     return parent.name === "Tickets" && parent.parent ? parent.parent : parent;
   }
-  // A folder's overview's path, by the overview file name.
   overviewPathOf(this: AgentManagerPlugin, folder: TFolder): string {
     return folder.isRoot() ? this.overviewName() : `${folder.path}/${this.overviewName()}`;
   }
-  // Make a folder's overview from the overview template, and open it.
   async newOverview(this: AgentManagerPlugin, folder: TFolder): Promise<void> {
     const p = this.overviewPathOf(folder);
     if (this.app.vault.getAbstractFileByPath(p)) return;
@@ -297,14 +341,9 @@ class TicketMethods {
       const file = await this.app.vault.create(p, text);
       await this.app.workspace.getLeaf(false).openFile(file);
     } catch (e) {
-      new import_obsidian.Notice(`Agent Manager: couldn't make the project overview: ${stringOf(errorMessage(e))}`);
+      notice(`Agent Manager: couldn't make the project overview: ${stringOf(errorMessage(e))}`);
     }
   }
-  // ---- Filing a new ticket ----
-  // A ticket made outside any Tickets folder (the base's New button puts one in the
-  // default folder for new notes) is filed by asking once which project it's for: the
-  // folders with an overview, or leave it where it is. Only notes made while Obsidian
-  // runs, so existing notes are never asked about.
   async offerToFileTicket(this: AgentManagerPlugin, file: TFile): Promise<void> {
     if (!this.ticketsOn() || !this.isTicketNote(file.path) || file.parent?.name === "Tickets") return;
     const name = this.overviewName();
@@ -319,30 +358,101 @@ class TicketMethods {
       onPick: (it) => { if (!("stay" in it)) void this.fileTicket(file, it); },
     }).open();
   }
-  // Move a ticket into a project's Tickets folder, keeping links to it.
   async fileTicket(this: AgentManagerPlugin, file: TFile, project: TFolder): Promise<void> {
     const dir = this.ticketsFolderFor(project);
     try {
       await this.ensureFolder(dir);
       const dest = this.freeNotePath(dir, file.basename);
       await this.app.fileManager.renameFile(file, dest);
-      new import_obsidian.Notice(`Filed in ${dir}.`);
+      notice(`Filed in ${dir}.`);
     } catch (e) {
-      new import_obsidian.Notice(`Agent Manager: couldn't move the ticket: ${stringOf(errorMessage(e))}`);
+      notice(`Agent Manager: couldn't move the ticket: ${stringOf(errorMessage(e))}`);
     }
   }
-  // The commands and the folder menu's items, each offered only while its switch is on.
+  async openTicketSession(this: AgentManagerPlugin, file: TFile): Promise<void> {
+    const leaf = this.ticketMainLeaf(file.path);
+    if (leaf) {
+      void this.revealAndFlash(leaf);
+      return;
+    }
+    const id = this.mainSessionIdOf(file.path);
+    await this.handleProtocolLink(id ? { action: "agent-manager", op: "resume", session: id } : { action: "agent-manager", op: "new", note: file.path });
+  }
+  syncTicketActions(this: AgentManagerPlugin): void {
+    const kept = (this._ticketActions ??= new Map<MarkdownView, { el: HTMLElement; state: "launch" | "resume" | "run" | "stop" }>());
+    const seen = new Set<object>();
+    for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
+      const view = leaf.view;
+      if (!(view instanceof import_obsidian.MarkdownView)) continue;
+      const file = view.file;
+      const ticket = !!file && this.ticketsOn() && this.isTicketNote(file.path);
+      const task = !!file && !ticket && this.scheduledTasksOn() && this.isTaskNote(file.path);
+      const had = kept.get(view);
+      if (!ticket && !task) { if (had) { had.el.remove(); kept.delete(view); } continue; }
+      seen.add(view);
+      if (task) {
+        const state = this.liveRuns().has(file.parent?.path ?? "") ? "stop" : "run";
+        if (had?.state === state && had.el.isConnected) continue;
+        had?.el.remove();
+        const el = view.addAction(state === "stop" ? "square" : "play", state === "stop" ? "Stop this scheduled task's run" : "Run this scheduled task now", () => { void (async () => {
+          const f = view.file;
+          const v = f ? await this.taskViewByPath(f.path) : null;
+          if (!v) return;
+          if (v.running) this.stopRun(v.task);
+          else await this.runNow(v);
+        })(); });
+        el.addClass("agent-manager-ticket-action");
+        el.createSpan({ text: state === "stop" ? "Stop" : "Run now" });
+        kept.set(view, { el, state });
+        continue;
+      }
+      const resume = !!this.mainSessionIdOf(file.path) || !!this.ticketMainLeaf(file.path);
+      const state = resume ? "resume" : "launch";
+      if (had?.state === state && had.el.isConnected) continue;
+      had?.el.remove();
+      const el = view.addAction(resume ? "history" : "play", resume ? "Resume the ticket's session" : "Launch a session from this ticket", () => {
+        const f = view.file;
+        if (f) void this.openTicketSession(f);
+      });
+      el.addClass("agent-manager-ticket-action");
+      el.createSpan({ text: resume ? "Resume" : "Launch" });
+      kept.set(view, { el, state });
+    }
+    for (const [view, had] of kept) if (!seen.has(view)) { had.el.remove(); kept.delete(view); }
+  }
   registerTickets(this: AgentManagerPlugin): void {
-    // New notes, watched until Obsidian has read their properties, for offerToFileTicket.
+    this.app.workspace.onLayoutReady(() => {
+      const sync = () => this.syncTicketActions();
+      sync();
+      this.registerEvent(this.app.workspace.on("layout-change", sync));
+      this.registerEvent(this.app.workspace.on("file-open", sync));
+      this.registerEvent(this.app.metadataCache.on("changed", sync));
+      this.registerEvent(this.app.vault.on("rename", sync));
+      this.registerEvent(this.app.metadataCache.on("changed", (file: TFile, data: string) => {
+        if (!this.ticketsOn() || !this.isTicketNote(file.path)) return;
+        for (const v of this.sessionObjects()) v.ticketChanged(file.path, data);
+      }));
+    });
+    this.register(() => {
+      for (const had of this._ticketActions?.values() ?? []) had.el.remove();
+      this._ticketActions?.clear();
+    });
+    this.addCommand({
+      id: "open-ticket-session",
+      name: "Launch or resume this ticket's session",
+      checkCallback: (checking) => {
+        const file = this.app.workspace.getActiveFile();
+        if (!file || !this.ticketsOn() || !this.isTicketNote(file.path)) return false;
+        if (!checking) void this.openTicketSession(file);
+        return true;
+      },
+    });
     const fresh = new Set<string>();
     this.app.workspace.onLayoutReady(() => {
       this.registerEvent(this.app.vault.on("create", (f) => {
         if (f instanceof import_obsidian.TFile && f.extension === "md") { fresh.add(f.path); this.scheduleTimeout(() => fresh.delete(f.path), 60000); }
       }));
     });
-    // Only the note the user is working in: notes that arrive another way (an agent
-    // writing them, sync, a git checkout) would each open a picker, stacked. One that
-    // isn't open yet stays watched, and is offered when it's opened (within the minute).
     const offer = (f: TFile) => {
       if (!fresh.has(f.path) || !this.isTicketNote(f.path)) return;
       if (this.app.workspace.getActiveFile()?.path !== f.path) return;

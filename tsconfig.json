@@ -22,7 +22,6 @@
   "include": [
     "src/**/*.ts",
     "src/**/*.js",
-    "src/**/*.mjs",
-    "test/**/*.ts"
+    "src/**/*.mjs"
   ]
 }

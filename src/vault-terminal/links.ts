@@ -1,25 +1,18 @@
-// Finding web addresses and file paths in a line of terminal output, for
-// Cmd+click. Kept free of xterm and Obsidian so test/harness.ts can check it
-// from plain Node.
 
 export interface FoundLink {
-  /** Index into the text, inclusive. */
   start: number;
-  /** Index into the text, exclusive. */
   end: number;
   url: string;
 }
 
-const URL_RE = /\bhttps?:\/\/[^\s<>"'`]+/g;
-const TRAILING = /[.,;:!?]+$/;
+const URL_RE = /\b(?:https?|obsidian):\/\/(?:[^\s<>"'`─-╿—]|(?<=[\p{L}\p{N}])'(?=[\p{L}\p{N}%]))+/gu;
+const TRAILING = /[.,;:!?*…]+$/;
+const OBSIDIAN_LINK = /^obsidian:\/\/(?:open\/?\?(?=(?:\S*&)?(?:file|path)=)|agent-manager\/?\?\S|vault\/[^\s/])/;
 
-/** Web addresses in text, without the punctuation a sentence puts after them. */
 export function findUrls(text: string): FoundLink[] {
   const found: FoundLink[] = [];
   for (const m of text.matchAll(URL_RE)) {
     let url = m[0];
-    // Closing brackets belong to the address only when it opened them too:
-    // (see https://x.org/a_(b)) keeps "(b)" and drops the last ")".
     for (;;) {
       const before = url;
       url = url.replace(TRAILING, "");
@@ -28,12 +21,76 @@ export function findUrls(text: string): FoundLink[] {
       }
       if (url === before) break;
     }
-    if (/^https?:\/\/[^/]/.test(url)) found.push({ start: m.index, end: m.index + url.length, url });
+    if (/^https?:\/\/[^/]/.test(url) || OBSIDIAN_LINK.test(url)) found.push({ start: m.index, end: m.index + url.length, url });
   }
   return found;
 }
 
-/** Every ")" closes a "(" before it, and none is left open. */
+export function findUrlsAcross(text: string, edges: ReadonlySet<number>, keepShort: (longer: string, shorter: string) => boolean): FoundLink[] {
+  const out: FoundLink[] = [];
+  for (const found of findUrls(text)) {
+    const last = out[out.length - 1];
+    if (last && found.start < last.end) continue;
+    const { start } = found;
+    let { end, url } = found;
+    const skipped: number[] = [];
+    while (edges.has(end) && !/^(?:https?|obsidian):\/\//.test(text.slice(end + 1))) {
+      skipped.push(end);
+      let joined = "";
+      let from = start;
+      for (const k of skipped) {
+        joined += text.slice(from, k);
+        from = k + 1;
+      }
+      joined += text.slice(from);
+      const longer = findUrls(joined)[0];
+      const had = end - start - (skipped.length - 1);
+      if (longer?.start !== 0 || longer.end <= had || keepShort(longer.url, url)) {
+        skipped.pop();
+        break;
+      }
+      url = longer.url;
+      end = start + longer.end + skipped.length;
+    }
+    out.push({ start, end, url });
+  }
+  return out;
+}
+
+export function linksObsidian(uri: string): boolean {
+  return OBSIDIAN_LINK.test(uri);
+}
+
+export interface ObsidianLink {
+  action: string;
+  params: Record<string, string>;
+}
+
+export function parseObsidianLink(uri: string): ObsidianLink | null {
+  if (!OBSIDIAN_LINK.test(uri)) return null;
+  const rest = uri.slice("obsidian://".length);
+  try {
+    if (rest.startsWith("vault/")) {
+      const parts = rest.slice(6).split("/").map(decodeURIComponent);
+      return { action: "open", params: { action: "open", vault: parts[0], file: parts.slice(1).join("/") } };
+    }
+    const q = rest.indexOf("?");
+    const action = rest.slice(0, q).replace(/\/$/, "");
+    const params: Record<string, string> = {};
+    for (const pair of rest.slice(q + 1).split("&")) {
+      if (!pair) continue;
+      const eq = pair.indexOf("=");
+      const key = decodeURIComponent(eq === -1 ? pair : pair.slice(0, eq));
+      if (Object.hasOwn(params, key)) return null;
+      params[key] = eq === -1 ? "" : decodeURIComponent(pair.slice(eq + 1));
+    }
+    params.action = action;
+    return { action, params };
+  } catch {
+    return null;
+  }
+}
+
 function balanced(s: string): boolean {
   let depth = 0;
   for (const c of s) {
@@ -52,27 +109,13 @@ function count(s: string, ch: string): number {
 export interface FoundPath {
   start: number;
   end: number;
-  /** As written: absolute, ~/, or relative. */
   path: string;
 }
 
-// Words that could be a path: no spaces, quotes, or brackets other than
-// parentheses, which file names can contain ("report (final).md"). An
-// apostrophe between two letters or digits is part of a name ("Sam's
-// notes.md"); anywhere else it's a quote, as in open('a.md') or x='a.md'.
-// Curly quotes count the same way. Known misses, left as rare: a quote right
-// after a letter, as in Python's f'a.md', and a.md'b.md, read as one name.
 const WORD_RE = /(?:[^\s"'`‘’“”<>[\]{}|]|(?<=[\p{L}\p{N}])['’](?=[\p{L}\p{N}]))+/gu;
-// Where a run of words can't be joined: a quote, a bracket, or a tab.
 const NO_JOIN = /["`‘“”<>[\]{}|\t]|(?<![\p{L}\p{N}])['’]|['’](?![\p{L}\p{N}])/u;
-// A path that runs on past a space: at most this many more words. A note's vault
-// path in nested folders runs to a dozen.
 const MAX_SPACES = 24;
 
-/**
- * Sentence punctuation, a trailing line number (a.ts:12, a.ts:12:5), and
- * parentheses that only wrap the path (see (a.md)) aren't part of it.
- */
 function trimPath(word: string): { path: string; lead: number } {
   let path = word;
   let lead = 0;
@@ -84,7 +127,6 @@ function trimPath(word: string): { path: string; lead: number } {
       path = path.slice(1);
       lead++;
     }
-    // Parentheses around the whole path, (README.md), leaving any of its own: (report(final).md).
     if (path.startsWith("(") && path.endsWith(")") && balanced(path.slice(1, -1))) {
       path = path.slice(1, -1);
       lead++;
@@ -97,22 +139,49 @@ function looksLikePath(path: string): boolean {
   return (
     /^(~|\.{1,2})?\//.test(path) ||
     /[^/]\/[^/]/.test(path) ||
-    // A bare file name with an extension, spaces and any script allowed: "Daily note.md".
     /^[^\s/.][^/]*\.[\p{L}\p{N}]{1,10}$/u.test(path)
   );
 }
 
-/**
- * File paths in text that exist: absolute (/, ~/), relative with a slash
- * (./a, ../a, src/a.ts), or a bare name with an extension (a.md), as
- * `exists` judges them. A path may contain spaces (a vault called "Dev
- * Vault", a note called "Daily note.md"): the earliest start and then the
- * longest run of words that exists wins, so "Daily note.md" never links as
- * just "note.md". Web addresses aren't paths.
- */
+const WRAP_SLACK = 8;
+const BOX = /^[\u2500-\u257f]|[\u2500-\u257f]$/;
+const NEW_BLOCK = /^[⏺⎿]/u;
+
+export interface RowCells {
+  text: string;
+  columns: number[];
+}
+
+const LEAD = /^\s*(?:[-*•⏺]|\d+[.)])?\s*/u;
+
+export function cliWrapped(prev: RowCells, next: RowCells, cols: number): boolean {
+  const end = prev.text.trimEnd().length;
+  const start = next.text.length - next.text.trimStart().length;
+  if (!end || start === next.text.length) return false;
+  if (BOX.test(prev.text.slice(0, end)) || BOX.test(next.text.slice(start)) || NEW_BLOCK.test(next.text.slice(start))) return false;
+  const lead = LEAD.exec(prev.text)?.[0].length ?? 0;
+  const cellAt = (row: RowCells, i: number): number => row.columns[i] ?? i;
+  if (cellAt(next, start) > cellAt(prev, Math.min(lead, end))) return false;
+  const gap = next.text.slice(start).search(/\s/);
+  const wordEnd = gap === -1 ? next.text.length : start + gap;
+  const used = cellAt(prev, end - 1) + 1;
+  const word = cellAt(next, wordEnd - 1) - cellAt(next, start) + 1;
+  return used + 1 + word > cols - WRAP_SLACK;
+}
+
+export function pathsEnding(paths: Iterable<string>, partial: string): string[] {
+  const want = partial.toLowerCase();
+  if (!want || want.startsWith("/")) return [];
+  const found: string[] = [];
+  for (const p of paths) {
+    const lower = p.toLowerCase();
+    if (lower === want || lower.endsWith(`/${want}`)) found.push(p);
+  }
+  return found;
+}
+
 export function findPaths(text: string, exists: (path: string) => boolean): FoundPath[] {
   const found: FoundPath[] = [];
-  // Each candidate is checked once: trimming makes different runs the same path.
   const checked = new Map<string, boolean>();
   const has = (path: string): boolean => {
     let yes = checked.get(path);
@@ -123,15 +192,11 @@ export function findPaths(text: string, exists: (path: string) => boolean): Foun
   for (let i = 0; i < words.length; i++) {
     const w = words[i];
     if (w.text.includes("://")) continue;
-    // Longest first: this word and up to MAX_SPACES more, joined by the text between them.
     let best: FoundPath | null = null;
     for (let j = Math.min(words.length - 1, i + MAX_SPACES); j >= i && !best; j--) {
       const run = text.slice(w.start, words[j].end);
-      // Joined only across spaces, never across quotes, brackets or tabs.
       if (NO_JOIN.test(run)) continue;
       const { path, lead } = trimPath(run);
-      // A possessive after a path (README.md's) isn't part of it, unless a
-      // file by the whole name exists.
       for (const p of /['’]s$/i.test(path) ? [path, path.slice(0, -2)] : [path]) {
         if (p && p !== "/" && looksLikePath(p) && has(p)) {
           best = { start: w.start + lead, end: w.start + lead + p.length, path: p };
@@ -141,8 +206,32 @@ export function findPaths(text: string, exists: (path: string) => boolean): Foun
     }
     if (!best) continue;
     found.push(best);
-    // Skip the words the path took in.
     while (i + 1 < words.length && words[i + 1].start < best.end) i++;
   }
   return found;
 }
+
+export interface LinkPiece {
+  text: string;
+  link: boolean;
+}
+
+export function linkPieces(texts: readonly string[], columns: readonly number[], links: readonly (readonly [number, number])[]): LinkPiece[][] | null {
+  const inLink = (x: number): boolean => links.some(([a, b]) => x >= a && x <= b);
+  const out: LinkPiece[][] = [];
+  let at = 0;
+  for (const text of texts) {
+    if (at + text.length > columns.length) return null;
+    const pieces: LinkPiece[] = [];
+    for (let i = 0; i < text.length; i++) {
+      const link = inLink(columns[at + i]);
+      const last = pieces[pieces.length - 1];
+      if (last?.link === link) last.text += text[i];
+      else pieces.push({ text: text[i], link });
+    }
+    out.push(pieces);
+    at += text.length;
+  }
+  return out;
+}
+

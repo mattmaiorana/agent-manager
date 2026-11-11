@@ -1,1 +1,1 @@
-{ "name": "inline-images", "version": "0.3.2", "description": "Shows the PNG images Claude sends you as pictures in the terminal, under the file card." }
+{ "name": "inline-images", "version": "0.3.2", "description": "Shows the PNG images Claude sends you or reads as pictures in the terminal." }

@@ -1,24 +1,17 @@
-// Small modals: the session switcher, a choice picker, a confirm, and the suggesters for
-// a folder or a note typed into a field.
 
 import { import_obsidian } from "../externals.js";
 import type { App, TAbstractFile, TFile, TFolder } from "obsidian";
 import type { AgentManagerPlugin } from "../plugin/main.js";
 import type { SessionRecord } from "../types.js";
+import { notice } from "../vault-terminal/notice";
 
-// What the switcher lists: "New session", then each session (which has no isNew).
 type SwitcherItem = { isNew: true } | (SessionRecord & { isNew?: undefined });
-// What a choice picker is told: how to label an item, and what to do with the pick.
 interface ChoicePickerOptions<T> {
   label: (it: T) => string;
   sub?: (it: T) => string;
-  // What it returns is ignored.
   onPick: (it: T) => unknown;
   placeholder?: string;
 }
-// The fast path to a session: every session in the vault, with "New session" first.
-// Opened through a command, so the user picks its hotkey; the sessions are read before
-// it opens, since a SuggestModal is synchronous.
 class SessionSwitcherModal extends import_obsidian.SuggestModal<SwitcherItem> {
   declare plugin: AgentManagerPlugin;
   declare sessions: SessionRecord[];
@@ -30,7 +23,6 @@ class SessionSwitcherModal extends import_obsidian.SuggestModal<SwitcherItem> {
   }
   getSuggestions(query: string): SwitcherItem[] {
     const q = query.toLowerCase();
-    // "New session" is always offered first; typing filters existing sessions.
     const items: SwitcherItem[] = [{ isNew: true }, ...this.sessions];
     return items.filter((it) => it.isNew || String(it.displayName || "").toLowerCase().includes(q));
   }
@@ -43,7 +35,6 @@ class SessionSwitcherModal extends import_obsidian.SuggestModal<SwitcherItem> {
     el.createEl("small", { text: this.plugin.relativeTime(item.mtime), cls: "agent-manager-suggest-meta" });
   }
   onChooseSuggestion(item: SwitcherItem): void {
-    // A new session from here is "Untitled"; the sidebar is where to type a name.
     if (item.isNew) void this.plugin.startSession("", null);
     else {
       const leaf = this.plugin.getLeafForSession(item.title, item.backend, item.sessionId);
@@ -52,8 +43,6 @@ class SessionSwitcherModal extends import_obsidian.SuggestModal<SwitcherItem> {
     }
   }
 }
-// Generic single-choice picker (the import flow chains two). Items are arbitrary;
-// label and sublabel are functions.
 class ChoicePickerModal<T> extends import_obsidian.SuggestModal<T> {
   declare items: T[];
   declare labelFn: (it: T) => string;
@@ -108,8 +97,6 @@ class ConfirmModal extends import_obsidian.Modal {
     this.contentEl.empty();
   }
 }
-// Set up this vault, when a setup session ran before: resume it, or start a fresh one that
-// looks around first and offers only what's left.
 class SetupChoiceModal extends import_obsidian.Modal {
   declare _onResume: () => void;
   declare _onFresh: () => void;
@@ -133,10 +120,6 @@ class SetupChoiceModal extends import_obsidian.Modal {
     this.contentEl.empty();
   }
 }
-// Path autocomplete for a setting's text field, on Obsidian's own suggestion popup
-// (AbstractInputSuggest: its position, keys, and closing are Obsidian's), the way Calendar
-// Plus does it: every match, alphabetical, plain text, at most 200 so a large vault stays
-// fast. Picking one writes it in and fires input and change, so the field saves.
 const MAX_SUGGESTIONS = 200;
 abstract class PathSuggest<T extends TAbstractFile> extends import_obsidian.AbstractInputSuggest<T> {
   declare inputEl: HTMLInputElement;
@@ -162,11 +145,9 @@ abstract class PathSuggest<T extends TAbstractFile> extends import_obsidian.Abst
     this.close();
   }
 }
-// Folders (asked of Obsidian as folders, so no file is listed to find them), the root aside.
 class FolderSuggest extends PathSuggest<TFolder> {
   candidates(): TFolder[] { return this.app.vault.getAllFolders(false); }
 }
-// Notes, or with `extensions`, any of those kinds of file (a base, say).
 class FileSuggest extends PathSuggest<TFile> {
   declare extensions: string[];
   constructor(app: App, inputEl: HTMLInputElement, extensions: string[] = ["md"]) {
@@ -175,9 +156,29 @@ class FileSuggest extends PathSuggest<TFile> {
   }
   candidates(): TFile[] { return this.app.vault.getFiles().filter((f) => this.extensions.includes(f.extension)); }
 }
-// A new agent's fields, filled in a popup (the Agents settings' Add): its name, its
-// instructions note, its home folder, and its Daily Chat name. `problem` checks the name
-// (null when it's fine); `onAdd` gets the four as typed.
+class ReadsSuggest extends import_obsidian.AbstractInputSuggest<TAbstractFile> {
+  declare inputEl: HTMLInputElement;
+  declare onPick: (f: TAbstractFile) => void;
+  constructor(app: App, inputEl: HTMLInputElement, onPick: (f: TAbstractFile) => void) {
+    super(app, inputEl);
+    this.inputEl = inputEl;
+    this.onPick = onPick;
+  }
+  getSuggestions(query: string): TAbstractFile[] {
+    const q = String(query || "").toLowerCase();
+    const text = /^(md|txt|csv|json|ya?ml)$/i;
+    const all: TAbstractFile[] = [...this.app.vault.getAllFolders(false), ...this.app.vault.getFiles().filter((f) => text.test(f.extension))];
+    return all.filter((f) => f.path.toLowerCase().includes(q)).sort((a, b) => a.path.localeCompare(b.path)).slice(0, MAX_SUGGESTIONS);
+  }
+  renderSuggestion(f: TAbstractFile, el: HTMLElement): void {
+    el.setText(f instanceof import_obsidian.TFolder ? `${f.path}/` : f.path);
+  }
+  override selectSuggestion(f: TAbstractFile): void {
+    this.onPick(f);
+    this.setValue("");
+    this.close();
+  }
+}
 interface NewAgentFields { name: string; instructions: string; home: string; dailyName: string }
 class AgentModal extends import_obsidian.Modal {
   declare _problem: (name: string) => string | null;
@@ -197,7 +198,7 @@ class AgentModal extends import_obsidian.Modal {
       .addText((t) => { t.setPlaceholder("Personal").onChange((v) => { f.name = v; }); });
     new import_obsidian.Setting(contentEl).setName("Instructions note").setDesc("The note that says who this agent profile is and how it works.")
       .addText((t) => { t.setPlaceholder("Agents/Personal.md").onChange((v) => { f.instructions = v; }); new FileSuggest(this.app, t.inputEl, ["md"]); });
-    new import_obsidian.Setting(contentEl).setName("Home folder").setDesc("A session started from a note or folder in here starts with this agent profile. Empty for none; / for the whole vault.")
+    new import_obsidian.Setting(contentEl).setName("Agent folder").setDesc("A session started from a note or folder in here starts with this agent profile. Empty for none; / for the whole vault.")
       .addText((t) => { t.setPlaceholder("None").onChange((v) => { f.home = v; }); new FolderSuggest(this.app, t.inputEl); });
     new import_obsidian.Setting(contentEl).setName("Daily chat name").setDesc("{{profile}} is its name, {{date}} today's date.")
       .addText((t) => { t.setPlaceholder(this._dailyPlaceholder).onChange((v) => { f.dailyName = v; }); });
@@ -206,12 +207,11 @@ class AgentModal extends import_obsidian.Modal {
     const add = buttons.createEl("button", { text: "Add", cls: "mod-cta" });
     const submit = () => {
       const problem = this._problem(f.name);
-      if (problem) { new import_obsidian.Notice(problem); return; }
+      if (problem) { notice(problem); return; }
       void this._onAdd(f).then(() => this.close());
     };
     add.addEventListener("click", submit);
     contentEl.addEventListener("keydown", (e) => {
-      // Enter in a field adds, unless a path suggestion is open to pick from.
       if (e.key === "Enter" && !e.isComposing && !document.querySelector(".suggestion-container")) { e.preventDefault(); submit(); }
     });
     window.setTimeout(() => nameRow.controlEl.querySelector("input")?.focus(), 0);
@@ -220,5 +220,5 @@ class AgentModal extends import_obsidian.Modal {
     this.contentEl.empty();
   }
 }
-export { AgentModal, FileSuggest, FolderSuggest, ChoicePickerModal, ConfirmModal, SessionSwitcherModal, SetupChoiceModal };
+export { AgentModal, FileSuggest, FolderSuggest, ReadsSuggest, ChoicePickerModal, ConfirmModal, SessionSwitcherModal, SetupChoiceModal };
 export type { NewAgentFields };

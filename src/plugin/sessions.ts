@@ -1,4 +1,3 @@
-// Sessions, the plugin's side: the CLIs' session stores, the session index, stars and pins, and starting or resuming a session.
 
 import type { Dirent, Stats } from "fs";
 import type { WorkspaceLeaf } from "obsidian";
@@ -10,12 +9,9 @@ import { isCodexSubagentSessionMeta, lastMessageTsOf, readFileHead } from "../se
 import type { Browser, LaunchOptions, OpenSession, Session, SessionRecord, StoreRecord } from "../types.js";
 import { isArray, stringOf } from "../util/guards.js";
 import type { AgentManagerPlugin } from "./main.js";
-// Past this many parsed transcript heads, an index read drops the ones it didn't use.
+import { notice } from "../vault-terminal/notice";
 const HEAD_CACHE_MAX = 4096;
 
-// The CLIs' JSON lines, typed as the CLIs write them. A field the code checks before use
-// is `unknown`; the rest are used as written, as they always were (a line that isn't the
-// shape throws inside the reader's try, or reads undefined).
 interface ClaudeTitleLine {
   type?: unknown;
   customTitle?: unknown;
@@ -37,7 +33,6 @@ interface AntigravityLine {
   type?: unknown;
   content?: unknown;
 }
-// What a head parse finds (cached by headParse).
 interface ClaudeHead {
   title: string | null;
   sessionId: string | null;
@@ -49,19 +44,13 @@ interface AntigravityHead {
   title: string | null;
   firstMessage: string;
 }
-// Where a launch came from: the sidebar, with its backend pick, or a session tab.
 type LaunchSource = Browser | Session | null | undefined;
 
 class SessionMethods {
-  // The backend currently selected in the browser (the switcher sets this).
   getCurrentBackend(this: AgentManagerPlugin): BackendKey {
     const key = this.pluginData.cliBackend || "claude";
     return isBackendKey(key) ? key : "claude";
   }
-  // Which backends the sidebar offers: the ones checked in settings (all three until
-  // the list is edited; it never goes empty), less any the setup check didn't find.
-  // When none of those is installed, the installed ones; when none at all is, the list
-  // stands, and the sidebar says what to install.
   getBrowserBackends(this: AgentManagerPlugin): BackendKey[] {
     const stored = this.pluginData.browserBackends;
     const list: readonly unknown[] = isArray(stored) && stored.length ? stored : REAL_BACKENDS;
@@ -71,26 +60,15 @@ class SessionMethods {
     const anyInstalled = REAL_BACKENDS.filter((k) => this.isInstalled(k));
     return anyInstalled.length ? anyInstalled : keys;
   }
-  // Head-parse cache. A transcript's name marker and session id live in its head and
-  // are written once at launch, so they never change as the session grows; only its
-  // mtime does. Keyed by (path, mtime): once warm, an idle file costs one statSync.
-  // `compute` runs on a miss and returns the cacheable value, which may be null.
   headParse<T>(this: AgentManagerPlugin, full: string, mtimeMs: number, compute: () => T): T {
     if (!this._headParseCache) this._headParseCache = new Map();
     const hit = this._headParseCache.get(full);
-    // A file is always parsed by the same reader (each CLI's files are in its own store),
-    // so what's cached for it is what `compute` returns.
-    // Each entry remembers the last index read that used it (sweepHeadCache).
     const read = this._headParseRead || 0;
     if (hit && hit.mtime === mtimeMs) { hit.read = read; return hit.value as T; }
     const value = compute();
     this._headParseCache.set(full, { mtime: mtimeMs, value, read });
     return value;
   }
-  // After an index read: once the cache is over its size, the entries that read didn't
-  // use (files gone, or only a lookup by id visited) go. Never during a read, so however
-  // many files a read visits (Codex's store is never pruned), the next read finds them
-  // all; evicting as it went would make a read drop what it needs next.
   sweepHeadCache(this: AgentManagerPlugin): void {
     const cache = this._headParseCache;
     const read = this._headParseRead || 0;
@@ -98,22 +76,14 @@ class SessionMethods {
     if (!cache || cache.size <= HEAD_CACHE_MAX) return;
     for (const [file, entry] of cache) if (entry.read !== read) cache.delete(file);
   }
-  // The title between the session-name marker's quotes, or null.
   markedTitle(this: AgentManagerPlugin, text: unknown): string | null {
     if (typeof text !== "string") return null;
     const at = text.indexOf(SESSION_NAME_PROMPT_PREFIX);
     if (at === -1) return null;
     const from = at + SESSION_NAME_PROMPT_PREFIX.length;
-    // The suffix is found after the value, not anchored on the end, so anything
-    // appended after the marker doesn't hide the session.
     const to = text.indexOf(SESSION_NAME_PROMPT_SUFFIX, from);
     return to === -1 ? null : text.slice(from, to);
   }
-  // ---- Session stores ----
-  // Each reader returns one backend's sessions as raw records, not filtered by title:
-  // { rawTitle, sessionId, mtime, file, backend, cwd }. `cwds` is the set of working
-  // directories to read (the vault); null reads every directory, which only a lookup
-  // by id does.
   storeRoot(this: AgentManagerPlugin, backendKey: string): string {
     const home = os.homedir();
     if (backendKey === "claude") return path.join(home, ".claude", "projects");
@@ -126,8 +96,6 @@ class SessionMethods {
     if (backendKey === "antigravity") return this.readAntigravityStore(onlyId);
     return [];
   }
-  // Claude keeps one folder per working directory, named by the directory with every
-  // non-alphanumeric replaced by "-", and one <uuid>.jsonl per conversation in it.
   readClaudeStore(this: AgentManagerPlugin, cwds: Set<string> | null, onlyId: string | null = null): StoreRecord[] {
     const root = this.storeRoot("claude");
     let dirs: { cwd: string | null; dir: string }[];
@@ -164,17 +132,11 @@ class SessionMethods {
     }
     return out;
   }
-  // The launch name (`claude -n "<title>"`) is the FIRST custom-title record, at the
-  // head. Claude retitles a session from its content as it runs, in later records, so
-  // the last one would not be the name the user gave it. A rename rides on top as an
-  // override. A session started outside the plugin has no launch name; its first
-  // message stands in for one.
   parseClaudeHead(this: AgentManagerPlugin, full: string): ClaudeHead {
     const content = readFileHead(full, 65536);
     const out: ClaudeHead = { title: null, sessionId: null, cwd: null, firstMessage: this._tc().firstHumanSnippet(content, "claude") };
     const cwd = content.match(/"cwd":("(?:[^"\\]|\\.)*")/);
-    // The match is a JSON string, so it parses to a string.
-    if (cwd) { try { out.cwd = path.resolve(JSON.parse(cwd[1]) as string); } catch { /* best effort */ } }
+    if (cwd) { try { out.cwd = path.resolve(JSON.parse(cwd[1]) as string); } catch { /* empty */ } }
     let from = 0;
     while (true) {
       const idx = content.indexOf("custom-title", from);
@@ -183,28 +145,21 @@ class SessionMethods {
       let end = content.indexOf("\n", idx);
       if (end === -1) end = content.length;
       try {
-        // The parse and type check reject a "custom-title" that is only message text.
         const rec = JSON.parse(content.slice(start, end)) as ClaudeTitleLine;
         if (rec.type === "custom-title" && typeof rec.customTitle === "string") {
-          // Claude's " (N)" comes off only when the head proves a compaction
-          // continuation; a title that merely ends in "(digits)" stays as written.
           out.title = this._tc().isCompactionContinuation(content) ? stripContinuationSuffix(rec.customTitle) : rec.customTitle;
           out.sessionId = rec.sessionId || null;
           break;
         }
-      } catch { /* best effort */ }
+      } catch { /* empty */ }
       from = idx + 12;
     }
     return out;
   }
-  // Codex keeps every session in one tree of rollout files, each recording its working
-  // directory in its first line. It has no name flag, so the title is the marker in
-  // the opening message.
   readCodexStore(this: AgentManagerPlugin, cwds: Set<string> | null, onlyId: string | null = null): StoreRecord[] {
     const files: string[] = [];
     const pending = [this.storeRoot("codex")];
     while (pending.length) {
-      // Never undefined: the loop runs while there's one to pop.
       const dir = pending.pop() as string;
       let entries: Dirent[];
       try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { continue; }
@@ -235,15 +190,11 @@ class SessionMethods {
     const lines = head.split("\n");
     let meta: CodexLine | null;
     try { meta = JSON.parse(lines[0]) as CodexLine | null; } catch { return null; }
-    // Reviewers and delegated agents inherit their parent's id and name marker. They
-    // are not sessions a person resumes.
     if (isCodexSubagentSessionMeta(meta)) return { subagent: true };
     if (meta?.type !== "session_meta") return null;
     const sessionId = meta.payload.session_id || meta.payload.id;
     if (typeof sessionId !== "string") return null;
     const cwd = path.resolve(meta?.payload?.cwd || "");
-    // The first marker wins: it is written once at launch, and a later message that
-    // quotes the marker must not retitle the session.
     let title: string | null = null;
     for (let i = 1; i < lines.length && title === null; i++) {
       let record: CodexLine | null;
@@ -263,9 +214,6 @@ class SessionMethods {
     }
     return { sessionId, title, cwd, firstMessage: this._tc().firstHumanSnippet(head, "codex") };
   }
-  // Antigravity keeps one folder per conversation, named by its uuid, and records no
-  // working directory, so every vault's conversations are in one store. The title is
-  // the marker in the opening message.
   readAntigravityStore(this: AgentManagerPlugin, onlyId: string | null = null): StoreRecord[] {
     const root = this.storeRoot("antigravity");
     let names: string[];
@@ -298,9 +246,6 @@ class SessionMethods {
     }
     return out;
   }
-  // ---- The session index ----
-  // Every session in the vault's store, on every backend, read once. A render asks for
-  // it several times, so one read serves calls that arrive together.
   sessionIndex(this: AgentManagerPlugin): Promise<SessionRecord[]> {
     const now = Date.now();
     if (this._sessionIndex && now - this._sessionIndex.at < 400) return this._sessionIndex.records;
@@ -315,67 +260,45 @@ class SessionMethods {
     const cwds = this.sessionCwds();
     const found: StoreRecord[] = [];
     for (const backend of REAL_BACKENDS) {
-      try { found.push(...this.readStore(backend, cwds)); } catch { /* best effort */ }
+      try { found.push(...this.readStore(backend, cwds)); } catch { /* empty */ }
     }
     const records = found.map((r) => this.classify(r));
     records.sort((a, b) => b.mtime - a.mtime);
     this.sweepHeadCache();
     return records;
   }
-  // The folders whose sessions are this vault's: the vault's root, the starting folder,
-  // and every folder a session of this plugin has run in, so a session started in an
-  // earlier starting folder stays listed.
   sessionCwds(this: AgentManagerPlugin): Set<string> {
     const cwds = new Set([path.resolve(this.getVaultPath()), path.resolve(this.startDir())]);
     for (const dir of isArray(this.pluginData.sessionFolders) ? this.pluginData.sessionFolders : []) {
       if (typeof dir === "string" && dir) cwds.add(path.resolve(dir));
     }
-    // And wherever an open tab's session runs, so its reload restore and its
-    // continuation and re-host tracking can still find it.
     for (const leaf of this.sessionLeaves()) {
       const dir = this.sessionOf(leaf)?.workingDir || this.savedSessionState(leaf)?.workingDir;
       if (dir) cwds.add(path.resolve(dir));
     }
-    // A CLI records the folder's real path, so a vault reached through a symlink is
-    // looked for under both.
     for (const dir of [...cwds]) {
-      try { cwds.add(fs.realpathSync(dir)); } catch { /* a folder that's gone */ }
+      try { cwds.add(fs.realpathSync(dir)); } catch { /* empty */ }
     }
     return cwds;
   }
-  // The CLI a new session starts on when nothing picks one: the default, if it's offered,
-  // else the first that is.
   defaultLaunchBackend(this: AgentManagerPlugin): BackendKey {
     const offered = this.getBrowserBackends();
-    // With nothing offered at all (no valid list, nothing installed), the first CLI, so
-    // a caller can always name one; starting it then says what's missing.
     return offered.includes(this.getCurrentBackend()) ? this.getCurrentBackend() : offered[0] ?? REAL_BACKENDS[0];
   }
-  // A record's name and whether it is listed. Claude and Codex sessions are read from
-  // the vault's folder only, so each is listed; Antigravity's store is shared by every
-  // vault, so only the conversations this plugin started in this vault are.
   classify(this: AgentManagerPlugin, record: StoreRecord): SessionRecord {
-    // Classified in place: the record itself gains its name and listing.
     const r = record as StoreRecord & Partial<SessionRecord>;
     r.listed = r.backend !== "antigravity" || this.isAntigravitySessionHere(r.sessionId);
     const vault = path.resolve(this.getVaultPath());
     if (r.cwd === vault) r.cwd = null;
-    // The name the session was launched with; else, for a session started outside the
-    // plugin, its first message; else its short id. A rename is an override in plugin
-    // data, keyed by session id.
     const launched = r.rawTitle || r.firstMessage || (r.sessionId ? `Session ${String(r.sessionId).slice(0, 8)}` : "Untitled");
     const override = this.pluginData.sessionNames?.[r.sessionId];
     r.displayName = override != null ? override : launched;
     r.title = r.displayName;
-    // Every field of a SessionRecord is set just above.
     return r as SessionRecord;
   }
-  // Every listed session, newest first.
   async listedSessions(this: AgentManagerPlugin): Promise<SessionRecord[]> {
     return (await this.sessionIndex()).filter((r) => r.listed);
   }
-  // The Antigravity conversations started in this vault, by id (pluginData), since
-  // Antigravity's store doesn't say which vault a conversation belongs to.
   isAntigravitySessionHere(this: AgentManagerPlugin, id: string | null | undefined): boolean {
     return !!id && Array.isArray(this.pluginData.antigravitySessions) && this.pluginData.antigravitySessions.includes(id);
   }
@@ -385,14 +308,9 @@ class SessionMethods {
     this.invalidateSessionIndex();
     await this.savePluginData();
   }
-  // Every conversation folder in Antigravity's store, by id.
   antigravityConversationIds(this: AgentManagerPlugin): string[] {
     try { return fs.readdirSync(this.storeRoot("antigravity"), { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name); } catch { return []; }
   }
-  // The conversation an Antigravity /fork just made: a folder that wasn't in `before`,
-  // made since `since`, that isn't the source and no tab holds. Null until there is one,
-  // or when there are two (another fork at the same moment), since guessing would put
-  // two tabs on one conversation.
   newAntigravityConversation(this: AgentManagerPlugin, before: Set<string>, since: number, sourceId: string | null | undefined): string | null {
     const root = this.storeRoot("antigravity");
     const held = new Set(this.sessionObjects().map((v) => v._ownSessionId()).filter(Boolean));
@@ -402,10 +320,6 @@ class SessionMethods {
     });
     return found.length === 1 ? found[0] : null;
   }
-  // A side chat has its id: it's recorded as one (sideChats, id to the source's id), so
-  // following a re-host never mistakes it for its source's or another side chat's; it
-  // keeps the name it was started with (a Codex or Antigravity fork has no name marker,
-  // so the name is kept as a rename); and an Antigravity one is this vault's.
   async adoptSideChat(this: AgentManagerPlugin, id: string | null | undefined, name: string | null | undefined, sourceId: string | null = null): Promise<void> {
     if (!id) return;
     this.pluginData.sideChats = { ...(this.pluginData.sideChats || {}), [id]: sourceId || "" };
@@ -419,10 +333,6 @@ class SessionMethods {
     const list = this.pluginData.antigravitySessions;
     if (Array.isArray(list) && list.includes(id)) list.splice(list.indexOf(id), 1);
   }
-  // A session by id alone. The index covers the vault; a Claude or Codex session
-  // anywhere else is found by looking across the whole store. An Antigravity
-  // conversation another vault started is never found here.
-  // `own`: a tab looking up its own id, which no vault filter applies to.
   async findSessionById(this: AgentManagerPlugin, sessionId: string | null | undefined, { own = false }: { own?: boolean } = {}): Promise<SessionRecord | null> {
     if (!sessionId || !/^[0-9a-fA-F-]{16,}$/.test(String(sessionId))) return null;
     const hit = (await this.sessionIndex()).find((r) => r.sessionId === sessionId);
@@ -430,16 +340,11 @@ class SessionMethods {
     for (const backend of REAL_BACKENDS) {
       if (backend === "antigravity" && !own) continue;
       let found: StoreRecord[] = [];
-      try { found = this.readStore(backend, null, sessionId); } catch { /* best effort */ }
+      try { found = this.readStore(backend, null, sessionId); } catch { /* empty */ }
       if (found.length) return this.classify(found[0]);
     }
     return null;
   }
-  // When a session was last active, for sorting Recent's open sessions: a Claude transcript's last real
-  // message, since Remote Control keeps appending bookkeeping to a session nobody is
-  // using and bumps its file time.
-  // Cached per file and mtime, so a file is read again only when it changes. Codex and
-  // Antigravity transcripts don't timestamp each message, so they use the file time.
   lastActivity(this: AgentManagerPlugin, backend: string, file: string | null | undefined, mtime: number | null | undefined): number {
     if (backend !== "claude" || !file) return mtime || 0;
     const cache = this._lastActivityCache || (this._lastActivityCache = new Map<string, { mtime: number | null | undefined; at: number }>());
@@ -449,9 +354,6 @@ class SessionMethods {
     cache.set(file, { mtime, at });
     return at;
   }
-  // Pinned sessions stay at the top of the home page when their tab closes, so ongoing
-  // work is easy to get back to. Stored as session id to a sort key: the time it was
-  // pinned, so a new pin goes last, renumbered 1..n when the section is reordered.
   isPinned(this: AgentManagerPlugin, sessionId: string | null | undefined): boolean {
     return !!sessionId && Object.prototype.hasOwnProperty.call(this.pluginData.pinnedSessions || {}, sessionId);
   }
@@ -464,23 +366,18 @@ class SessionMethods {
     else this.pluginData.pinnedSessions = { ...(this.pluginData.pinnedSessions || {}), [sessionId]: Date.now() };
     await this.savePluginData();
   }
-  // "Oct 1", with the year when it isn't this one.
   shortDate(this: AgentManagerPlugin, ms: number | null | undefined): string {
     const d = new Date(ms || Date.now());
     const opts: Intl.DateTimeFormatOptions = { month: "short", day: "numeric" };
     if (d.getFullYear() !== new Date().getFullYear()) opts.year = "numeric";
     return d.toLocaleDateString(undefined, opts);
   }
-  // Every pinned session, in the section's order (drag-reorderable). An open session
-  // the index hasn't listed yet (a Claude session before its first message has no
-  // transcript) is pinned from its tab, so pinning it shows at once.
   async readPinnedSessions(this: AgentManagerPlugin): Promise<SessionRecord[]> {
     const pins = this.pluginData.pinnedSessions || {};
     if (!Object.keys(pins).length) return [];
     const has = (id: string | null | undefined): id is string => !!id && Object.prototype.hasOwnProperty.call(pins, id);
     const found = (await this.listedSessions()).filter((s) => has(s.sessionId));
     const ids = new Set(found.map((s) => s.sessionId));
-    // From each tab: a running one, or one restored on reload that isn't loaded yet.
     const tabs: OpenSession[] = this.getOpenSessions();
     for (const leaf of this.sessionLeaves()) {
       if (this.sessionOf(leaf)) continue;
@@ -492,11 +389,8 @@ class SessionMethods {
       ids.add(o.sessionId);
       found.push(this.openSessionRecord(o));
     }
-    // Every record here passed has(), so its id is a pin's.
     return found.sort((a, b) => pins[a.sessionId as string] - pins[b.sessionId as string]);
   }
-  // Drop a session into the pinned list: reorder it if it is already pinned, or pin it
-  // (a drag from Recent).
   async reorderPinnedSession(this: AgentManagerPlugin, draggedId: string | null | undefined, beforeId: string | null | undefined): Promise<void> {
     if (!draggedId || draggedId === beforeId) return;
     const pins = this.pluginData.pinnedSessions || {};
@@ -519,29 +413,17 @@ class SessionMethods {
     if (mo < 12) return `${mo}mo ago`;
     return `${Math.floor(mo / 12)}y ago`;
   }
-  // A new session in a new tab. `opts`: backendOverride (a menu's or a link's pick),
-  // notePath (the note it was started from, which it writes its resume link back to),
-  // folderPath (the folder it was started from), daily (today's chat), forkFrom
-  // ({ id, backend, cwd }: a side chat, a fork of that session), and sideSession and
-  // handoff* (a side chat that reads another session's transcript note instead).
   async startSession(this: AgentManagerPlugin, subject: string, sourceView: LaunchSource, opts: LaunchOptions | null = null): Promise<Session | null> {
-    // A starting folder that's gone stops every launch, rather than start at the root of
-    // a vault someone chose to keep agents out of.
     if (this.startFolderMissing()) {
-      new import_obsidian.Notice(`Agent Manager: the AGENTS.md folder “${stringOf(this.pluginData.startFolder)}” isn't in this vault anymore, so no session was started. Choose another in Settings → Agent Manager.`, 10000);
+      notice(`Agent Manager: the AGENTS.md folder “${stringOf(this.pluginData.startFolder)}” isn't in this vault anymore, so no session was started. Choose another in Settings → Agent Manager.`);
       return null;
     }
-    // The launching browser's backend pick drives the new session; a menu's or a link's
-    // pick wins over it; with neither, the view uses the default.
-    // Only the sidebar has a pick; a session tab reads undefined here.
     const lb = (sourceView as { _launchBackend?: unknown } | null | undefined)?._launchBackend;
     const fallback = this.defaultLaunchBackend();
     const launchBackend = (opts?.backendOverride && isBackendKey(opts.backendOverride)) ? opts.backendOverride
       : (lb && isBackendKey(lb) ? lb : fallback);
     const prepare = (v: Session) => {
       if (launchBackend) v.backendKey = launchBackend;
-      // A note launch carries the note's path, so the session can write its link back
-      // once its id resolves (maybeWriteNoteBack).
       v._notePath = opts?.notePath || null;
       v._folderPath = opts?.folderPath || null;
       v._ticketLinks = {};
@@ -552,30 +434,21 @@ class SessionMethods {
       v._handoffMode = opts?.handoffMode || (opts?.handoffNote ? "side-chat" : null);
       v._daily = !!opts?.daily;
       v._setup = !!opts?.setup;
-      // Its agent, settled now: the session it continues gives it, else where it starts
-      // (plugin/agents.ts, launchAgentId).
       v._agentId = opts?.agentId !== undefined ? opts.agentId : this.launchAgentId({ notePath: opts?.notePath, folderPath: opts?.folderPath });
       v._forkFrom = opts?.forkFrom || null;
-      // A side chat never takes over its note's link; a launch from the note does.
       v._noteSupport = !!opts?.sideSession;
       v._noteClaim = !!opts?.notePath && !opts?.sideSession;
       v._noteReplaces = !!opts?.newMain;
-      // Which launch from a note is the latest decides who holds its link, whichever
-      // learns its id first (newerLaunchFrom), even after the latest one's tab closes.
       v._noteLaunchAt = v._noteClaim ? Date.now() : null;
-      // A claim means a notePath (just above).
       if (v._noteClaim) (this._noteLaunches || (this._noteLaunches = new Map<string, number | null>())).set(opts?.notePath as string, v._noteLaunchAt);
     };
-    // A ticket has one main session: a second launch while it's open, or still starting,
-    // goes to its tab instead of starting another.
     const ticket = opts?.notePath && !opts.sideSession && !opts.forkFrom && !opts.newMain && this.isTicketNote(opts.notePath) ? opts.notePath : null;
     if (ticket) {
       const launching = this._ticketLaunching || (this._ticketLaunching = new Set<string>());
       if (launching.has(ticket)) return null;
       const open = this.ticketMainLeaf(ticket);
       if (open) {
-        void this.app.workspace.revealLeaf(open);
-        this.app.workspace.setActiveLeaf(open, { focus: true });
+        void this.revealAndFlash(open);
         return this.sessionOf(open);
       }
       launching.add(ticket);
@@ -591,10 +464,6 @@ class SessionMethods {
       if (ticket) this._ticketLaunching?.delete(ticket);
     }
   }
-  // ---- Today's chat ----
-  // Today's chat's tab, loaded or not, or null: a session tab named for today.
-  // While there are agents, it's the switched agent's (or `agentId`'s, when given): named
-  // for it and recorded as its.
   todaysChatLeaf(this: AgentManagerPlugin, agentId?: string | null): WorkspaceLeaf | null {
     const switched = agentId === undefined ? this.switchedAgentId() : agentId;
     const name = this.dailyChatName(switched);
@@ -605,9 +474,6 @@ class SessionMethods {
     }
     return null;
   }
-  // The note or folder a session was started from, by the `source` its transcript note
-  // records, or null.
-  // A folder is recorded as its vault path with a trailing slash (_sourceLink).
   sourceOf(this: AgentManagerPlugin, sessionId: string | null | undefined): { notePath: string } | { folderPath: string } | null {
     const t = this.findTranscriptNoteBySessionId(sessionId);
     const src: unknown = t && this.app.metadataCache.getFileCache(t)?.frontmatter?.source;
@@ -617,17 +483,11 @@ class SessionMethods {
       return dir instanceof import_obsidian.TFolder && !dir.isRoot() ? { folderPath: dir.path } : null;
     }
     const m = src.match(/^\[\[([^\]|#]+)(?:[#|][^\]]*)?\]\]$/);
-    // A match means t was found (its frontmatter gave src), so `t &&` changes nothing.
     const note = m && t && this.app.metadataCache.getFirstLinkpathDest(m[1], t.path);
     return note instanceof import_obsidian.TFile ? { notePath: note.path } : null;
   }
-  // Go to today's chat: its tab, else resume it (the newest session by that name), else
-  // start it on the default CLI. Never a second one. It's the switched agent's, or with
-  // `agentId` given (an op=daily link's), that agent's, whatever the switch shows.
   async openTodaysChat(this: AgentManagerPlugin, sourceView: LaunchSource = null, agentId?: string | null): Promise<void> {
     const switched = agentId === undefined ? this.switchedAgentId() : agentId;
-    // One opening at a time per agent: a second click or link for the same chat while it
-    // opens is dropped, and another agent's goes ahead.
     const opening = this._openingToday || (this._openingToday = new Set());
     const key = switched ?? "";
     if (opening.has(key)) return;
@@ -635,13 +495,12 @@ class SessionMethods {
     try {
       const leaf = this.todaysChatLeaf(switched);
       if (leaf) {
-        void this.app.workspace.revealLeaf(leaf);
-        this.app.workspace.setActiveLeaf(leaf, { focus: true });
+        void this.revealAndFlash(leaf);
         return;
       }
       const name = this.dailyChatName(switched);
       let sessions: SessionRecord[] = [];
-      try { sessions = await this.listedSessions(); } catch { /* best effort */ }
+      try { sessions = await this.listedSessions(); } catch { /* empty */ }
       const earlier = sessions.find((s) => s.displayName === name && (switched === null || this.listedAgentOf(this.recordedAgentId(s.sessionId)) === switched));
       if (earlier) { await this.startResume(earlier, sourceView); return; }
       const offered = this.getBrowserBackends();
@@ -651,8 +510,6 @@ class SessionMethods {
       opening.delete(key);
     }
   }
-  // Does this session's working directory still exist? A repo that moved or was
-  // deleted can't host a resume.
   placeMissing(this: AgentManagerPlugin, session: { cwd: string | null } | null | undefined): boolean {
     if (!session || !session.cwd) return false;
     try { return !fs.statSync(session.cwd).isDirectory(); } catch { return true; }
@@ -660,12 +517,10 @@ class SessionMethods {
   async startResume(this: AgentManagerPlugin, session: SessionRecord, sourceView: LaunchSource): Promise<void> {
     if (this.placeMissing(session)) {
       const note = this.findTranscriptNoteBySessionId(session.sessionId);
-      new import_obsidian.Notice(`Agent Manager: that session ran in ${session.cwd}, which is not on this machine.${note ? " Opening its transcript." : ""}`, 8000);
+      notice(`Agent Manager: that session ran in ${session.cwd}, which is not on this machine.${note ? " Opening its transcript." : ""}`);
       if (note) await this.openInNotesArea(note);
       return;
     }
-    // One resume at a time per session: a double-click on a row would otherwise open a
-    // second tab before the first has its title, and two tabs would write one session.
     const key = `${session.backend}\n${session.sessionId || session.title}`;
     this._resuming = this._resuming || new Set();
     if (this._resuming.has(key)) return;
@@ -675,8 +530,6 @@ class SessionMethods {
       if (!view) return;
       view.resumeSession(session);
     } finally {
-      // Released once the tab has the session's title, when a row's click finds the tab
-      // itself; held any longer, a click after closing that tab would do nothing.
       this._resuming.delete(key);
     }
   }

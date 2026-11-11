@@ -1,9 +1,3 @@
-// The transcript writer: parses each CLI's transcript records and appends the ones not
-// yet written to a note in the vault. Append-only: each record carries a hidden
-// <!-- pl-rec:KEY --> marker, and a write only ever adds records whose key isn't in the
-// note yet, so nothing the CLI later deletes or rewrites changes what is already saved.
-// The vault I/O is passed in (an adapter), so this module touches no vault API itself,
-// and Node can import it alone (scripts/test-transcript-core.mjs).
 import * as fs from "fs";
 import * as path from "path";
 import { stringOf } from "../util/guards.js";
@@ -11,10 +5,6 @@ import type { TranscriptIO, TranscriptMessage, TranscriptPart, TranscriptWrite, 
 
 const TRANSCRIPT_DIR = "Agent Transcripts";
 
-// One line of a CLI's transcript, as each CLI writes it, read with JSON.parse. Every field
-// is optional; one the code checks before use is unknown, and one it uses as the CLI
-// writes it has that type.
-// A Claude tool call's input: the fields a hint is made from.
 interface ToolInput {
   description?: unknown;
   command?: unknown;
@@ -25,7 +15,6 @@ interface ToolInput {
   url?: unknown;
   prompt?: unknown;
 }
-// A block of a Claude message's content.
 interface ClaudeBlock {
   type?: unknown;
   text?: string;
@@ -61,12 +50,10 @@ interface AgyLine {
   content?: unknown;
   tool_calls?: ({ name?: string; args?: unknown } | null)[];
 }
-// A Codex message's content block: its text is checked before use.
 interface CodexBlock {
   text?: unknown;
 }
 
-// ---- parsing (per backend) ----
 function transcriptToolHint(b: ClaudeBlock): string {
   const i: ToolInput = b.input || {};
   const raw = i.description || i.command || i.file_path || i.path || i.pattern || i.query || i.url || i.prompt || "";
@@ -78,15 +65,14 @@ function isInjectedTranscriptContext(text: string): boolean {
   return /^# AGENTS\.md instructions\b/.test(t)
     || /^<(environment_context|user_instructions|INSTRUCTIONS|system-reminder)\b/.test(t);
 }
-// A message's content as an array: Array.isArray, typed as the blocks each CLI writes.
 function isBlocks(c: unknown): c is (ClaudeBlock | null)[] {
   return Array.isArray(c);
 }
 function isCodexBlocks(c: unknown): c is (CodexBlock | null)[] {
   return Array.isArray(c);
 }
-function parseClaudeTranscript(o: ClaudeLine): TranscriptMessage | null {
-  if (o.isSidechain) return null;
+function parseClaudeTranscript(o: ClaudeLine, sidechain = false): TranscriptMessage | null {
+  if (o.isSidechain && !sidechain) return null;
   if (o.type === "system" && o.subtype === "compact_boundary") {
     return { role: "boundary", uuid: o.uuid || ("boundary-" + (o.timestamp || "")) };
   }
@@ -98,7 +84,6 @@ function parseClaudeTranscript(o: ClaudeLine): TranscriptMessage | null {
     if (typeof c === "string") text = c;
     else if (isBlocks(c)) {
       if (c.length && c.every((b) => b && b.type === "tool_result")) return null;
-      // The filter dropped the null blocks.
       text = c.filter((b) => b && b.type === "text").map((b) => (b as ClaudeBlock).text).join("\n\n");
     }
     text = (text || "").trim();
@@ -125,7 +110,6 @@ function parseCodexTranscript(o: CodexLine): TranscriptMessage | null {
     if (role !== "user" && role !== "assistant") return null;
     const c = p.content;
     const text = isCodexBlocks(c)
-      // The filter dropped the null blocks.
       ? c.filter((b) => b && typeof b.text === "string").map((b) => (b as CodexBlock).text).join("\n\n").trim()
       : (typeof c === "string" ? c.trim() : "");
     if (!text) return null;
@@ -165,24 +149,19 @@ function parseAgyTranscript(o: AgyLine): TranscriptMessage | null {
   }
   return null;
 }
-function parseTranscriptRecord(line: string, backend: string): TranscriptMessage | null {
+function parseTranscriptRecord(line: string, backend: string, sidechain = false): TranscriptMessage | null {
   const s = line.trim();
   if (!s || s[0] !== "{") return null;
-  // A line that starts with "{" parses to an object or throws, so it is one of these.
   let o: ClaudeLine & CodexLine & AgyLine;
   try { o = JSON.parse(s) as ClaudeLine & CodexLine & AgyLine; } catch { return null; }
   if (backend === "codex") return parseCodexTranscript(o);
   if (backend === "antigravity") return parseAgyTranscript(o);
-  return parseClaudeTranscript(o);
+  return parseClaudeTranscript(o, sidechain);
 }
 
-// ---- formatting ----
 function transcriptMessageToMarkdown(m: TranscriptMessage): string {
   if (m.role === "boundary") return "---\n\n*· context compacted here ·*\n";
   if (m.role === "user") {
-    // The fence must be longer than any backtick run in the text, or a run of
-    // that length inside the message closes the block early (a line of four
-    // backticks did, against the old fixed "````" fallback).
     let longest = 0;
     for (const run of m.text.match(/`+/g) || []) if (run.length > longest) longest = run.length;
     const fence = "`".repeat(Math.max(3, longest + 1));
@@ -203,9 +182,6 @@ function sanitizeTranscriptName(name: string | null | undefined): string {
     .trim()
     .slice(0, 120) || "Untitled";
 }
-// `source`: a link to the note the session was started from (a wikilink), or the
-// folder's vault path with a trailing slash, written as given, or nothing. `agent`: the
-// session's agent's name, or nothing.
 function transcriptHeader(title: string | null | undefined, sessionId: string | null | undefined, backend: string | null | undefined, source: string | null = null, agent: string | null = null): string {
   const t = title || "Untitled session";
   return [
@@ -228,13 +204,6 @@ function deriveSessionId(file: string, backend: string): string {
   const m = base.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
   return m ? m[0] : base;
 }
-// The id part of a note's name: the first eight characters of the session id, or with
-// `long`, those and the last four. Codex ids are time-ordered, so two Codex sessions
-// started within a minute or so share their first eight; the second one's note then
-// takes the long form.
-// The lock a session's transcript note is written under: the transcripts folder and the
-// id's short key. Every write to the note takes it (the writer, a move between agents'
-// folders, the files a session sent), so none of them interleave.
 function transcriptLockKey(lockDir: string, sessionId: string): string {
   return lockDir + "\n" + noteIdKey(sessionId);
 }
@@ -245,19 +214,13 @@ function noteIdKey(sessionId: string | null | undefined, long = false): string {
 function transcriptBasename(sessionId: string, title: string | null | undefined, long = false): string {
   return sanitizeTranscriptName(title || "Untitled") + " (" + noteIdKey(sessionId, long) + ")";
 }
-// The session id a transcript note's frontmatter records, or null.
-// Read from the frontmatter block only, quoted either way or not at all.
 function noteSessionId(text: string | null | undefined): string | null {
   const fm = String(text || "").match(/^---\r?\n([\s\S]*?)\r?\n---/);
   if (!fm) return null;
   const m = fm[1].match(/^session_id:\s*["']?([^"'\r\n]*)["']?\s*$/m);
   return m && m[1] ? m[1] : null;
 }
-// Launch prompts the plugin itself sends as a session's first user message: they can't
-// label or tell sessions apart.
 const LAUNCH_PROMPT_RE = /^(Session start\.|\$[a-z]|\/[a-z])|This session is named "/;
-// First user message a HUMAN typed, skipping the plugin's launch prompts. The fallback
-// label for a session with no title record.
 function firstHumanSnippet(rawText: string | null | undefined, backend: string): string {
   for (const line of String(rawText || "").split("\n")) {
     const rec = parseTranscriptRecord(line, backend);
@@ -267,24 +230,13 @@ function firstHumanSnippet(rawText: string | null | undefined, backend: string):
   }
   return "";
 }
-// Claude's " (N)" suffix on a compaction continuation's title. Stripped ONLY when the
-// file proves it is a continuation (isCompactionContinuation below): a title can end in
-// " (digits)" for its own reasons ("Planning (2026)"), and a bare regex would rename
-// that session so nothing could find its transcript.
 const CONTINUATION_SUFFIX_RE = / \(\d+\)$/;
 function stripContinuationSuffix<T>(title: T): T | string {
   return typeof title === "string" ? title.replace(CONTINUATION_SUFFIX_RE, "") : title;
 }
-// Is this Claude transcript (its head text) a compaction continuation? When Claude
-// compacts a session's context into a NEW file, that file's FIRST user record is the
-// compaction summary, flagged `isCompactSummary: true` ("This session is being
-// continued from a previous conversation..."). An in-place compaction appends its summary AFTER real turns, so the first user
-// record test cannot match it. Only the head is needed: the first user record sits
-// within the first few KB.
 function isCompactionContinuation(headText: string | null | undefined): boolean {
   for (const line of String(headText || "").split("\n")) {
     if (line.indexOf('"type":"user"') === -1) continue;
-    // Any JSON value: each field read is checked, and a primitive's reads undefined.
     let o: ClaudeLine | null;
     try { o = JSON.parse(line) as ClaudeLine | null; } catch { continue; }
     if (!o || o.type !== "user") continue;
@@ -292,26 +244,20 @@ function isCompactionContinuation(headText: string | null | undefined): boolean 
   }
   return false;
 }
-// The session's own title record if the CLI wrote one (Claude's first custom-title,
-// at the head; the first, to match the readers and survive Claude's auto-retitle).
-// A continuation's title drops its " (N)" so its note files under the parent's name.
 function recordedTitle(rawText: string | null | undefined): string | null {
   const text = String(rawText || "");
   for (const line of text.split("\n")) {
     if (!line.includes('"custom-title"')) continue;
     try {
-      // Any JSON value: each field read is checked, and a primitive's reads undefined.
       const o = JSON.parse(line) as ClaudeLine | null;
       if (o && o.type === "custom-title" && typeof o.customTitle === "string" && o.customTitle.trim()) {
         const t = o.customTitle.trim();
         return isCompactionContinuation(text) ? stripContinuationSuffix(t) : t;
       }
-    } catch { /* best effort */ }
+    } catch { /* empty */ }
   }
   return null;
 }
-// Title for a note written without one (an import). Prefer the CLI's own title record;
-// else the first HUMAN message, truncated, never the launch prompt; else "session".
 function deriveTitle(rawText: string | null | undefined, backend: string): string {
   const recorded = recordedTitle(rawText);
   if (recorded) return recorded;
@@ -319,12 +265,9 @@ function deriveTitle(rawText: string | null | undefined, backend: string): strin
   return human ? human.slice(0, 48).trim() : "session";
 }
 
-// ---- atomicity: one write per note at a time, in this process. A capture from the
-// status poll and one from a tab closing can overlap; the second waits for the first.
 const transcriptLocks = new Map<string, Promise<void>>();
 async function withTranscriptLock<T>(relPath: string, fn: () => Promise<T>): Promise<T> {
   const prev = transcriptLocks.get(relPath) || Promise.resolve();
-  // Set by the promise's executor, which runs before the next line.
   let release!: () => void;
   const mine = new Promise<void>((r) => { release = r; });
   const chained = prev.then(() => mine);
@@ -337,8 +280,6 @@ async function withTranscriptLock<T>(relPath: string, fn: () => Promise<T>): Pro
   }
 }
 
-// The note in `dir` that belongs to session `fullId`, by the id its frontmatter records,
-// or null. `names` is the folder's file names.
 async function findNoteFor(io: TranscriptIO, dir: string, names: string[] | null | undefined, fullId: string): Promise<string | null> {
   const short = "(" + noteIdKey(fullId) + ").md", long = "(" + noteIdKey(fullId, true) + ").md";
   for (const n of names || []) {
@@ -350,10 +291,6 @@ async function findNoteFor(io: TranscriptIO, dir: string, names: string[] | null
   return null;
 }
 
-// ---- THE writer. io is an adapter: { exists, read, create, append, ensureDir, list }
-// (all async, vault-relative paths). `opts.source`, a link to the note the session was
-// started from, goes into a new note's frontmatter. Append-only, keyed by pl-rec:<uuid> markers: only
-// ever ADDS records not already present. Returns { added, path }.
 async function writeDurableTranscript(io: TranscriptIO, opts: TranscriptWriteOptions): Promise<TranscriptWrite | null> {
   const { backend, sessionTitle, sessionId, transcriptFile } = opts;
   const dir = opts.transcriptDir || TRANSCRIPT_DIR;
@@ -363,25 +300,19 @@ async function writeDurableTranscript(io: TranscriptIO, opts: TranscriptWriteOpt
   try { raw = fs.readFileSync(transcriptFile, "utf8"); } catch { return null; }
   const msgs: TranscriptMessage[] = [];
   for (const line of raw.split("\n")) {
-    const m = parseTranscriptRecord(line, backend);
+    const m = parseTranscriptRecord(line, backend, !!opts.sidechain);
     if (m && m.uuid) msgs.push(m);
   }
   if (!msgs.length) return null;
   const fullId = String(sessionId || deriveSessionId(transcriptFile, backend));
   const title = sessionTitle || deriveTitle(raw, backend);
-  // One note per session id, found by the id in its frontmatter, whatever its title:
-  // the note the caller finds anywhere under the transcripts folder (`findExisting`, asked
-  // inside the lock, which a move between agents' folders also takes), else one in `dir`. Locked by the
-  // transcripts folder and the id's short key, not the full id: two sessions whose ids
-  // share their first eight characters would otherwise both find no note and pick one
-  // name for it.
   return withTranscriptLock(transcriptLockKey(opts.lockDir || dir, fullId), async () => {
     let names: string[] = [];
-    try { names = (await io.list(dir)) || []; } catch { /* best effort */ }
+    try { names = (await io.list(dir)) || []; } catch { /* empty */ }
     let relPath: string | null = null;
     const existing = opts.findExisting?.() || null;
     if (existing && await io.exists(existing)) {
-      try { if (noteSessionId(await io.read(existing)) === fullId) relPath = existing; } catch { /* best effort */ }
+      try { if (noteSessionId(await io.read(existing)) === fullId) relPath = existing; } catch { /* empty */ }
     }
     if (!relPath) relPath = await findNoteFor(io, dir, names, fullId);
     const seen = new Set<string | undefined>();
@@ -391,10 +322,8 @@ async function writeDurableTranscript(io: TranscriptIO, opts: TranscriptWriteOpt
       let mm: RegExpExecArray | null;
       while ((mm = re.exec(existing)) !== null) seen.add(mm[1]);
     } else {
-      // A new note. Its short id is taken when another session's note already ends in it.
       const shortTaken = names.some((n) => n.endsWith("(" + noteIdKey(fullId) + ").md"));
       relPath = dir + "/" + transcriptBasename(fullId, title, shortTaken) + ".md";
-      // Never over a note that's there (one of another session, named alike).
       if (await io.exists(relPath)) relPath = dir + "/" + transcriptBasename(fullId, title + " " + fullId.slice(-4), shortTaken) + ".md";
       await io.ensureDir(dir);
       await io.create(relPath, transcriptHeader(title, fullId, backend, opts.source || null, opts.agent || null));

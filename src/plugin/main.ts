@@ -1,6 +1,5 @@
-// The plugin: its lifecycle, sessions, links, and the sidebar.
 
-import type { App, PluginManifest, WorkspaceLeaf } from "obsidian";
+import type { App, MarkdownView, PluginManifest, WorkspaceLeaf } from "obsidian";
 import { import_obsidian } from "../externals.js";
 import { isBackendKey } from "../constants/backends.js";
 import { AgentMethods } from "./agents.js";
@@ -15,9 +14,16 @@ import { ShellMethods } from "./shell.js";
 import { WorkspaceMethods } from "./workspace.js";
 import { TerminalHostMethods } from "./terminal-host.js";
 import { TicketMethods } from "./tickets.js";
+import { SchedulerMethods } from "./scheduler.js";
+import type { NewTaskDraft } from "../constants/scheduled.js";
+import { RunMethods } from "./runs.js";
+import { SessionRunMethods } from "./session-runs.js";
+import { ClockMethods } from "./clock.js";
+import { SafetyMethods } from "./safety.js";
+import type { LiveRun } from "./runs.js";
 import { AgentManagerSettingsTab } from "../settings/tab.js";
 import { BrowserView } from "../browser/view.js";
-import { BROWSER_VIEW_TYPE, SESSION_VIEW_TYPE } from "../sessions/constants.js";
+import { BROWSER_VIEW_TYPE, PLAIN_TERMINAL_VIEW_TYPE, SESSION_VIEW_TYPE } from "../sessions/constants.js";
 import { sessionLinkLabels } from "../notes/link-pills.js";
 import { TranscriptMethods } from "../transcripts/plugin-transcripts.js";
 import { ConfirmModal } from "../ui/modals.js";
@@ -25,11 +31,10 @@ import { applyParts } from "../util/apply-parts.js";
 import { isArray, stringOf } from "../util/guards.js";
 import type { PluginData, SavedSessionState, SessionRecord, SetupStatus, TicketCard } from "../types.js";
 import type { VaultTerminal } from "../vault-terminal/core";
-// The class Obsidian loads. Its full type, with every part's methods, is AgentManagerPlugin
-// (below): the parts and every method here that calls one take `this` as that.
+import type { RunRow } from "../scheduled/run-core.js";
+import type { ScheduledTask } from "../scheduled/task-model.js";
+import { notice } from "../vault-terminal/notice";
 class VaultTerminalPlugin extends import_obsidian.Plugin {
-  // Every field the class or a part sets on the plugin. `declare` adds no code: each is
-  // set where it always was (the first two in the constructor), and unset until then.
   declare lastRibbonClick: number;
   declare pluginData: PluginData;
   declare lastActiveTerminalLeaf: WorkspaceLeaf | null;
@@ -37,31 +42,28 @@ class VaultTerminalPlugin extends import_obsidian.Plugin {
   declare ribbonIcon: HTMLElement;
   declare _timeouts: Set<number> | undefined;
   declare _unloading: boolean | undefined;
-  // The terminal (terminal-host.ts).
   declare terminal: VaultTerminal | undefined;
   declare _reloadAsked: number | undefined;
-  // The folder the Claude mods are written into (claude-mod.ts).
   declare _claudeModDir: string | null | undefined;
-  // The guides' folder (guides.ts).
   declare _guidesDir: string | null | undefined;
-  // The setup check (setup.ts).
   declare _setup: SetupStatus | undefined;
   declare _setupCheck: Promise<SetupStatus> | null | undefined;
-  // claude agents --json, shared for a few seconds (shell.ts).
   declare _agentsShared: { at: number; promise: Promise<unknown[]> } | null | undefined;
-  // The session index and its caches (sessions.ts).
   declare _headParseCache: Map<string, { mtime: number; value: unknown; read: number }> | undefined;
   declare _headParseRead: number | undefined;
   declare _movedTranscriptNotes: Map<string, string> | undefined;
+  declare _codexSubHeads: Map<string, { id: string; parent: string; root: string; title: string } | null> | undefined;
+  declare _subagentLists: Map<string, { at: number; dirs: string[] }> | undefined;
+  declare _subagentMetas: Map<string, { description?: unknown; agentType?: unknown }> | undefined;
+  declare _subagentSizes: Map<string, number> | undefined;
   declare _sessionIndex: { at: number; records: Promise<SessionRecord[]> } | null | undefined;
   declare _lastActivityCache: Map<string, { mtime: number | null | undefined; at: number }> | undefined;
   declare _noteLaunches: Map<string, number | null> | undefined;
-  // Tickets whose main session is being started, until its tab exists (startSession).
   declare _ticketLaunching: Set<string> | undefined;
+  declare _ticketActions: Map<MarkdownView, { el: HTMLElement; state: "launch" | "resume" | "run" | "stop" }> | undefined;
   declare _openingToday: Set<string> | undefined;
   declare _openingSetup: boolean | undefined;
   declare _resuming: Set<string> | undefined;
-  // The workspace (workspace.ts).
   declare _browserCreateInFlight: boolean | undefined;
   declare _seenWorking: Set<string> | undefined;
   declare _statusRefreshTimer: number | null | undefined;
@@ -69,78 +71,89 @@ class VaultTerminalPlugin extends import_obsidian.Plugin {
   declare _openRoutingAvailable: boolean | undefined;
   declare _sweepScheduled: boolean | undefined;
   declare _unmovableStrays: WeakSet<WorkspaceLeaf> | undefined;
-  // Set by the sidebar's cards (browser/home.ts): New session open, and the New ticket
-  // card (open, what's typed in it, and the session it was opened from); and by a
-  // session's restore queue and re-host check cache (sessions/identity.ts).
   declare newCardOpen: boolean | undefined;
   declare ticketCard: TicketCard | undefined;
+  declare taskCard: { open: boolean; draft: NewTaskDraft } | undefined;
   declare _restoreQueue: Promise<unknown> | undefined;
+  declare _taskPaths: Set<string> | null | undefined;
+  declare _taskPathsResolved: boolean | undefined;
+  declare _taskCache: Promise<{ task: ScheduledTask; runs: RunRow[] }[]> | null | undefined;
+  declare _followUpQueue: Promise<string | null> | undefined;
+  declare _taskRedraw: number | null | undefined;
+  declare _transcriptNotes: string[] | undefined;
+  declare _liveRuns: Map<string, LiveRun> | undefined;
+  declare _runLogChains: Map<string, Promise<unknown>> | undefined;
+  declare _gitChain: Promise<boolean> | undefined;
+  declare _ownPids: Set<number> | undefined;
+  declare _tickBusy: boolean | undefined;
+  declare _waited: Set<string> | undefined;
+  declare _safetyRun: Promise<import("../scheduled/safety-core.js").PhaseResult[]> | null | undefined;
+  declare _safetyClaude: { at: number; found: { program: string; real: string; version: string; env: Record<string, string> } | { error: string } } | undefined;
+  declare _safetyLastSession: string | undefined;
+  declare _safetyWaited: Set<string> | undefined;
+  declare _busyWaited: Set<string> | undefined;
+  declare _startRefused: Map<string, string> | undefined;
+  declare _safetyPids: Set<number> | undefined;
   declare _firstTextsCache: Map<string, string[]> | undefined;
-  // Obsidian makes the plugin with (app, manifest); every argument goes on to Plugin, as before.
   constructor(...args: [app: App, manifest: PluginManifest]) {
     super(...args);
     this.lastRibbonClick = 0;
     this.pluginData = {};
   }
   override async onload(this: AgentManagerPlugin): Promise<void> {
-    // Poll the pulsing "working" dots so they keep pulsing even when the sidebar isn't
-    // focused, while a background session works. The method is light and gated on open
-    // sessions inside; registerInterval clears it on unload.
     this.registerInterval(window.setInterval(() => {
-      try { this.refreshWorkingDots(); } catch { /* best effort */ }
+      try { this.refreshWorkingDots(); } catch { /* empty */ }
     }, 700));
-    // The home page's Open list re-sorts live by last activity.
+    this.registerInterval(window.setInterval(() => { void this.schedulerTick(); }, 60000));
+    this.registerDomEvent(window, "beforeunload", () => { this._unloading = true; this.killAllRuns(); });
     this.registerInterval(window.setInterval(() => {
       for (const v of this.browserViews()) {
-        if (!v.browserScope) { try { v.resortOpenRows(); } catch { /* best effort */ } }
+        if (!v.browserScope) { try { v.resortOpenRows(); } catch { /* empty */ } }
       }
     }, 3000));
-    // data.json as it is: each field is checked where it's read (types.ts, PluginData).
     this.pluginData = ((await this.loadData()) as PluginData | null) || {};
     this.applyPluginDataDefaults();
-    // Before the session view is registered (loadTerminal): a plugin reload reopens session
-    // tabs as soon as it is, and a Claude start reads the mod's folder (claude-mod.ts).
     await this.prepareClaudeMod();
-    // The guides a session reads, such as the setup guide (guides.ts).
     await this.prepareGuides();
-    // The data first, then the views: the new terminal reads its settings as it loads.
     this.loadTerminal();
     this.registerView(BROWSER_VIEW_TYPE, (leaf) => new BrowserView(leaf, this));
     this.applySidebarTitleClass();
     this.lastActiveTerminalLeaf = null;
     this.layoutReady = false;
-    // Note routing: keep notes out of the terminal group. Both are inert unless the
-    // dedicated-split setting is on (checked lazily per call and sweep).
     this.installOpenRouting();
     this.installTerminalGroupJanitor();
     this.app.workspace.onLayoutReady(() => {
       this.layoutReady = true;
-      // Python and the CLIs, found in the background; the sidebar updates when it lands.
       void this.checkSetup();
-      // A short delay lets Obsidian finish recreating views on a plugin reload.
+      this.cleanupSafetyScratch();
+      if (this.scheduledTasksOn()) void this.cleanupLeftoverRuns().catch((e) => console.error("[Agent Manager] leftover run cleanup failed:", e)).then(() => this.schedulerTick());
       this.scheduleTimeout(() => {
-        // Eager load (opt-in): Obsidian leaves background session tabs deferred until
-        // focused, so a restored session doesn't resume until it's opened. With the
-        // setting on, each still-deferred session loads, and so resumes, in the
-        // background. Each session tab restores itself as it loads.
         const sessionLeaves = this.app.workspace.getLeavesOfType(SESSION_VIEW_TYPE);
         if (this.pluginData.eagerLoadOnRestart) this.eagerLoadSessions(sessionLeaves);
       }, 0);
-      // One-time heads-up if pre-emptive note routing couldn't install (a future
-      // Obsidian renamed the internals we wrap) while the split is actually in use.
-      // The feature degrades silently otherwise; this makes it visible.
-      // File-opening is unaffected; the layout-change janitor still sweeps strays.
       if (this._openRoutingAvailable === false && this.useDedicatedSplit()) {
-        new import_obsidian.Notice(
-          "Agent Manager: this version of Obsidian works differently inside, so notes you open may appear in the terminal's pane for a moment before moving out. Nothing else is affected. Turn off “Dedicated terminal split” in settings to stop this notice.",
-          15000
+        this.notify(
+          "Agent Manager",
+          "This version of Obsidian works differently inside, so notes you open may appear in the terminal's pane for a moment before moving out. Nothing else is affected. Turn off “Dedicated terminal split” in settings to stop this notice.",
+          undefined,
+          undefined,
+          "info"
         );
       }
     });
 
-    // A renamed or moved note or folder keeps the sessions started from it bound: the
-    // binding is a vault path on the view, so it follows the rename. A folder rename
-    // moves every bound path under it.
+    this.registerEvent(this.app.vault.on("rename", (file, oldPath) => {
+      if (!(file instanceof import_obsidian.TFile) || file.extension !== "md" || !oldPath.endsWith(".md")) return;
+      const subs = this.app.vault.getAbstractFileByPath(oldPath.slice(0, -3));
+      const to = file.path.slice(0, -3);
+      if (!(subs instanceof import_obsidian.TFolder) || this.app.vault.getAbstractFileByPath(to)) return;
+      const id: unknown = this.app.metadataCache.getFileCache(file)?.frontmatter?.session_id;
+      if (typeof id !== "string" || !id) return;
+      const tc = this._tc();
+      void tc.withTranscriptLock(tc.transcriptLockKey(this.folderOf("transcriptsFolder"), id), async () => {
+        if (!this.app.vault.getAbstractFileByPath(to)) await this.app.fileManager.renameFile(subs, to);
+      }).catch(() => { notice(`Agent Manager: couldn't move the sub-agents' transcripts in “${subs.path}” beside “${file.path}”.`); });
+    }));
     this.registerEvent(this.app.vault.on("rename", (file, oldPath) => {
       const isFolder = file instanceof import_obsidian.TFolder;
       const moved = (p: string | null | undefined): string | null => {
@@ -149,7 +162,6 @@ class VaultTerminalPlugin extends import_obsidian.Plugin {
         if (isFolder && p.startsWith(oldPath + "/")) return file.path + p.slice(oldPath.length);
         return null;
       };
-      // A context source: a note's path, or a folder's with a trailing slash.
       const movedSource = (p: string | null | undefined): string | null => {
         if (!p) return null;
         if (!p.endsWith("/")) return moved(p);
@@ -165,14 +177,12 @@ class VaultTerminalPlugin extends import_obsidian.Plugin {
           if (folder) { v._folderPath = folder; changed = true; }
           const ctxFrom = movedSource(v._contextSource?.from);
           if (ctxFrom && v._contextSource) { v._contextSource = { ...v._contextSource, from: ctxFrom }; changed = true; }
-          // The tickets it's attached to.
           for (const [p, kind] of Object.entries(v._ticketLinks || {})) {
             const to = moved(p);
             if (to && v._ticketLinks) { delete v._ticketLinks[p]; v._ticketLinks[to] = kind; v.resetTicketWriteback(); changed = true; }
           }
           continue;
         }
-        // A tab Obsidian hasn't loaded yet: its saved fields, so it restores bound.
         this.updateSavedSession(leaf, (fields: SavedSessionState) => {
           const note = moved(fields.notePath), folder = moved(fields.folderPath);
           if (note) fields.notePath = note;
@@ -187,31 +197,33 @@ class VaultTerminalPlugin extends import_obsidian.Plugin {
           return !!(note || folder || ctxFrom || linked);
         }).catch(() => {});
       }
-      // The recorded context sources (sessionSources), so a resume pins the new path.
       let sourced = false;
       for (const rec of Object.values(this.pluginData.sessionSources || {})) {
         const to = movedSource(rec.from);
         if (to) { rec.from = to; sourced = true; }
       }
-      if (changed) this.app.workspace.requestSaveLayout(); // the path persists in view state
-      // The AGENTS.md folder follows its folder's rename.
+      if (changed) this.app.workspace.requestSaveLayout();
       const start = moved(this.pluginData.startFolder ? this.startFolder() : null);
       if (start) this.pluginData.startFolder = start;
-      // So do the notes the settings name: the tickets note, the custom button's (a URL
-      // never matches), and the templates.
       let named = false;
-      for (const key of ["ticketsNote", "customButtonTarget", "ticketTemplate", "overviewTemplate"] as const) {
+      for (const key of ["ticketsNote", "customButtonTarget", "ticketTemplate", "overviewTemplate", "taskTemplate", "scheduledFolder"] as const) {
         const to = moved(stringOf(this.pluginData[key] ?? "") || null);
         if (to) { this.pluginData[key] = to; named = true; }
       }
-      // And the folders the plugin writes in: transcripts, and sent files when that's a
-      // vault path (a "./" one is beside each note, so it has nothing to follow).
       const transcripts = moved(this.folderOf("transcriptsFolder"));
       if (transcripts) { this.pluginData.names = { ...(this.pluginData.names || {}), transcriptsFolder: transcripts }; named = true; }
+      if (isArray(this.pluginData.neverRead)) {
+        const list = this.pluginData.neverRead.map((e) => {
+          if (typeof e !== "string" || /^[/~]/.test(e.trim())) return e;
+          const to = moved((0, import_obsidian.normalizePath)(e.trim().replace(/\/+$/, "")));
+          if (to) named = true;
+          return to ?? e;
+        });
+        this.pluginData.neverRead = list;
+      }
       const sentFolder = stringOf(this.pluginData.sentFilesFolder ?? "").trim();
       const sentTo = sentFolder && !sentFolder.startsWith("./") ? moved(sentFolder) : null;
       if (sentTo) { this.pluginData.sentFilesFolder = sentTo; named = true; }
-      // And each agent's home folder and instructions note.
       const agents = this.allAgents();
       let agentsMoved = false;
       for (const a of agents) {
@@ -223,37 +235,27 @@ class VaultTerminalPlugin extends import_obsidian.Plugin {
       if (agentsMoved) this.pluginData.agents = agents;
       if (start || named || agentsMoved || sourced) this.savePluginData().catch(() => {});
     }));
-    // Track the most recently focused session tab, and keep the browser's active-row
-    // highlight in sync. ANY focus change can change which session is active (or move
-    // focus off a session entirely), so refresh every open browser's dots + active
-    // highlight in place — not only when the browser itself regains focus. In place,
-    // never a re-render: a re-render here rebuilds the row out from under the click
-    // that moved focus and it needs a second click to register.
     this.registerEvent(
       this.app.workspace.on('active-leaf-change', (leaf) => {
         const session = this.sessionOf(leaf);
+        if (leaf && (session || leaf.view?.getViewType() === PLAIN_TERMINAL_VIEW_TYPE)) this.lastActiveTerminalLeaf = leaf;
         if (session) {
-          this.lastActiveTerminalLeaf = leaf;
-          // Focusing a session is a natural "is my note current?" moment. Same cheap
-          // growth gate as the poll: a stat, and a full read only if new records landed.
           if (session.transcriptGrewSinceReconcile?.()) void session.updateDurableTranscript?.();
         }
         for (const v of this.browserViews()) {
-          try { v.refreshStatusDots(); } catch { /* best effort */ }
+          try { v.refreshStatusDots(); } catch { /* empty */ }
         }
       })
     );
 
     this.registerEvent(
       this.app.workspace.on('layout-change', () => {
-        // A tab opening/closing/detaching changes the open set — refresh the
-        // browser's dots and "Open sessions" section (gated, so no-op layouts skip).
         this.scheduleStatusRefresh();
       })
     );
     const ribbonIcon = this.addRibbonIcon("bot", "Open Agent Manager", () => {
       const now = Date.now();
-      if (now - this.lastRibbonClick < 1500) return; // 1.5s throttle to prevent accidental double-clicks
+      if (now - this.lastRibbonClick < 1500) return;
       this.lastRibbonClick = now;
       void this.revealBrowser();
     });
@@ -276,7 +278,6 @@ class VaultTerminalPlugin extends import_obsidian.Plugin {
     this.addCommand({
       id: "open-session-switcher",
       name: "Switch to a session",
-      // No default hotkey: the user assigns one in Obsidian's hotkey settings.
       callback: () => this.openSessionSwitcher()
     });
     this.addCommand({
@@ -290,7 +291,6 @@ class VaultTerminalPlugin extends import_obsidian.Plugin {
       checkCallback: (checking) => {
         const session = this.sessionOf(this.activeLeaf());
         if (session) {
-          // Through the tab's own guard: it asks first when the agent is working or there's unsent text.
           if (!checking) session.leaf.detach();
           return true;
         }
@@ -303,22 +303,20 @@ class VaultTerminalPlugin extends import_obsidian.Plugin {
       callback: () => this.toggleFocus()
     });
 
-    // Links: obsidian://agent-manager?op=resume|new&session=… opens a session from any
-    // note. Obsidian overwrites params.action with the registered handler name, so the
-    // operation rides `op`, not `action`. See handleProtocolLink.
     this.registerObsidianProtocolHandler("agent-manager", (params) => {
       this.handleProtocolLink(params).catch((e) =>
         console.error("[Agent Manager] protocol link failed:", e));
     });
     this.registerNoteLaunch();
+    this.registerPlainTerminal();
     this.registerTickets();
+    this.watchScheduledTasks();
     this.registerEditorExtension(sessionLinkLabels());
     this.addSettingTab(new AgentManagerSettingsTab(this.app, this));
   }
   async toggleFocus(this: AgentManagerPlugin): Promise<void> {
-    const activeView = this.sessionOf(this.activeLeaf());
-    if (activeView) {
-      // Currently in Claude, go to editor — prefer most recent non-pinned leaf
+    const active = this.activeLeaf();
+    if (active && this.terminalLeaves().includes(active)) {
       const leaves = this.app.workspace.getLeavesOfType("markdown");
       const unpinned = leaves.filter(l => !l.pinned);
       const target = unpinned.length > 0 ? unpinned[0] : leaves[0];
@@ -326,26 +324,21 @@ class VaultTerminalPlugin extends import_obsidian.Plugin {
         this.app.workspace.setActiveLeaf(target, { focus: true });
       }
     } else {
-      // Currently in editor, go to Claude (prefer last-active tab)
-      const claudeLeaves = this.sessionLeaves();
+      const claudeLeaves = this.terminalLeaves();
       if (claudeLeaves.length > 0) {
         let target = claudeLeaves[0];
         if (this.lastActiveTerminalLeaf && claudeLeaves.includes(this.lastActiveTerminalLeaf)) {
           target = this.lastActiveTerminalLeaf;
         }
         this.app.workspace.setActiveLeaf(target, { focus: true });
-        this.sessionOf(target)?.focusTerminal();
+        const view = target.view as { focus?: () => void } | null;
+        if (view && typeof view.focus === "function") view.focus();
       }
     }
   }
-  // A fresh session id for a Claude launch (`--session-id`). Claude refuses a reused id,
-  // so it is minted per launch, never persisted before the CLI has taken it.
   newSessionId(): string {
     return window.crypto.randomUUID();
   }
-  // A setTimeout the plugin owns: tracked so onunload can clear it. Every plugin-level
-  // timer (not view-level; views clear their own in dispose) goes through here, since
-  // a bare setTimeout would run its callback against a disposed plugin instance.
   scheduleTimeout(fn: () => void, ms: number): number {
     if (!this._timeouts) this._timeouts = new Set();
     const id = window.setTimeout(() => {
@@ -362,57 +355,42 @@ class VaultTerminalPlugin extends import_obsidian.Plugin {
   }
   override onunload(this: AgentManagerPlugin): void {
     this._unloading = true;
-    // Every session the terminal started ends with it.
+    this.killAllRuns();
     this.unloadTerminal();
-    // Plugin-level timeouts (browser refreshes, the janitor, eager loads) must not
-    // fire against this dead instance.
     for (const id of this._timeouts || []) window.clearTimeout(id);
     this._timeouts?.clear();
     document.body.classList.remove("agent-manager-show-tab-title");
   }
-  // Reveal the leaf's tab title for this view type only, gated by a
-  // body class so the CSS never touches any other plugin's sidebar icon.
   applySidebarTitleClass(): void {
-    // Off by default; only an explicit true shows it.
     document.body.classList.toggle("agent-manager-show-tab-title", this.pluginData.showSidebarTitle === true);
   }
   getVaultPath(): string {
     const adapter = this.app.vault.adapter;
     return adapter.basePath || "";
   }
-  // Plugin data is one file (data.json: settings, session renames, and pins).
   async savePluginData(): Promise<void> {
     await this.saveData(this.pluginData);
   }
   applyPluginDataDefaults(): void {
     const d = this.pluginData;
-    // A stored backend this build does not run falls back to the default.
     if (d.cliBackend && !isBackendKey(d.cliBackend)) delete d.cliBackend;
     if (isArray(d.browserBackends)) d.browserBackends = d.browserBackends.filter((k) => isBackendKey(k));
   }
 
-  // A yes-or-no question in a dialog. Resolves true only on the confirm button.
   askConfirm(title: string, body: string, confirmLabel: string): Promise<boolean> {
     return new Promise((resolve) => {
       const modal = new ConfirmModal(this.app, title, body, () => resolve(true), confirmLabel, "mod-cta");
       const close = modal.onClose.bind(modal);
-      // The confirm button closes the dialog before it confirms, so "no" waits a tick
-      // and loses to a "yes" that follows.
       modal.onClose = () => { close(); queueMicrotask(() => resolve(false)); };
       modal.open();
     });
   }
-  // Resolve once the workspace is ready to open leaves. onLayoutReady fires its
-  // callback immediately when layout is already up, so this is safe post-startup.
   whenLayoutReady(): Promise<void> {
     if (this.layoutReady) return Promise.resolve();
     return new Promise((resolve) => this.app.workspace.onLayoutReady(() => resolve()));
   }
 }
-// The plugin's type: the class, and every part's methods, which applyParts puts on the
-// class's prototype below. Made from the parts themselves, so it can't drift from them;
-// a name two parts both define is a type error here, as it's an error in applyParts.
-interface AgentManagerPlugin extends VaultTerminalPlugin, AgentMethods, ClaudeModMethods, TerminalHostMethods, ShellMethods, TranscriptMethods, ConfigMethods, GuideMethods, NoteMethods, LinkMethods, SessionMethods, SetupMethods, TicketMethods, WorkspaceMethods {}
-applyParts(VaultTerminalPlugin, AgentMethods, ClaudeModMethods, TerminalHostMethods, ShellMethods, TranscriptMethods, ConfigMethods, GuideMethods, NoteMethods, LinkMethods, SessionMethods, SetupMethods, TicketMethods, WorkspaceMethods);
+interface AgentManagerPlugin extends VaultTerminalPlugin, AgentMethods, ClaudeModMethods, TerminalHostMethods, ShellMethods, TranscriptMethods, ConfigMethods, GuideMethods, NoteMethods, LinkMethods, SessionMethods, SetupMethods, TicketMethods, SchedulerMethods, RunMethods, SessionRunMethods, ClockMethods, SafetyMethods, WorkspaceMethods {}
+applyParts(VaultTerminalPlugin, AgentMethods, ClaudeModMethods, TerminalHostMethods, ShellMethods, TranscriptMethods, ConfigMethods, GuideMethods, NoteMethods, LinkMethods, SessionMethods, SetupMethods, TicketMethods, SchedulerMethods, RunMethods, SessionRunMethods, ClockMethods, SafetyMethods, WorkspaceMethods);
 export { VaultTerminalPlugin };
 export type { AgentManagerPlugin };

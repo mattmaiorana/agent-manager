@@ -1,11 +1,12 @@
-// The plugin's settings tab: general settings first, then the openings, each CLI, the terminal, and under "Advanced & experimental" the rarely changed ones and Set up this vault.
 
 import { import_obsidian } from "../externals.js";
 import { CLI_BACKENDS, REAL_BACKENDS, isBackendKey } from "../constants/backends.js";
 import { DEFAULT_DAILY_NAME, DEFAULT_NAMES, DEFAULT_NEW_BUTTON_NAME, DEFAULT_NEW_TICKET_BUTTON_NAME, DEFAULT_OPENING, DEFAULT_OVERVIEW_NAME, DEFAULT_TICKET_TEMPLATE, NAME_LABELS, OPENING_LABELS } from "../constants/names.js";
+import { DEFAULT_SCHEDULED_FOLDER, DEFAULT_TASK_TEMPLATE } from "../constants/scheduled.js";
+import { PHASE_LABEL, SAFETY_NOTE, SAFETY_PHASES } from "../scheduled/safety-core.js";
 import { AgentModal, FileSuggest, FolderSuggest } from "../ui/modals.js";
 import { AGENTS } from "../vault-terminal/agents";
-import { agentSettings, agentVariableSettings, appearanceSettings, linkSettings, pythonSettings } from "../vault-terminal/settings";
+import { agentSettings, agentVariableSettings, appearanceSettings, linkSettings, notificationSettings, pythonSettings, type NotificationRows } from "../vault-terminal/settings";
 import { isArray, stringOf } from "../util/guards.js";
 import { DEFAULT_AGENT_DAILY_NAME, agentNameProblem, parseHome } from "../context/agents.js";
 import type { AgentDef } from "../context/agents.js";
@@ -13,20 +14,16 @@ import type { App } from "obsidian";
 import type { BackendKey } from "../constants/backends.js";
 import type { NameKey, OpeningKey } from "../constants/names.js";
 import type { AgentManagerPlugin } from "../plugin/main.js";
+import { notice } from "../vault-terminal/notice";
 class AgentManagerSettingsTab extends import_obsidian.PluginSettingTab {
   declare plugin: AgentManagerPlugin;
   constructor(app: App, plugin: AgentManagerPlugin) {
     super(app, plugin);
     this.plugin = plugin;
   }
-  // Obsidian draws the tab through display(), which its types mark deprecated in favor of
-  // setting definitions (getSettingDefinitions, 1.13). The tab is still drawn by hand, so
-  // its own redraws call drawSettings, which display() runs.
   override display(): void {
     this.drawSettings();
   }
-  // A redraw (a switch that shows or hides settings) keeps the scroll position, so the
-  // page doesn't jump to the top under the click.
   drawSettings(): void {
     const { containerEl } = this;
     const scroller = containerEl.closest<HTMLElement>(".vertical-tab-content-container") ?? containerEl;
@@ -36,12 +33,25 @@ class AgentManagerSettingsTab extends import_obsidian.PluginSettingTab {
     this.displayGeneral(containerEl);
     this.displayContext(containerEl);
     this.displayAgentList(containerEl);
+    this.displayScheduled(containerEl);
+    this.displayNotifications(containerEl);
     this.displayAgents(containerEl);
     const core = this.plugin.terminal;
     if (core) {
       new import_obsidian.Setting(containerEl).setName("Terminal").setHeading();
       appearanceSettings(containerEl, core);
       linkSettings(containerEl, core);
+      new import_obsidian.Setting(containerEl)
+        .setName("Open notes in")
+        .setDesc("Where a note clicked in a session opens: in the tab that's showing (with notes split in two, the one you were last in; never a session or a terminal), or in a new tab at the end of the tabs. A note that's already open goes to its tab either way, and a pinned tab gets a new tab instead.")
+        .addDropdown((drop) => drop
+          .addOption("last", "The tab that's showing")
+          .addOption("new", "A new tab")
+          .setValue(this.plugin.pluginData.notesOpenIn === "new" ? "new" : "last")
+          .onChange(async (value) => {
+            if (value === "new") this.plugin.pluginData.notesOpenIn = "new"; else delete this.plugin.pluginData.notesOpenIn;
+            await this.save();
+          }));
     }
     this.displayNotes(containerEl);
     this.displayAdvanced(containerEl);
@@ -53,11 +63,9 @@ class AgentManagerSettingsTab extends import_obsidian.PluginSettingTab {
   }
   rerenderSidebars(): void {
     for (const view of this.plugin.browserViews()) {
-      try { view.renderBrowser(); } catch { /* best effort */ }
+      try { view.renderBrowser(); } catch { /* empty */ }
     }
   }
-  // A name setting (a folder or a property), saved on change (blur or Enter), not per
-  // keystroke, since a folder name is used as it's typed.
   nameSetting(containerEl: HTMLElement, key: NameKey): void {
     const [label, desc] = NAME_LABELS[key];
     new import_obsidian.Setting(containerEl)
@@ -78,7 +86,7 @@ class AgentManagerSettingsTab extends import_obsidian.PluginSettingTab {
   displayGeneral(containerEl: HTMLElement): void {
     new import_obsidian.Setting(containerEl)
       .setName("Default backend (CLI)")
-      .setDesc("What a new session runs until you pick another in the sidebar, and what a ticket with no backend property starts on. Starting from a note or a folder offers it first. Lists the CLIs that are enabled below.")
+      .setDesc("What a new session runs until you pick another in the sidebar, and what a ticket with no CLI set starts on. Starting from a note or a folder offers it first. Lists the CLIs that are enabled below.")
       .addDropdown((drop) => {
         const enabled = this.plugin.getBrowserBackends();
         for (const key of enabled) drop.addOption(key, CLI_BACKENDS[key].label);
@@ -99,7 +107,7 @@ class AgentManagerSettingsTab extends import_obsidian.PluginSettingTab {
         text.inputEl.addEventListener("change", () => { void (async () => {
           const v = String(text.inputEl.value || "").trim().replace(/^\/+|\/+$/g, "");
           if (v && !(this.app.vault.getAbstractFileByPath((0, import_obsidian.normalizePath)(v)) instanceof import_obsidian.TFolder)) {
-            new import_obsidian.Notice(`There's no folder “${v}” in this vault.`);
+            notice(`There's no folder “${v}” in this vault.`);
             text.setValue(stringOf(this.plugin.pluginData.startFolder || ""));
             return;
           }
@@ -204,19 +212,36 @@ class AgentManagerSettingsTab extends import_obsidian.PluginSettingTab {
           await this.save();
         }));
     new import_obsidian.Setting(containerEl)
+      .setName("Keep unsent text through a reload")
+      .setDesc("Text typed into a session and not sent is saved with its tab, in this vault's workspace file, and put back in the prompt after Obsidian or the plugin reloads. Claude Code and Codex sessions only, for now: Antigravity's prompt doesn't work with it. Turned off, nothing is saved, and each tab drops what it saved (a tab not opened since Obsidian started, when it's next opened).")
+      .addToggle((toggle) => toggle
+        .setValue(this.plugin.pluginData.keepDrafts !== false)
+        .onChange(async (value) => {
+          if (value) delete this.plugin.pluginData.keepDrafts; else this.plugin.pluginData.keepDrafts = false;
+          await this.save();
+          this.app.workspace.requestSaveLayout();
+          this.drawSettings();
+        }));
+    if (this.plugin.pluginData.keepDrafts !== false) new import_obsidian.Setting(containerEl)
+      .setName("Copy unsent text that can't be put back")
+      .setDesc("When saved text can't go back in the prompt (you typed first, or the session asked a question or didn't start), copy it to the clipboard, replacing what's there. Turned off, it's dropped, and a notification says so.")
+      .addToggle((toggle) => toggle
+        .setValue(this.plugin.pluginData.draftClipboard === true)
+        .onChange(async (value) => {
+          if (value) this.plugin.pluginData.draftClipboard = true; else delete this.plugin.pluginData.draftClipboard;
+          await this.save();
+        }));
+    new import_obsidian.Setting(containerEl)
       .setName("Added folders")
       .setDesc("Folders outside the vault that every session can read and write, one per line, such as a code repository. A leading ~ is your home folder. A folder that isn't on this machine is skipped. Applies to new sessions.")
       .addTextArea((text) => {
         text.setPlaceholder("~/Code/my-project").setValue(this.plugin.addedFolderSetting().join("\n"));
-        // Saved when the field is left, as the other fields are, not on every keystroke.
         text.inputEl.addEventListener("change", () => { void (async () => {
           this.plugin.pluginData.addedFolders = String(text.inputEl.value || "").split("\n").map((l) => l.trim()).filter(Boolean);
           await this.save();
         })(); });
       });
   }
-  // Project overviews and tickets: both off until switched on, and each one's own settings shown
-  // only while it's on.
   displayContext(containerEl: HTMLElement): void {
     new import_obsidian.Setting(containerEl).setName("Project overviews").setHeading();
     new import_obsidian.Setting(containerEl)
@@ -261,8 +286,6 @@ class AgentManagerSettingsTab extends import_obsidian.PluginSettingTab {
           this.rerenderSidebars();
           this.drawSettings();
         }));
-    // Hidden with the button, as every button's settings are; a session's menu still opens
-    // the card with them as set.
     if (this.plugin.pluginData.newTicketButton === false) return;
     this.textSetting(containerEl, "newTicketButtonName", "New ticket button name", "What the row says, after its icon.", DEFAULT_NEW_TICKET_BUTTON_NAME, () => this.rerenderSidebars());
     new import_obsidian.Setting(containerEl)
@@ -277,8 +300,154 @@ class AgentManagerSettingsTab extends import_obsidian.PluginSettingTab {
         }));
     this.textSetting(containerEl, "ticketNotesHeading", "Where the card's notes go", "A heading in the ticket template for the new ticket card's notes to go under, written as it is in the template, such as ## Notes. Empty, or a heading the template doesn't have, puts them first, right under the properties.", "Under the properties");
   }
-  // Agents: none until one is added. Add an agent and the Default agent first, then each
-  // agent's name, instructions note, home folder, and Daily Chat name.
+  displaySafety(containerEl: HTMLElement): void {
+    const results = this.plugin.safetyResults();
+    const shown = SAFETY_PHASES.filter((p) => results[p]);
+    const last = shown.map((p) => results[p]!).sort((a, b) => b.at - a.at)[0];
+    const running = !!this.plugin._safetyRun;
+    const lastLine = running ? "Checking now…" : last ? `Last checked ${new Date(last.at).toLocaleString()}, on Claude Code ${last.version || "unknown"}: ${shown.map((p) => `${PHASE_LABEL[p].toLowerCase()} ${results[p]!.outcome}${results[p]!.version && results[p]!.version !== last.version ? ` (on ${results[p]!.version})` : ""}`).join(", ")}.` : "Never checked on this computer.";
+    new import_obsidian.Setting(containerEl)
+      .setName("Check run safety")
+      .setDesc(`Runs the gates on the Claude Code installed here, to show a scheduled run is as locked down as the plugin means it: only the tools it's given, no MCP servers, no hooks, no project settings, writes only into its own folder, never-read files refused, no network for a shell, and the Keychain command refused. Each check is a short Claude run on Haiku for each phase it checks (locked down and the shell, and a continued session or a shell with writes when a task uses them), sometimes with one retry, on your subscription, in a temporary folder that's removed after; each run leaves a Claude Code transcript. Every Keychain lookup names an entry made up for the check, never a real one. The result is also written to ${SAFETY_NOTE} in the scheduled tasks folder. ${lastLine}`)
+      .addButton((b) => b
+        .setButtonText(running ? "Checking…" : "Check now")
+        .setDisabled(running)
+        .onClick(() => {
+          void (async () => {
+            const phases = await this.plugin.safetyPhasesWanted();
+            const go = this.plugin.runSafetyCheck(phases, { manual: true });
+            this.drawSettings();
+            await go;
+            this.drawSettings();
+          })();
+        }));
+    if (shown.length && !running) {
+      const list = containerEl.createDiv({ cls: "agent-manager-safety-results" });
+      for (const p of shown) {
+        const r = results[p]!;
+        const head = list.createDiv({ cls: `agent-manager-safety-phase is-${r.outcome.replace(/\W+/g, "-")}` });
+        head.setText(`${PHASE_LABEL[p]}: ${r.outcome}${r.why ? ` (${r.why})` : ""}`);
+        const cases = [...r.cases].sort((a, b) => (a.result === "fail" ? -1 : 0) - (b.result === "fail" ? -1 : 0));
+        for (const c of cases) {
+          const row = list.createDiv({ cls: `agent-manager-safety-case is-${c.result.replace(/\W+/g, "-")}` });
+          row.createSpan({ cls: "agent-manager-safety-mark", text: c.result === "pass" ? "Pass" : c.result === "fail" ? "Fail" : "Not tried" });
+          row.createSpan({ text: ` ${c.label}${c.detail ? `. ${c.detail}` : ""}` });
+        }
+      }
+    }
+    new import_obsidian.Setting(containerEl)
+      .setName("Check run safety when Claude Code updates")
+      .setDesc("Off unless you turn it on, and kept on this computer only. On, the plugin runs the check on its own, on your subscription, before the first scheduled run on a Claude Code version that hasn't passed, and scheduled runs wait until it passes; if it fails, the tasks it covers are held (one notification, naming what failed) until a check passes. Run now waits for it too, and asks before running a held task. To know when Claude Code has updated, the plugin asks Claude Code for its version number before each scheduled run and when the tasks' page opens; that's the only thing it runs without a check being due.")
+      .addToggle((toggle) => toggle
+        .setValue(this.plugin.safetyAutoOn())
+        .onChange((value) => { this.plugin.setSafetyAutoOn(value); }));
+  }
+  displayScheduled(containerEl: HTMLElement): void {
+    new import_obsidian.Setting(containerEl).setName("Scheduled tasks").setHeading();
+    new import_obsidian.Setting(containerEl)
+      .setName("Use scheduled tasks")
+      .setDesc("A note with type: scheduled task in its properties, in a folder of its own, is a prompt Claude Code runs on a schedule with nobody watching: as a full session in a tab, with your own settings, less sending, password lookups, and what the task denies; or headless, locked down to what its task allows, writing only its own result. Nothing runs until you approve it on this computer. The sidebar has a row that opens their page.")
+      .addToggle((toggle) => toggle
+        .setValue(this.plugin.scheduledTasksOn())
+        .onChange(async (value) => {
+          this.plugin.pluginData.useScheduledTasks = value;
+          await this.save();
+          this.rerenderSidebars();
+          this.drawSettings();
+        }));
+    if (!this.plugin.scheduledTasksOn()) return;
+    new import_obsidian.Setting(containerEl)
+      .setName("Run scheduled tasks on this computer")
+      .setDesc("Kept on this computer only, not in the vault. Runs happen only while Obsidian is open and the computer is awake, and each task runs only once you've approved what it can reach here. Turn this on in one computer only, or both would run every task.")
+      .addToggle((toggle) => toggle
+        .setValue(this.plugin.schedulerOn())
+        .onChange((value) => { this.plugin.setSchedulerOn(value); }));
+    new import_obsidian.Setting(containerEl)
+      .setName("Scheduled tasks folder")
+      .setDesc("Where the new task card puts new tasks. With agent profiles off, every new task goes here. With them on, a new task goes in a Scheduled Tasks folder inside the folder of the agent you've switched to, and comes here only when that agent has no folder set. Empty means a Scheduled Tasks folder at the top of the vault. A task runs wherever it is; this only decides where new ones go.")
+      .addText((text) => {
+        text.setPlaceholder(DEFAULT_SCHEDULED_FOLDER).setValue(stringOf(this.plugin.pluginData.scheduledFolder || ""));
+        new FolderSuggest(this.app, text.inputEl);
+        text.inputEl.addEventListener("change", () => { void (async () => {
+          const v = String(text.inputEl.value || "").trim().replace(/^\/+|\/+$/g, "");
+          if (v && !v.split("/").includes("..")) this.plugin.pluginData.scheduledFolder = (0, import_obsidian.normalizePath)(v); else delete this.plugin.pluginData.scheduledFolder;
+          await this.save();
+        })(); });
+      });
+    this.pathSetting(containerEl, "taskTemplate", "Task template", "The note a new task is made from. It's never counted as a task itself.", DEFAULT_TASK_TEMPLATE, () => this.plugin.resetTaskIndex());
+    new import_obsidian.Setting(containerEl)
+      .setName("Never let a run read")
+      .setDesc("Folders and files no run may read, whatever its task allows, one per line. For something in the vault, write its path from the top of the vault with no slash in front: just Private for a folder there, or Work/Private for one inside another. For somewhere else on this computer, start with ~ for your home folder (~/Documents) or / for the full path. Credentials, other apps' and plugins' settings, and other sessions' records are never read already.")
+      .addTextArea((area) => {
+        area.setPlaceholder("Private").setValue(this.plugin.neverReadSetting().join("\n"));
+        area.inputEl.rows = 4;
+        area.inputEl.addEventListener("change", () => { void (async () => {
+          const lines = String(area.inputEl.value || "").split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
+          if (lines.length) this.plugin.pluginData.neverRead = lines; else delete this.plugin.pluginData.neverRead;
+          await this.save();
+          this.rerenderSidebars();
+        })(); });
+      });
+    this.displaySafety(containerEl);
+    const sched = this.plugin.schedSettings();
+    const setSched = async (patch: Record<string, unknown>) => {
+      const raw = this.plugin.pluginData.scheduler;
+      this.plugin.pluginData.scheduler = { ...(raw && typeof raw === "object" ? raw : {}), ...patch };
+      await this.save();
+    };
+    new import_obsidian.Setting(containerEl)
+      .setName("Commit each run's result")
+      .setDesc("When the vault is a Git repository, each run's result, its run log, its memory, and a full session run's action log are committed, with Git's hooks off.")
+      .addToggle((toggle) => toggle.setValue(sched.commitRuns).onChange(async (value) => { await setSched({ commitRuns: value }); }));
+    new import_obsidian.Setting(containerEl)
+      .setName("Runs at once")
+      .setDesc("The most tasks that run at the same time. A task that's due waits for a free one.")
+      .addText((text) => {
+        text.inputEl.type = "number";
+        text.setValue(String(sched.runsAtOnce));
+        text.inputEl.addEventListener("change", () => { void setSched({ runsAtOnce: Math.max(1, Math.floor(Number(text.inputEl.value)) || 3) }); });
+      });
+    new import_obsidian.Setting(containerEl)
+      .setName("Time limit per run")
+      .setDesc("In minutes. A run still going then is stopped and logged as timed out.")
+      .addText((text) => {
+        text.inputEl.type = "number";
+        text.setValue(String(sched.timeLimitMin));
+        text.inputEl.addEventListener("change", () => { void setSched({ timeLimitMin: Math.max(1, Math.floor(Number(text.inputEl.value)) || 30) }); });
+      });
+    new import_obsidian.Setting(containerEl)
+      .setName("Results in Latest Outputs")
+      .setDesc("How many of the newest results, across every task, Latest Outputs lists. Older ones stay in each task's own folder.")
+      .addText((text) => {
+        text.inputEl.type = "number";
+        text.setValue(String(sched.latestOutputs));
+        text.inputEl.addEventListener("change", () => { void setSched({ latestOutputs: Math.max(1, Math.floor(Number(text.inputEl.value)) || 50) }); });
+      });
+  }
+  displayNotifications(containerEl: HTMLElement): void {
+    const core = this.plugin.terminal;
+    if (!core) return;
+    new import_obsidian.Setting(containerEl)
+      .setName("Notifications")
+      .setDesc("A \"needs you\" notification is for something that broke or won't continue until you look at it. An information notice is for what's happening: what you just did, a session moved, a run that went fine. A session's questions, permission prompts, errors, and finished turns are built and tested for Claude Code sessions; Codex and Antigravity sessions aren't tested yet.")
+      .setHeading();
+    const scheduled = (el: HTMLElement, row: NotificationRows) => {
+      if (!this.plugin.scheduledTasksOn()) return;
+      const sched = this.plugin.schedSettings();
+      const put = async (patch: Record<string, unknown>) => {
+        const raw = this.plugin.pluginData.scheduler;
+        this.plugin.pluginData.scheduler = { ...(raw && typeof raw === "object" ? raw : {}), ...patch };
+        await this.save();
+      };
+      row(el, "When a scheduled run goes fine", "Where a notification goes when a run the schedule started finishes cleanly. One that fails, waits, stalls, or is held is a \"needs you\" notification instead. Clicking it opens the task.", "Scheduled run notification length", {
+        where: sched.fineTo,
+        seconds: sched.fineSeconds,
+        onWhere: (v) => put({ fineTo: v }),
+        onSeconds: (v) => put({ fineSeconds: v }),
+      });
+    };
+    notificationSettings(containerEl, core, scheduled);
+  }
   displayAgentList(containerEl: HTMLElement): void {
     new import_obsidian.Setting(containerEl).setName("Agent profiles").setHeading();
     new import_obsidian.Setting(containerEl)
@@ -290,6 +459,7 @@ class AgentManagerSettingsTab extends import_obsidian.PluginSettingTab {
           this.plugin.pluginData.useAgents = value;
           await this.save();
           this.rerenderSidebars();
+          for (const session of this.plugin.sessionObjects()) session.refreshStripAgent();
           this.drawSettings();
         }));
     if (!this.plugin.agentsOn()) return;
@@ -298,6 +468,7 @@ class AgentManagerSettingsTab extends import_obsidian.PluginSettingTab {
       this.plugin.pluginData.agents = list;
       await this.save();
       this.rerenderSidebars();
+      for (const session of this.plugin.sessionObjects()) session.refreshStripAgent();
     };
     new import_obsidian.Setting(containerEl)
       .setName("Add an agent profile")
@@ -317,12 +488,11 @@ class AgentManagerSettingsTab extends import_obsidian.PluginSettingTab {
           this.drawSettings();
         }, DEFAULT_AGENT_DAILY_NAME).open();
       }));
-    // While there are agents on: it decides where sessions with none are listed.
     const on = this.plugin.agentList();
     if (on.length) {
       new import_obsidian.Setting(containerEl)
         .setName("Default agent profile")
-        .setDesc("The profile a session started from a note or folder outside every home folder starts with, and where sessions with no agent profile are listed in the sidebar. Left at no agent profile, the sidebar's switch offers that too.")
+        .setDesc("The profile a session started from a note or folder outside every agent folder starts with, and where sessions with no agent profile are listed in the sidebar. Left at no agent profile, the sidebar's switch offers that too.")
         .addDropdown((dd) => {
           dd.addOption("", "No agent profile");
           for (const a of on) dd.addOption(a.id, a.name);
@@ -342,7 +512,6 @@ class AgentManagerSettingsTab extends import_obsidian.PluginSettingTab {
         list[i] = { ...list[i], ...change };
         await save(list);
       };
-      // Its heading row: on or off, move up, remove. Off hides its settings and keeps them.
       const head = new import_obsidian.Setting(containerEl)
         .setName(agent.name)
         .setClass("agent-manager-agent-head");
@@ -375,7 +544,7 @@ class AgentManagerSettingsTab extends import_obsidian.PluginSettingTab {
             const name = text.inputEl.value.trim();
             if (name === agent.name) return;
             const problem = agentNameProblem(name, this.plugin.allAgents().filter((a) => a.id !== agent.id).map((a) => a.name));
-            if (problem) { new import_obsidian.Notice(problem); text.setValue(agent.name); return; }
+            if (problem) { notice(problem); text.setValue(agent.name); return; }
             await update({ name });
             await this.plugin.renameAgentFiles(agent.name, name);
             this.drawSettings();
@@ -390,7 +559,7 @@ class AgentManagerSettingsTab extends import_obsidian.PluginSettingTab {
           text.inputEl.addEventListener("change", () => { void update({ instructions: text.inputEl.value.trim() ? (0, import_obsidian.normalizePath)(text.inputEl.value.trim()) : "" }); });
         });
       new import_obsidian.Setting(containerEl)
-        .setName("Home folder")
+        .setName("Agent folder")
         .setDesc("A session started from a note or folder in here starts with this agent profile. Empty for none; / for the whole vault.")
         .addText((text) => {
           text.setPlaceholder("None").setValue(agent.home === null ? "" : agent.home === "" ? "/" : agent.home);
@@ -409,7 +578,6 @@ class AgentManagerSettingsTab extends import_obsidian.PluginSettingTab {
         });
     });
   }
-  // A text setting, saved on change (blur or Enter); empty removes it, for its default.
   textSetting(containerEl: HTMLElement, key: "overviewName" | "newButtonName" | "newTicketButtonName" | "ticketNotesHeading" | "customButtonName" | "customButtonIcon", name: string, desc: string, placeholder: string, after?: () => void): void {
     new import_obsidian.Setting(containerEl)
       .setName(name)
@@ -424,8 +592,7 @@ class AgentManagerSettingsTab extends import_obsidian.PluginSettingTab {
         })(); });
       });
   }
-  // A vault path setting, saved on change (blur or Enter); empty removes it, for its default.
-  pathSetting(containerEl: HTMLElement, key: "ticketsNote" | "overviewTemplate" | "ticketTemplate", name: string, desc: string, placeholder: string, after?: () => void): void {
+  pathSetting(containerEl: HTMLElement, key: "ticketsNote" | "overviewTemplate" | "ticketTemplate" | "taskTemplate", name: string, desc: string, placeholder: string, after?: () => void): void {
     new import_obsidian.Setting(containerEl)
       .setName(name)
       .setDesc(desc)
@@ -440,7 +607,6 @@ class AgentManagerSettingsTab extends import_obsidian.PluginSettingTab {
         })(); });
       });
   }
-  // The custom button: whether it shows, then its icon, text, and what it opens.
   displayCustomButton(containerEl: HTMLElement): void {
     new import_obsidian.Setting(containerEl)
       .setName("Show the custom button")
@@ -471,13 +637,11 @@ class AgentManagerSettingsTab extends import_obsidian.PluginSettingTab {
         })(); });
       });
   }
-  // What a new session is told first.
   displayNotes(containerEl: HTMLElement): void {
     new import_obsidian.Setting(containerEl)
       .setName("Openings")
       .setDesc("What a new session is told first. Empty sends nothing; a resumed session and a side chat are never sent anything. {{path}} is the full path of the note or folder, {{vault}} the vault's, {{date}} today's.")
       .setHeading();
-    // DEFAULT_OPENING has exactly the OpeningKeys.
     for (const key of Object.keys(DEFAULT_OPENING) as OpeningKey[]) {
       const [label, desc] = OPENING_LABELS[key];
       const setting = new import_obsidian.Setting(containerEl)
@@ -504,7 +668,6 @@ class AgentManagerSettingsTab extends import_obsidian.PluginSettingTab {
       setting.settingEl.addClass("agent-manager-env-setting");
     }
   }
-  // Each CLI: enabled or not (and whether it's installed), its command and location.
   displayAgents(containerEl: HTMLElement): void {
     const status = this.plugin.setupStatus();
     const core = this.plugin.terminal;
@@ -527,9 +690,8 @@ class AgentManagerSettingsTab extends import_obsidian.PluginSettingTab {
           .onChange(async (value) => {
             let list = this.storedBackends();
             list = value ? REAL_BACKENDS.filter((k) => k === key || list.includes(k)) : list.filter((k) => k !== key);
-            // At least one stays enabled, or nothing could start a session.
             if (!list.length) {
-              new import_obsidian.Notice("At least one CLI has to be enabled.");
+              notice("At least one CLI has to be enabled.");
               toggle.setValue(true);
               return;
             }
@@ -547,7 +709,6 @@ class AgentManagerSettingsTab extends import_obsidian.PluginSettingTab {
             this.drawSettings();
           }));
       }
-      // A CLI's own settings show only while it's enabled.
       if (!this.storedBackends().includes(key)) continue;
       const agent = AGENTS.find((a) => a.id === key);
       if (core && agent) agentSettings(containerEl, core, agent);
@@ -568,7 +729,6 @@ class AgentManagerSettingsTab extends import_obsidian.PluginSettingTab {
       agentVariableSettings(containerEl, core);
     }
   }
-  // The offered list as stored (all three until it's edited), before the installed filter.
   storedBackends(): BackendKey[] {
     const stored = this.plugin.pluginData.browserBackends;
     return (isArray(stored) && stored.length ? stored : REAL_BACKENDS).filter((k) => isBackendKey(k));
@@ -584,12 +744,10 @@ class AgentManagerSettingsTab extends import_obsidian.PluginSettingTab {
       .setDesc("Starts a session that helps you set this vault up for agents: an AGENTS.md, where files go, and more if you'd like. You choose whether it asks before each change or sets things up itself and reports back; either way, it asks before changing anything already in the vault. You can close it and resume it later. An AI does the work, so results vary with the CLI and model.")
       .addButton((b) => b.setButtonText("Set up").setClass("agent-manager-button").onClick(() => { void this.plugin.openVaultSetup(); }));
     if (this.plugin.terminal) pythonSettings(containerEl, this.plugin.terminal);
-    // The Claude Code mods that ship with the plugin (plugin/claude-mod.ts): here rather than
-    // under Claude Code, since a mod changes how Claude Code itself draws. Shown while Claude is enabled.
     if (this.storedBackends().includes("claude")) {
       new import_obsidian.Setting(containerEl)
-        .setName("Show pictures Claude sends you")
-        .setDesc("When Claude sends you a picture (with its send-file tool), it's drawn right in the session, framed, with buttons to open it, save it to your downloads folder, or copy its path. It works through a small Claude Code mod that comes with Agent Manager and is loaded only into sessions Agent Manager starts; nothing is installed in Claude Code itself. It also needs the terminal's picture setting to be on. Applies to sessions started or resumed afterwards.")
+        .setName("Show pictures Claude sends or reads")
+        .setDesc("When Claude sends you a picture (with its send-file tool), or looks at one (a PNG it reads, such as a screenshot it took), it's drawn right in the session, framed, with buttons to open it, save it to your downloads folder, or copy its path. It works through a small Claude Code mod that comes with Agent Manager and is loaded only into sessions Agent Manager starts; nothing is installed in Claude Code itself. It also needs the terminal's picture setting to be on. Applies to sessions started or resumed afterwards.")
         .addToggle((toggle) => toggle
           .setValue(this.plugin.pluginData.claudePictures !== false)
           .onChange(async (value) => {

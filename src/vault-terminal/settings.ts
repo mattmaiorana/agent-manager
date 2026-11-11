@@ -1,24 +1,15 @@
-// The terminal's settings: what they are, their defaults, and the controls
-// that edit them, for any host plugin's settings tab (PORTING.md). The host
-// keeps the values and saves them; displayTerminalSettings shows them.
 
 import { Setting } from "obsidian";
 import { AGENTS, type AgentProfile } from "./agents";
 import { DEFAULT_STRIPPED_VARIABLES } from "./finder";
 import type { VaultTerminal } from "./core";
 
-/** Monospace fonts people commonly use in terminals. Menlo, Monaco and Courier New come with macOS; SF Mono ships inside Terminal.app and has to be installed from there to be usable. */
 const COMMON_TERMINAL_FONTS = [
   "SF Mono", "Menlo", "Monaco", "Courier New",
   "JetBrains Mono", "Fira Code", "Cascadia Code", "Source Code Pro", "Hack",
   "IBM Plex Mono", "Iosevka", "Berkeley Mono", "MesloLGS NF", "Victor Mono",
 ];
 
-/**
- * Which of these fonts are installed: text set in the font measures differently
- * from the same text in a fallback font, against two fallbacks in case the font
- * is one of them.
- */
 function installedFonts(names: string[]): string[] {
   const ctx = createEl("canvas").getContext("2d");
   if (!ctx) return names;
@@ -28,58 +19,43 @@ function installedFonts(names: string[]): string[] {
   return names.filter((n) => bases.some(([b, w]) => width(`"${n}", ${b}`) !== w));
 }
 
-/** An agent's command and where its program is, when the defaults don't do. */
 export interface AgentSettings {
-  /** Empty means the agent's default command. */
   command: string;
-  /** Empty means found automatically. */
   location: string;
 }
 
 export interface TerminalSettings {
-  /** Empty means the user's login shell. */
   shell: string;
-  /** By agent id (agents.ts); a missing entry means the defaults. */
   agents: Record<string, AgentSettings>;
-  /** NAME=value lines added to every agent's environment, over the login shell's. */
   agentVariables: string;
-  /** Names taken out of every agent's environment after agentVariables are merged, one per line (finder.ts, agentEnv). */
   strippedVariables: string;
-  /** Empty means found automatically. */
   pythonLocation: string;
   fontSize: number;
-  /** Empty means Obsidian's monospace font. */
   fontFamily: string;
-  /** Extra space between characters, in pixels. */
   letterSpacing: number;
-  /** Row height as a multiple of the font's. */
   lineHeight: number;
-  /** Lines each terminal keeps above its screen. */
   scrollback: number;
-  /** Tell the user when claude needs them and they aren't looking. Off by default. */
-  notifications: boolean;
-  /** The tab's icon shows the program's state (working, waiting, finished, a bell). Off: it always shows the terminal's or agent's own icon. */
+  needsYouTo: NotifyWhere;
+  needsYouSeconds: number;
+  infoNotices: boolean;
+  infoSeconds: number;
+  finishedTo: NotifyWhere;
+  finishedSeconds: number;
+  hideLooking: boolean;
   statusIcons: boolean;
-  /** Obsidian's Dock icon counts the sessions waiting for you, across vaults. Off: this vault adds nothing to it. */
   dockBadge: boolean;
-  /** Option types characters ("characters"), both act as Meta ("meta"), or only the right one does ("right"). */
   optionKey: "characters" | "meta" | "right";
-  /** Play a sound on the bell; the tab is marked either way. */
   bellSound: boolean;
-  /** When an agent ends, its tab becomes a shell in the same folder; off: wait for Enter or S. */
   shellAfterExit: boolean;
-  /** zsh reports its folder and prompts (zsh.ts). Off by default: it wraps the user's startup files. */
   shellIntegration: boolean;
-  /** Lines the wheel scrolls per row of travel, 0.25 to 4 (wheel.ts, scrollSpeed); 1 is about 3 lines a mouse notch. */
   scrollSpeed: number;
-  /** Links open with Cmd+click ("cmd", the default) or a plain click ("click"). */
   linkClick: "cmd" | "click";
-  /** Programs may set the clipboard (OSC 52; spec 54). On by default; reading it is always refused. */
+  markLinks: boolean;
   programClipboard: boolean;
-  /** Programs can show pictures and video (kitty's graphics protocol). On by default; off, none of the picture code runs. */
   showPictures: boolean;
-  /** Ctrl+C always goes to the program as the interrupt. Off (the default): it copies the terminal's selection when there is one (keys.ts). */
   ctrlCInterrupts: boolean;
+  cursor: "line" | "block" | "underline";
+  cursorBlink: boolean;
 }
 
 export { DEFAULT_STRIPPED_VARIABLES };
@@ -95,7 +71,13 @@ export const DEFAULT_TERMINAL_SETTINGS: TerminalSettings = {
   letterSpacing: 0,
   lineHeight: 1,
   scrollback: 10000,
-  notifications: false,
+  needsYouTo: "obsidian",
+  needsYouSeconds: 10,
+  infoNotices: true,
+  infoSeconds: 5,
+  finishedTo: "none",
+  finishedSeconds: 5,
+  hideLooking: false,
   statusIcons: true,
   dockBadge: false,
   bellSound: false,
@@ -103,16 +85,18 @@ export const DEFAULT_TERMINAL_SETTINGS: TerminalSettings = {
   shellIntegration: false,
   shellAfterExit: false,
   scrollSpeed: 1,
-  linkClick: "cmd",
+  linkClick: "click",
+  markLinks: true,
   programClipboard: true,
   showPictures: true,
   ctrlCInterrupts: false,
+  cursor: "line",
+  cursorBlink: true,
 };
 
 type Section = (containerEl: HTMLElement, core: VaultTerminal) => void;
 const saver = (core: VaultTerminal) => () => core.saveSettings();
 
-/** The three shell settings, for a host with shell tabs. */
 export const shellSettings: Section = (containerEl, core) => {
   const s = core.settings;
   const save = saver(core);
@@ -147,7 +131,6 @@ export const shellSettings: Section = (containerEl, core) => {
     );
 };
 
-/** The variables every agent gets, and the names none gets. */
 export const agentVariableSettings: Section = (containerEl, core) => {
   const s = core.settings;
   const save = saver(core);
@@ -176,7 +159,6 @@ export const agentVariableSettings: Section = (containerEl, core) => {
     });
 };
 
-/** One agent's Command and Location (and, for Claude, its notifications), without a heading. */
 export function agentSettings(containerEl: HTMLElement, core: VaultTerminal, agent: AgentProfile): void {
   const s = core.settings;
   const save = saver(core);
@@ -200,24 +182,65 @@ export function agentSettings(containerEl: HTMLElement, core: VaultTerminal, age
         await save();
       }),
     );
-  if (agent.id === "claude") {
-    new Setting(containerEl)
-      .setName("Notify when Claude needs you")
-      .setDesc("Off by default; while off, nothing notifies you. On: when Claude asks for permission, finishes, or stops with an error while you're not looking at its terminal, a macOS notification if Obsidian isn't in front, an Obsidian notice if it is. Click it to go to the terminal.")
-      .addToggle((t) =>
-        t.setValue(s.notifications).onChange(async (v) => {
-          s.notifications = v;
-          await save();
-        }),
-      );
-  }
 }
 
-/** How terminals look and behave: the Dock badge, tab icons, font, scrolling, and keys. */
-export const appearanceSettings: Section = (containerEl, core) => {
+export type NotifyWhere = "desktop" | "obsidian" | "both" | "none";
+
+export const toDesktop = (where: NotifyWhere): boolean => where === "desktop" || where === "both";
+
+export const toObsidian = (where: NotifyWhere): boolean => where === "obsidian" || where === "both";
+
+export function notificationSettings(containerEl: HTMLElement, core: VaultTerminal, more?: (containerEl: HTMLElement, rows: NotificationRows) => void): void {
   const s = core.settings;
   const save = saver(core);
-
+  const where = (name: string, desc: string, lengthName: string, key: "needsYouTo" | "finishedTo", lengthKey: "needsYouSeconds" | "finishedSeconds") =>
+    notificationRow(containerEl, name, desc, lengthName, {
+      where: s[key],
+      seconds: s[lengthKey],
+      onWhere: async (v) => {
+        s[key] = v;
+        await save();
+      },
+      onSeconds: async (v) => {
+        s[lengthKey] = v;
+        await save();
+      },
+    });
+  where(
+    "Where \"needs you\" notifications go",
+    "Something broke, or won't continue until you look at it: a session asks a question, asks for permission, or stops with an error; something you asked for wasn't sent; a scheduled run fails, waits, or stalls. Desktop: a macOS notification, whose sound and how long it stays are set for Obsidian in macOS's notification settings; choose Desktop or Both to hear about it while you're in another app. Obsidian: in the corner of the session you're looking at, at the top right otherwise. Clicking one takes you to the session or task it's about. None: nothing tells you.",
+    "\"Needs you\" notification length",
+    "needsYouTo",
+    "needsYouSeconds",
+  );
+  let infoLength: Setting | null = null;
+  new Setting(containerEl)
+    .setName("Information notices in Obsidian")
+    .setDesc("What's happening, where nothing broke and nothing waits on you: a copy or a rename confirmed, a session moved to a new ID, a warning about something you just did. Each has an X that only closes it. Off: none of these appear, so you won't see warnings or errors from what you click either.")
+    .addToggle((t) =>
+      t.setValue(s.infoNotices).onChange(async (v) => {
+        s.infoNotices = v;
+        await save();
+        infoLength?.settingEl.toggle(v);
+      }),
+    );
+  infoLength = lengthSetting(containerEl, "Information notice length", "How long each information notice stays, all alike.", s.infoSeconds, async (v) => {
+    s.infoSeconds = v;
+    await save();
+  });
+  infoLength.settingEl.toggle(s.infoNotices);
+  where("When a session finishes its turn", "Where a notification goes when a session finishes its turn and waits for you, or a program in a plain terminal says it's done. The tab shows whether a session is working or done either way. Clicking it takes you to the session.", "Finished turn notification length", "finishedTo", "finishedSeconds");
+  more?.(containerEl, notificationRow);
+  const hideName = "Hide notifications from the session I'm looking at";
+  new Setting(containerEl)
+    .setName(hideName)
+    .setDesc("When the session in front of you asks a question, asks for permission, stops with an error, or finishes its turn, it doesn't notify you, since you can see it. Other sessions still notify you, and so does anything you asked for that wasn't sent.")
+    .addToggle((t) =>
+      t.setValue(s.hideLooking).onChange(async (v) => {
+        s.hideLooking = v;
+        await save();
+      }),
+    );
   new Setting(containerEl)
     .setName("Waiting count on the Dock icon")
     .setDesc("Obsidian's Dock icon shows how many agent sessions are waiting for you, in this vault and others with it on. Off: this vault's sessions aren't counted.")
@@ -228,7 +251,6 @@ export const appearanceSettings: Section = (containerEl, core) => {
         core.updateBadge();
       }),
     );
-
   new Setting(containerEl)
     .setName("Status icons on tabs")
     .setDesc("A terminal's tab icon shows what its program is doing: working, waiting for you, finished, or a bell. Off: the tab keeps the terminal's or agent's own icon.")
@@ -239,6 +261,57 @@ export const appearanceSettings: Section = (containerEl, core) => {
         core.refreshLook();
       }),
     );
+  new Setting(containerEl)
+    .setName("Sound on bell")
+    .setDesc("Play a short tone when a program rings the terminal bell, a terminal's own simple way of asking for attention. Claude Code sessions don't use it, since the plugin has Claude notify you as above. The terminal's tab is marked with a bell either way, until you look at it.")
+    .addToggle((t) =>
+      t.setValue(s.bellSound).onChange(async (v) => {
+        s.bellSound = v;
+        await save();
+      }),
+    );
+}
+
+const NOTIFY_LENGTHS: [string, string][] = [["5", "5 seconds"], ["10", "10 seconds"], ["30", "30 seconds"], ["60", "1 minute"], ["0", "Until clicked"]];
+
+const lengthSetting = (containerEl: HTMLElement, name: string, desc: string, seconds: number, onChange: (v: number) => Promise<void>): Setting =>
+  new Setting(containerEl)
+    .setName(name)
+    .setDesc(`${desc} Until clicked: it stays until you click it or its X.`)
+    .addDropdown((d) => {
+      for (const [value, label] of NOTIFY_LENGTHS) d.addOption(value, label);
+      return d.setValue(String(seconds)).onChange(async (v) => {
+        await onChange(Number(v));
+      });
+    });
+
+export type NotificationRows = (
+  containerEl: HTMLElement,
+  name: string,
+  desc: string,
+  lengthName: string,
+  o: { where: NotifyWhere; seconds: number; onWhere: (v: NotifyWhere) => Promise<void>; onSeconds: (v: number) => Promise<void> },
+) => void;
+
+const notificationRow: NotificationRows = (containerEl, name, desc, lengthName, o) => {
+  let length: Setting | null = null;
+  new Setting(containerEl)
+    .setName(name)
+    .setDesc(desc)
+    .addDropdown((d) => {
+      for (const [value, label] of [["desktop", "Desktop"], ["obsidian", "Obsidian"], ["both", "Both"], ["none", "None"]]) d.addOption(value, label);
+      return d.setValue(o.where).onChange(async (v) => {
+        await o.onWhere(v as NotifyWhere);
+        length?.settingEl.toggle(toObsidian(v as NotifyWhere));
+      });
+    });
+  length = lengthSetting(containerEl, lengthName, "How long one shows in Obsidian.", o.seconds, o.onSeconds);
+  length.settingEl.toggle(toObsidian(o.where));
+};
+
+export const appearanceSettings: Section = (containerEl, core) => {
+  const s = core.settings;
+  const save = saver(core);
 
   new Setting(containerEl)
     .setName("Font size")
@@ -336,7 +409,7 @@ export const appearanceSettings: Section = (containerEl, core) => {
 
   new Setting(containerEl)
     .setName("Programs can copy to the clipboard")
-    .setDesc("A program in a terminal can put text on the clipboard, as tmux, vim and ssh sessions do to copy for you, and a notice shows what it copied. Turn this off if you'd rather nothing printed in a terminal could change what Cmd+V pastes. Programs can never read the clipboard.")
+    .setDesc("A program in a terminal can put text on the clipboard, as tmux, vim and ssh sessions do to copy for you, and the terminal's corner says what it copied. Turn this off if you'd rather nothing printed in a terminal could change what Cmd+V pastes. Programs can never read the clipboard.")
     .addToggle((t) =>
       t.setValue(s.programClipboard).onChange(async (v) => {
         s.programClipboard = v;
@@ -356,12 +429,29 @@ export const appearanceSettings: Section = (containerEl, core) => {
     );
 
   new Setting(containerEl)
-    .setName("Sound on bell")
-    .setDesc("Play a short tone when a program rings the bell. The terminal's tab is marked either way.")
+    .setName("Cursor style")
+    .setDesc("A line sits between characters, as in a text editor, so Shift+arrows visibly start from it. A block covers the character after it, as Terminal.app's does; an underline sits under it.")
+    .addDropdown((d) =>
+      d
+        .addOption("line", "Line")
+        .addOption("block", "Block")
+        .addOption("underline", "Underline")
+        .setValue(s.cursor)
+        .onChange(async (v) => {
+          s.cursor = v === "block" || v === "underline" ? v : "line";
+          await save();
+          core.refreshLook();
+        }),
+    );
+
+  new Setting(containerEl)
+    .setName("Blinking")
+    .setDesc("Blink, as Obsidian's editor does.")
     .addToggle((t) =>
-      t.setValue(s.bellSound).onChange(async (v) => {
-        s.bellSound = v;
+      t.setValue(s.cursorBlink).onChange(async (v) => {
+        s.cursorBlink = v;
         await save();
+        core.refreshLook();
       }),
     );
 
@@ -376,7 +466,6 @@ export const appearanceSettings: Section = (containerEl, core) => {
     );
 };
 
-/** How links in a terminal open. */
 export const linkSettings: Section = (containerEl, core) => {
   const s = core.settings;
   const save = saver(core);
@@ -386,17 +475,27 @@ export const linkSettings: Section = (containerEl, core) => {
     .setDesc("Web addresses, file paths and note names. With a plain click, a click on a link opens it, even in a program that uses the mouse; dragging still selects text. A link a program shows as other text, with the address hidden behind it, still takes Cmd+click.")
     .addDropdown((d) =>
       d
-        .addOption("cmd", "Cmd+click")
         .addOption("click", "A plain click")
+        .addOption("cmd", "Cmd+click")
         .setValue(s.linkClick)
         .onChange(async (v) => {
           s.linkClick = v as TerminalSettings["linkClick"];
           await save();
         }),
     );
+
+  new Setting(containerEl)
+    .setName("Underline links")
+    .setDesc("Every web address, file path and note name that opens is underlined, as a link is under the pointer, so it reads apart from other colored text, such as the code an agent writes in backticks.")
+    .addToggle((t) =>
+      t.setValue(s.markLinks).onChange(async (v) => {
+        s.markLinks = v;
+        await save();
+        for (const view of core.liveViews) view.refreshLinks();
+      }),
+    );
 };
 
-/** Where Python 3 is, when it isn't found on its own. */
 export const pythonSettings: Section = (containerEl, core) => {
   const s = core.settings;
   const save = saver(core);
@@ -413,21 +512,16 @@ export const pythonSettings: Section = (containerEl, core) => {
     );
 };
 
-/**
- * Every terminal setting, as controls, into a host's settings tab (or a
- * section of it). The host empties the container first if it needs to. A host
- * that lays its page out itself places the sections above one by one.
- */
 export function displayTerminalSettings(containerEl: HTMLElement, core: VaultTerminal, opts: { headingPrefix?: string; shells?: boolean } = {}): void {
-  // A host with headings of its own ("Advanced") names these apart.
   const heading = (name: string) => new Setting(containerEl).setName(`${opts.headingPrefix ?? ""}${name}`).setHeading();
-  // A host with no shell tabs leaves out the three shell settings.
   if (opts.shells !== false) shellSettings(containerEl, core);
   agentVariableSettings(containerEl, core);
   for (const agent of AGENTS) {
     heading(agent.name);
     agentSettings(containerEl, core, agent);
   }
+  heading("Notifications");
+  notificationSettings(containerEl, core);
   heading("Appearance");
   appearanceSettings(containerEl, core);
   heading("Links");

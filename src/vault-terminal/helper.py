@@ -1,25 +1,3 @@
-# vault-terminal's pty helper. Bundled into main.js as a string and run as
-#   python3 -I -c <bootstrap> vault-terminal <id> --rows R --cols C [--xpixel W --ypixel H] --cwd DIR -- PROGRAM [ARGS...]
-#
-# Descriptors, set up by the plugin:
-#   0  bytes typed into the terminal, passed to the program unaltered
-#   1  bytes the program wrote, passed to the plugin unaltered
-#   2  the helper's own diagnostics, never terminal output
-#   3  control: one JSON object per line, both ways (or in only, with --ctl-out)
-#
-# Control in:  {"type": "resize", "rows": R, "cols": C, "width": W, "height": H}  {"type": "close"}
-#   (width and height: the text area in pixels, optional)
-# Control out: {"type": "ready", ...}  {"type": "exit", ...}  {"type": "error", ...}
-#   {"type": "foreground", "pgid": G, "name": N, "script": S}: the terminal's
-#   foreground program changed; S is the script an
-#   interpreter (node, python...) runs, or "".
-#
-# The helper owns cleanup. It ends everything the program started when the
-# plugin says close, when either pipe from the plugin reaches EOF (which is how
-# it learns the renderer is gone, a crash included), when its parent changes,
-# and after the program exits on its own.
-#
-# Written for Python 3.8: no match, no "X | Y" types, no str.removeprefix.
 
 import ctypes
 import errno
@@ -36,16 +14,15 @@ import time
 
 CTL_IN = 3
 READ_SIZE = 65536
-# The most reads one shutdown drain makes before the deadlines are checked again.
 DISCARD_READS = 64
-OUT_HIGH = 1 << 20  # stop reading the pty while this much output is unsent
-IN_HIGH = 1 << 20  # stop reading input while this much is unwritten to the pty
+OUT_HIGH = 1 << 20
+IN_HIGH = 1 << 20
 LINE_CAP = 65536
 TICK = 0.25
 HUP_WAIT = 1.0
 TERM_WAIT = 0.5
 DRAIN_LIMIT = 0.5
-IUTF8 = getattr(termios, "IUTF8", 0x4000)  # Darwin's value; Python doesn't export it
+IUTF8 = getattr(termios, "IUTF8", 0x4000)
 CHILD_SIGNALS = ("SIGPIPE", "SIGINT", "SIGQUIT", "SIGTERM", "SIGHUP", "SIGTSTP",
                  "SIGTTIN", "SIGTTOU", "SIGCHLD", "SIGWINCH", "SIGXFSZ")
 
@@ -72,7 +49,6 @@ def parse_args(argv):
             opts[a[2:].replace("-", "_")] = int(argv[i + 1])
             i += 2
         elif a == "--test-delay":
-            # The self-test's slow start: wait before starting the program.
             opts["test_delay"] = float(argv[i + 1])
             i += 2
         elif a == "--cwd":
@@ -112,7 +88,7 @@ def spawn(opts):
     attrs[0] |= IUTF8
     termios.tcsetattr(slave, termios.TCSANOW, attrs)
     tty = os.ttyname(slave)
-    err_r, err_w = os.pipe()  # close-on-exec: EOF with no data means exec succeeded
+    err_r, err_w = os.pipe()
     pid = os.fork()
     if pid == 0:
         try:
@@ -135,7 +111,7 @@ def spawn(opts):
                 os.chdir(opts["cwd"])
             program = opts["program"]
             os.execvpe(program[0], program, os.environ)
-        except BaseException as e:  # noqa: B902 - anything here must reach the parent
+        except BaseException as e:
             code = getattr(e, "errno", 0) or 0
             msg = json.dumps({"errno": code, "message": str(e)})
             try:
@@ -160,7 +136,6 @@ def spawn(opts):
 
 
 class _BsdInfo(ctypes.Structure):
-    # struct proc_bsdinfo, <sys/proc_info.h>; 136 bytes
     _fields_ = [("flags", ctypes.c_uint32), ("status", ctypes.c_uint32), ("xstatus", ctypes.c_uint32),
                 ("pid", ctypes.c_uint32), ("ppid", ctypes.c_uint32), ("uid", ctypes.c_uint32),
                 ("gid", ctypes.c_uint32), ("ruid", ctypes.c_uint32), ("rgid", ctypes.c_uint32),
@@ -173,7 +148,6 @@ class _BsdInfo(ctypes.Structure):
 
 PROC_PIDTBSDINFO = 3
 FOREGROUND_EVERY = 0.2
-# Programs that run an agent from a script: the script's name says which.
 INTERPRETERS = ("node", "bun", "deno", "python", "python3", "ruby", "perl")
 try:
     _libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
@@ -199,7 +173,7 @@ def snapshot():
         if pid <= 0:
             continue
         if _libproc.proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, ctypes.byref(info), size) != size:
-            continue  # gone, or another user's
+            continue
         if info.uid == uid:
             table[pid] = (info.ppid, info.pgid, info.tdev)
     return table
@@ -226,7 +200,7 @@ def proc_args(pid):
     executable's path, padding, then the arguments, each NUL-ended."""
     if _libc is None:
         return []
-    mib = (ctypes.c_int * 3)(1, 49, pid)  # CTL_KERN, KERN_PROCARGS2
+    mib = (ctypes.c_int * 3)(1, 49, pid)
     size = ctypes.c_size_t(0)
     if _libc.sysctl(mib, 3, None, ctypes.byref(size), None, 0) != 0 or size.value < 4:
         return []
@@ -260,8 +234,6 @@ def foreground_of(program_pid):
     return {"pgid": pgid, "name": name, "script": script}
 
 
-# An interpreter's options that take the next argument as their value:
-# node's preloads and settings, python's -m, -c, -W and -X. Not the script.
 VALUE_OPTIONS = {"-r", "--require", "--import", "--loader", "--experimental-loader", "-e", "--eval", "-p", "--print",
                  "--input-type", "--env-file", "--conditions", "-C", "--title", "--inspect-port",
                  "-c", "-W", "-X", "--stack-size"}
@@ -278,12 +250,10 @@ def script_of(args):
         if ended:
             return os.path.basename(a)
         if a == "--":
-            # After it, the next argument is the script, whatever it starts with.
             ended = True
             continue
         if skip_module:
             return a
-        # deno run x.ts, bun run x: the subcommand isn't the script.
         if a in ("run", "x", "exec") and os.path.basename(args[0]).lower().startswith(("deno", "bun")):
             continue
         if a == "-m":
@@ -339,8 +309,8 @@ class Helper:
         self.ctl_out = opts["ctl_out"]
         self.sel = selectors.DefaultSelector()
         self.interest = {}
-        self.inbuf = bytearray()  # plugin -> pty
-        self.outbuf = bytearray()  # pty -> plugin
+        self.inbuf = bytearray()
+        self.outbuf = bytearray()
         self.ctl_inbuf = bytearray()
         self.ctl_outbuf = bytearray()
         self.pid = 0
@@ -348,8 +318,8 @@ class Helper:
         self.slave = -1
         self.tty = ""
         self.tty_dev = -1
-        self.status = None  # (code, signal) once the program has exited
-        self.closing = None  # why the helper is shutting down
+        self.status = None
+        self.closing = None
         self.input_open = True
         self.parent = os.getppid()
         self.last_parent_check = 0.0
@@ -367,8 +337,6 @@ class Helper:
     def on_signal(self, signum, frame):
         if not self.closing:
             self.closing = "signal %d" % signum
-
-    # --- control channel ---
 
     def send(self, msg):
         self.ctl_outbuf += (json.dumps(msg, ensure_ascii=True) + "\n").encode("ascii")
@@ -412,7 +380,6 @@ class Helper:
                 rows, cols = msg.get("rows"), msg.get("cols")
                 width, height = msg.get("width", 0), msg.get("height", 0)
                 if valid_size(rows, cols):
-                    # only the newest of a batch is applied
                     resize = (rows, cols, width if valid_pixels(width) else 0, height if valid_pixels(height) else 0)
                 else:
                     log("invalid size dropped: %r x %r" % (rows, cols))
@@ -425,8 +392,6 @@ class Helper:
                 set_size(self.slave, resize[0], resize[1], resize[2], resize[3])
             except OSError as e:
                 log("resize failed: %s" % e)
-
-    # --- the loop ---
 
     def want(self):
         w = {}
@@ -468,7 +433,7 @@ class Helper:
         except BlockingIOError:
             return 0
         except OSError as e:
-            if e.errno == errno.EIO:  # no slave left; nothing more will come
+            if e.errno == errno.EIO:
                 self.close_master()
                 return 0
             raise
@@ -492,7 +457,7 @@ class Helper:
             del self.outbuf[:n]
         except BlockingIOError:
             pass
-        except OSError:  # the plugin's end is gone
+        except OSError:
             self.outbuf.clear()
             if not self.closing:
                 self.closing = "stdout closed"
@@ -554,7 +519,7 @@ class Helper:
             self.last_foreground_check = now
             try:
                 fg = foreground_of(self.pid)
-            except Exception as e:  # never let a lookup end the terminal
+            except Exception as e:
                 log("foreground lookup failed: %s" % e)
                 fg = None
             if fg is not None and fg != self.last_foreground:
@@ -565,8 +530,6 @@ class Helper:
         if now - self.last_parent_check >= 1.0:
             self.last_parent_check = now
             ppid = os.getppid()
-            # A parent of 1 always means reparented to launchd: Obsidian is gone,
-            # even if that happened before the helper recorded its parent.
             if (ppid != self.parent or ppid == 1) and not self.closing:
                 self.closing = "parent gone"
 
@@ -577,15 +540,11 @@ class Helper:
             except ChildProcessError:
                 pid, st = self.pid, 0
             if pid == self.pid:
-                # How long the program itself ran: the exit message carries it, so a
-                # rule about failing at once isn't stretched by cleanup and delivery.
                 self.ran = time.monotonic() - self.started
                 if os.WIFSIGNALED(st):
                     self.status = (None, os.WTERMSIG(st))
                 else:
                     self.status = (os.WEXITSTATUS(st), None)
-
-    # --- cleanup ---
 
     def wait_program(self, limit):
         end = time.monotonic() + limit
@@ -626,12 +585,6 @@ class Helper:
             signal_all(found, groups, signal.SIGHUP)
             signal_all(found, groups, signal.SIGCONT)
         if not natural:
-            # The plugin is closing the terminal, so its output has nowhere to
-            # go: it's read and dropped (wait_program). The pty itself stays
-            # open until cleanup is done. Closed earlier, macOS can give the
-            # same pty to the next terminal opened, and the sweeps below,
-            # which find processes by this tty, would end that terminal's
-            # shell (found in testing).
             self.outbuf.clear()
             self.wait_program(HUP_WAIT)
         after = snapshot()
@@ -646,8 +599,6 @@ class Helper:
                 self.discard_master()
                 self.reap()
                 table = snapshot()
-                # Something handling TERM may start a replacement, even in a
-                # new group: it's a child of a found process, so it's found too.
                 found = {p for p in found if p in table}
                 fresh = set()
                 for p in found:

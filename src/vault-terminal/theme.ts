@@ -1,7 +1,3 @@
-// Terminal colors and font from Obsidian's theme, read from the terminal's own
-// element so a popout uses its own document. Obsidian's variables may hold any
-// CSS color (hsl(), color-mix()), so each is resolved through a canvas into a
-// hex value xterm can use.
 
 import type { ITheme } from "@xterm/xterm";
 
@@ -9,7 +5,6 @@ const canvases = new WeakMap<Document, CanvasRenderingContext2D | null>();
 
 function context(doc: Document): CanvasRenderingContext2D | null {
   if (!canvases.has(doc)) {
-    // Never attached: it only turns a color into its rgba values.
     const canvas = createEl("canvas", { attr: { width: 1, height: 1 } });
     canvases.set(doc, canvas.getContext("2d", { willReadFrequently: true }));
   }
@@ -20,7 +15,6 @@ function hex(n: number): string {
   return n.toString(16).padStart(2, "0");
 }
 
-/** Resolves any CSS color to #rrggbb or #rrggbbaa, or undefined if it isn't one. */
 export function toHex(doc: Document, color: string): string | undefined {
   const value = color.trim();
   if (!value) return undefined;
@@ -49,7 +43,6 @@ export function readLook(el: HTMLElement): TerminalLook {
   const style = (doc.defaultView ?? window).getComputedStyle(el);
   const v = (name: string, fallback: string) => toHex(doc, style.getPropertyValue(name)) ?? fallback;
 
-  // The pane's own background, so a sidebar terminal matches the sidebar.
   let background: string | undefined;
   for (let node: HTMLElement | null = el; node && !background; node = node.parentElement) {
     const bg = toHex(doc, (doc.defaultView ?? window).getComputedStyle(node).backgroundColor);

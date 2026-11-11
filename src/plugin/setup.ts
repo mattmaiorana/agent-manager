@@ -1,7 +1,3 @@
-// What this machine has: Python 3 (the terminal's helper runs on it) and which agent
-// CLIs are installed; and whether the starting folder has an AGENTS.md (the sidebar then
-// offers setup, plugin/guides.ts). Found in the background once per load, the way the terminal
-// itself finds them (its settings' Command and Location, then the login shell's PATH).
 
 import { REAL_BACKENDS } from "../constants/backends.js";
 import type { BackendKey } from "../constants/backends.js";
@@ -10,13 +6,9 @@ import { hasError, isArray } from "../util/guards.js";
 import type { VaultTerminal } from "../vault-terminal/core";
 import type { AgentManagerPlugin } from "./main.js";
 class SetupMethods {
-  // The last check's result, or null before the first one finishes:
-  // { python: boolean, installed: { claude: boolean, codex: boolean, antigravity: boolean } }.
   setupStatus(this: AgentManagerPlugin): SetupStatus | null {
     return this._setup || null;
   }
-  // Run the check, or join the one running. `again` forgets what was found, for the
-  // sidebar's "Check again" after an install. The sidebar re-renders when it lands.
   checkSetup(this: AgentManagerPlugin, again = false): Promise<SetupStatus> {
     if (this._setupCheck && !again) return this._setupCheck;
     if (again) this.terminal?.forgetPython?.();
@@ -39,7 +31,6 @@ class SetupMethods {
     }).catch(() => { if (this._setupCheck === check) this._setupCheck = null; });
     return check;
   }
-  // Does the starting folder lack an AGENTS.md, and the user hasn't dismissed the offer?
   agentsFileMissing(this: AgentManagerPlugin): boolean {
     if (this.startFolderMissing()) return false;
     const path = this.agentsFilePath();
@@ -47,14 +38,12 @@ class SetupMethods {
     const dismissed = isArray(this.pluginData.agentsFileDismissed) ? this.pluginData.agentsFileDismissed : [];
     return !dismissed.includes(this.startFolder());
   }
-  // Stop offering an AGENTS.md for this starting folder.
   async dismissAgentsFile(this: AgentManagerPlugin): Promise<void> {
     const list = isArray(this.pluginData.agentsFileDismissed) ? this.pluginData.agentsFileDismissed : [];
     const folder = this.startFolder();
     if (!list.includes(folder)) this.pluginData.agentsFileDismissed = [...list, folder];
     await this.savePluginData();
   }
-  // Is this CLI installed? True until a check says otherwise.
   isInstalled(this: AgentManagerPlugin, key: BackendKey): boolean {
     const s = this.setupStatus();
     return !s || s.installed[key] !== false;

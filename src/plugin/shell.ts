@@ -1,11 +1,8 @@
-// Running claude outside a terminal: its background-agent roster.
 
 import { import_child_process } from "../externals.js";
 import { hasError, isArray } from "../util/guards.js";
 import type { AgentManagerPlugin } from "./main.js";
 class ShellMethods {
-  // The claude the terminal's settings name (Command, Location) with an agent's
-  // environment, so a session and the plugin's own calls run the same claude.
   async runClaude(this: AgentManagerPlugin, args: string[], timeoutMs = 8000): Promise<string> {
     const found = this.terminal ? await this.terminal.agentProgram("claude") : { error: "the terminal isn't loaded" };
     if (hasError(found)) throw new Error(found.error);
@@ -16,9 +13,6 @@ class ShellMethods {
       });
     });
   }
-  // `claude agents --json [--cwd <path>]` as objects: {pid, id (short), kind
-  // (background|interactive), cwd, sessionId, name, status, state, startedAt}. `--cwd`
-  // limits to sessions started under the path. Shape checked on Claude 2.1.x.
   async listClaudeAgents(this: AgentManagerPlugin, cwd?: string | null): Promise<unknown[]> {
     const args = ["agents", "--json"];
     if (cwd) args.push("--cwd", cwd);
@@ -27,8 +21,6 @@ class ShellMethods {
     try { parsed = JSON.parse(out); } catch { return []; }
     return isArray(parsed) ? parsed : [];
   }
-  // One `claude agents --json` for every caller within a few seconds: a reload restores
-  // all its Claude tabs at once, and each asks before resuming.
   listClaudeAgentsShared(this: AgentManagerPlugin): Promise<unknown[]> {
     const now = Date.now();
     if (!this._agentsShared || now - this._agentsShared.at > 5000) {

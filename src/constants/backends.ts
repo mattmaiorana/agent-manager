@@ -1,20 +1,14 @@
-// The CLI backends: what each one is, how to find it, and the markers its sessions carry.
 
-// The backends the plugin supports: each has a transcript reader, a transcript parser,
-// and resume by id.
 type BackendKey = "claude" | "codex" | "antigravity";
 const REAL_BACKENDS: BackendKey[] = ["claude", "codex", "antigravity"];
-// Is this one of them? The same test as REAL_BACKENDS.includes, for a value of any type.
 function isBackendKey(key: unknown): key is BackendKey {
   return (REAL_BACKENDS as readonly unknown[]).includes(key);
 }
-// A command for the strip's info menu.
 interface StripCommand {
   cmd: string;
   what: string;
   args?: boolean;
 }
-// What differs between the CLIs at launch.
 interface CliBackend {
   label: string;
   binary: string;
@@ -26,9 +20,6 @@ interface CliBackend {
   addDirWriteFlags?: string;
   badge?: string;
 }
-// Common in-session slash commands per backend, for the strip's info menu. `args` means
-// the command wants more text: it is typed into the prompt for the user to finish rather
-// than sent. Curated, not exhaustive: `/help` in each CLI lists everything.
 const STRIP_COMMANDS: Record<BackendKey, StripCommand[]> = {
   claude: [
     { cmd: "/model", what: "switch the model" },
@@ -57,14 +48,17 @@ const STRIP_COMMANDS: Record<BackendKey, StripCommand[]> = {
     { cmd: "/help", what: "every command" }
   ]
 };
-const INPUT_PASTE_MIN = 200; // a line the plugin types that's longer than this goes in as a bracketed paste (controller.ts, _writeInput)
-// A side chat's name ends " (side chat)", as sideChat writes it.
-const SIDE_SUFFIX_RE = / \(side chat\)$/;
-// Claude names a compaction continuation by copying the title into the new file's first
-// custom-title record with " (N)" appended (not always). Dropping it lets a continuation
-// match its parent. The reader strips it ONLY for a file whose head proves it is a
-// continuation (transcript-core's isCompactionContinuation: first user record is the
-// compaction summary), so a user's own "(2026)" is left alone.
+const INPUT_PASTE_MIN = 200;
+const SIDE_SUFFIX_RE = / \(side chat(?: (\d+))?\)$/;
+function sideChatName(subject: string, taken: Iterable<string | null | undefined>): string {
+  let top = 0;
+  for (const name of taken) {
+    if (!name || !name.startsWith(subject)) continue;
+    const m = name.slice(subject.length).match(/^ \(side chat(?: (\d+))?\)$/);
+    if (m) top = Math.max(top, m[1] ? Number(m[1]) : 1);
+  }
+  return top ? `${subject} (side chat ${top + 1})` : `${subject} (side chat)`;
+}
 const CONTINUATION_SUFFIX_RE = / \(\d+\)$/;
 function stripContinuationSuffix(title: string): string;
 function stripContinuationSuffix<T>(title: T): T;
@@ -73,13 +67,10 @@ const CLI_BACKENDS: Record<BackendKey, CliBackend> = {
   claude: {
     label: "Claude Code",
     binary: "claude",
-    // The install command each CLI's own docs give for macOS (checked 2026-10-19).
     install: "curl -fsSL https://claude.ai/install.sh | bash",
     pathHints: ["~/.local/bin"],
-    // -n sets the session display name; -r <id> resumes a specific session.
     nameFlag: "-n",
     resumeByIdFlag: "-r",
-    // --add-dir <folder> grants read and write to each added folder. No sandbox flag needed.
     addDirFlag: "--add-dir",
   },
   codex: {
@@ -87,12 +78,7 @@ const CLI_BACKENDS: Record<BackendKey, CliBackend> = {
     binary: "codex",
     install: "curl -fsSL https://chatgpt.com/codex/install.sh | sh",
     pathHints: [],
-    // `codex resume <uuid>` resumes a specific recorded session. Codex has no
-    // launch-name flag, so the title lives in the opening message.
     resumeByIdFlag: "resume",
-    // --add-dir <folder> grants reachability, and -s workspace-write is ALSO required
-    // for writes: reads work by default under any sandbox mode, but a write without it
-    // silently fails.
     addDirFlag: "--add-dir",
     addDirWriteFlags: "-s workspace-write",
   },
@@ -101,17 +87,10 @@ const CLI_BACKENDS: Record<BackendKey, CliBackend> = {
     binary: "agy",
     install: "curl -fsSL https://antigravity.google/cli/install.sh | bash",
     pathHints: ["~/.local/bin"],
-    // Resume a conversation by uuid; no launch-name flag, so the title marker rides the
-    // opening message, as for Codex. Sessions are read from agy's own
-    // `brain/*/transcript.jsonl`, which records no working folder, so the plugin keeps
-    // the ids it started in each vault (pluginData.antigravitySessions).
     resumeByIdFlag: "--conversation",
-    // Adds each folder to agy's workspace, so reads there aren't "outside workspace",
-    // which agy prompts for, per file. No sandbox-write flag (unlike Codex's -s).
     addDirFlag: "--add-dir",
-    // Session-list badge shows the product name, not the `agy` binary.
     badge: "Antigravity",
   },
 };
-export { CLI_BACKENDS, INPUT_PASTE_MIN, REAL_BACKENDS, SIDE_SUFFIX_RE, STRIP_COMMANDS, isBackendKey, stripContinuationSuffix };
+export { CLI_BACKENDS, INPUT_PASTE_MIN, REAL_BACKENDS, SIDE_SUFFIX_RE, STRIP_COMMANDS, isBackendKey, sideChatName, stripContinuationSuffix };
 export type { BackendKey, CliBackend, StripCommand };

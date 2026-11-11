@@ -1,29 +1,14 @@
-// Transcripts, the view's side: the live transcript panel and the durable transcript note.
 
 import { StringDecoder, fs, import_obsidian, path } from "../externals.js";
 import { sentFileMarker, sentFilesIn } from "./sent-files.js";
 import type { Session } from "../sessions/controller.js";
 import type { TranscriptMessage, TranscriptWrite } from "../types.js";
+import { notice } from "../vault-terminal/notice";
 
-// A big transcript opens with its last FIRST_CHUNK bytes; scrolling near the top loads
-// EARLIER_CHUNK more at a time, back to the start (_loadEarlierTranscript).
 const FIRST_CHUNK = 512 * 1024;
 const EARLIER_CHUNK = 256 * 1024;
-// How close to the top, in pixels, starts loading earlier turns.
 const EARLIER_AT = 300;
 class ViewTranscriptMethods {
-  // ---- Rendered transcript overlay ----
-  // The session transcript rendered as real markdown, toggled from the strip.
-  // An ABSOLUTE overlay inside termHost, so the terminal keeps its size and the
-  // fit machinery never notices the toggle; the PTY and xterm run
-  // untouched underneath, so flipping back is instant. Content comes from the
-  // session's transcript JSONL (the same file the model badge resolves): a 1s
-  // poll while open reads only APPENDED bytes from a tracked offset, parses the
-  // new records, and appends rendered blocks — user turns as plain pre-wrap text
-  // (prompts can contain XML-ish tags markdown would mangle), assistant text
-  // through Obsidian's MarkdownRenderer (it IS markdown in the transcript), tool
-  // calls as compact muted one-liners. Updates land per RECORD (as messages and
-  // tool calls complete), not per token — the terminal stays the streaming view.
   toggleTranscript(this: Session): void {
     if (this._transcriptOpen) this.closeTranscript();
     else void this.openTranscript();
@@ -43,9 +28,8 @@ class ViewTranscriptMethods {
     this.transcriptBtnEl?.addClass("is-active");
     this._syncTranscriptIcon();
     await this._refreshTranscript();
-    if (!this._transcriptOpen) return; // closed during the first refresh: don't start the poll
+    if (!this._transcriptOpen) return;
     this.transcriptHost.scrollTop = this.transcriptHost.scrollHeight;
-    // Too little to scroll yet: fill the view from earlier turns.
     if (this.transcriptHost.scrollTop < EARLIER_AT) void this._loadEarlierTranscript();
     if (!this._transcriptTimer) {
       this._transcriptTimer = window.setInterval(() => {
@@ -78,7 +62,6 @@ class ViewTranscriptMethods {
     let stat: { size: number };
     try { stat = fs.statSync(file); } catch { return; }
     if (this._transcriptFilePath !== file || stat.size < (this._transcriptOffset || 0)) {
-      // New, rotated, or truncated file: start over.
       this._transcriptFilePath = file;
       this._transcriptOffset = 0;
       this._transcriptDecoder = new StringDecoder("utf8");
@@ -87,8 +70,6 @@ class ViewTranscriptMethods {
       this._transcriptGen = (this._transcriptGen || 0) + 1;
       this._transcriptStart = 0;
       this._transcriptEarlierEl = null;
-      // A big transcript opens near its end, at a record's start (reading and rendering
-      // many MB up front would stall the UI); scrolling up loads the earlier turns.
       if (stat.size > FIRST_CHUNK) {
         const start = this._lineStartFrom(file, stat.size - FIRST_CHUNK, stat.size);
         this._transcriptOffset = start;
@@ -104,7 +85,6 @@ class ViewTranscriptMethods {
     if (stat.size === this._transcriptOffset) return;
     let chunk = "";
     const fd = fs.openSync(file, "r");
-    // The offset and the decoder are set above, when this file was first read.
     try {
       const len = stat.size - (this._transcriptOffset as number);
       const buf = Buffer.alloc(len);
@@ -122,20 +102,11 @@ class ViewTranscriptMethods {
       if (m) msgs.push(m);
     }
     if (!msgs.length) return;
-    // The overlay holds the body, so it's there when the body is.
     const scroller = this.transcriptHost as HTMLElement;
     const nearBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 60;
     for (const m of msgs) await this._appendTranscriptMessage(m);
     if (nearBottom) scroller.scrollTop = scroller.scrollHeight;
   }
-  // One transcript record → a normalized message, or null to skip. Dispatches
-  // to the backend's format. Normalized shape:
-  // { role: "user"|"assistant"|"boundary", text (user), parts (assistant:
-  // [{kind:"md",text} | {kind:"tool",name,hint}]), uuid (the record's dedup
-  // key) }. The `uuid` is whatever stable per-record key that backend has —
-  // Claude's uuid, Codex's payload.id, agy's step_index — used for the
-  // append-only <!-- pl-rec:KEY --> markers, so the field name is generic.
-  // `target` is the body, or a detached holder for earlier turns.
   async _appendTranscriptMessage(this: Session, m: TranscriptMessage, target: HTMLElement | null | undefined = this._transcriptBodyEl): Promise<void> {
     const el = target;
     if (!el) return;
@@ -146,8 +117,6 @@ class ViewTranscriptMethods {
     const box = el.createDiv({ cls: "agent-manager-transcript-msg agent-manager-transcript-" + m.role });
     if (m.role === "user") {
       box.createDiv({ cls: "agent-manager-transcript-role", text: "You" });
-      // Plain pre-wrap text, NOT markdown: prompts carry XML-ish wrappers and
-      // literal markup that the renderer would mangle; exact text copies best.
       box.createDiv({ cls: "agent-manager-transcript-usertext", text: m.text });
       return;
     }
@@ -155,7 +124,6 @@ class ViewTranscriptMethods {
       if (p.kind === "md") {
         const mdEl = box.createDiv({ cls: "agent-manager-transcript-md" });
         try {
-          // A Component owns what the render makes: the view (a session controller isn't one).
           const owner = this instanceof import_obsidian.Component ? this : this.view;
           await import_obsidian.MarkdownRenderer.render(this.app, p.text, mdEl, "", owner);
         } catch {
@@ -166,10 +134,6 @@ class ViewTranscriptMethods {
       }
     }
   }
-  // Earlier turns of a transcript opened near its end: the records before the first one
-  // shown, rendered off-page and put in above it, keeping the view where it was. One load
-  // at a time; a reset of the overlay meanwhile (a new or truncated file) drops it. Loads
-  // again while the view is still near the top, so a short screen fills.
   async _loadEarlierTranscript(this: Session): Promise<void> {
     const file = this._transcriptFilePath;
     const body = this._transcriptBodyEl;
@@ -180,7 +144,6 @@ class ViewTranscriptMethods {
     const gen = this._transcriptGen;
     let from = end;
     try {
-      // Back a chunk, to a record's start; a record longer than the chunk widens it.
       let size = EARLIER_CHUNK;
       from = this._lineStartFrom(file, end - size, end);
       while (from >= end && end - size > 0) {
@@ -216,9 +179,6 @@ class ViewTranscriptMethods {
       window.setTimeout(() => { void this._loadEarlierTranscript(); }, 0);
     }
   }
-  // The first record start at or after `pos` (a byte offset), or `end` when none comes
-  // before it: `pos` itself when the byte before it is a newline, else just past the next
-  // newline. 0 for a `pos` at or before the file's start.
   _lineStartFrom(file: string, pos: number, end: number): number {
     if (pos <= 0) return 0;
     if (this._byteIsNewline(file, pos - 1)) return pos;
@@ -232,8 +192,8 @@ class ViewTranscriptMethods {
         const nl = buf.subarray(0, read).indexOf(0x0a);
         if (nl !== -1) return Math.min(end, at + nl + 1);
       }
-    } catch { /* treated as none */ }
-    finally { if (fd != null) try { fs.closeSync(fd); } catch { /* best effort */ } }
+    } catch { /* empty */ }
+    finally { if (fd != null) try { fs.closeSync(fd); } catch { /* empty */ } }
     return end;
   }
   _byteIsNewline(file: string, pos: number): boolean {
@@ -244,10 +204,8 @@ class ViewTranscriptMethods {
       const b = Buffer.alloc(1);
       return fs.readSync(fd, b, 0, 1, pos) === 1 && b[0] === 0x0a;
     } catch { return false; }
-    finally { if (fd != null) try { fs.closeSync(fd); } catch { /* best effort */ } }
+    finally { if (fd != null) try { fs.closeSync(fd); } catch { /* empty */ } }
   }
-  // This session's transcript file (shared by the model badge and the rendered
-  // transcript): cached once resolved, re-resolved if it disappears.
   async _transcriptFile(this: Session): Promise<string | null> {
     let file = this._modelFile;
     if (!file || !fs.existsSync(file)) {
@@ -256,25 +214,12 @@ class ViewTranscriptMethods {
     }
     return file;
   }
-  // ---- The transcript note ----
-  // An append-only copy of the session in a vault note, so the conversation survives
-  // what the CLI does to its own file (its cleanup of old transcripts, a rewrite).
-  // Every turn is keyed by its record's id in a hidden marker, and only records not
-  // written before are appended, so nothing is ever rewritten or removed. Runs on each
-  // turn's end, once after a launch or resume, and when the tab closes; errors are
-  // swallowed so a transcript hiccup never disturbs the session. Returns the writer's
-  // { added, path } (the note's vault path), or null: a side chat that can't fork points
-  // its new session at that path.
   async updateDurableTranscript(this: Session): Promise<TranscriptWrite | null> {
     try {
       const file = await this._transcriptFile();
-      // Take the size BEFORE the write: the writer reads the file at its start and
-      // then awaits vault I/O, so records appended during those awaits are not in
-      // what it reconciled and must still read as growth next check.
       let size: number | null = null;
-      try { if (file) size = fs.statSync(file).size; } catch { /* best effort */ }
+      try { if (file) size = fs.statSync(file).size; } catch { /* empty */ }
       const backend = this.getBackendKey();
-      // Its agent is recorded once its id is known (a Claude session's is at launch).
       const ownId = this._ownSessionId();
       if (ownId && this._agentId !== undefined) await this.plugin.recordSessionAgent(ownId, this._agentId, { launchAgentId: this._launchAgentId });
       if (ownId && this._contextSource) await this.plugin.recordContextSource(ownId, this._contextSource);
@@ -284,29 +229,19 @@ class ViewTranscriptMethods {
         agent: this.plugin.agentById(agentId)?.name || null,
         findExisting: () => this.plugin.findTranscriptNoteBySessionId(ownId)?.path || null,
         backend,
-        sessionTitle: this.sessionTitle, // live capture keeps the session's name
+        sessionTitle: this.sessionTitle,
         sessionId: this._ownSessionId(),
         transcriptFile: file,
         source: this._sourceLink(),
       });
-      // An Antigravity session is listed in this vault once its id is known.
       if (backend === "antigravity" && file) this.plugin.rememberAntigravitySession(this._ownSessionId() || this.plugin._tc().deriveSessionId(file, backend)).catch(() => {});
-      // Record the size we reconciled against, so the cheap growth check
-      // (transcriptGrewSinceReconcile) can skip the full read until new records land.
       if (size != null) this._durableReconciledSize = size;
-      // Files it sent: whenever its transcript has grown since the last look (a tool's
-      // result is a record of its own, which adds no message), once after a launch or a
-      // resume, and while a copy is still to make.
       if (res?.path && backend === "claude" && file && (size !== this._sentFilesScanned || this._sentFilesPending)) void this.saveSentFiles(file, res.path, size);
+      if (res?.path && (backend === "claude" || backend === "codex") && file) await this.plugin.writeSubagentTranscripts(file, res.path, ownId || this.plugin._tc().deriveSessionId(file, backend), this.plugin.agentById(agentId)?.name || null, backend);
       return res;
-    } catch { /* never let a transcript write disturb the session */ }
+    } catch { /* empty */ }
     return null;
   }
-  // Each file a Claude session sent you, copied into the vault where its setting says
-  // (Obsidian's attachment rule by default, for the note the session was started from, or
-  // its transcript note) and embedded in its transcript note. Each is its own entry, keyed
-  // on the tool call that sent it: the note's marker says it's done, so a copy that fails,
-  // or a file not on disk yet, is tried again on the next pass. A copy never overwrites.
   async saveSentFiles(this: Session, transcriptFile: string, notePath: string, size: number | null = null): Promise<void> {
     if (this._sentFilesSaving || !this.plugin.sentFilesOn()) return;
     this._sentFilesSaving = true;
@@ -334,12 +269,9 @@ class ViewTranscriptMethods {
             const tc = this.plugin._tc();
             const id = this._ownSessionId();
             const lock = id ? tc.transcriptLockKey(this.plugin.folderOf("transcriptsFolder"), id) : notePath;
-            // The note's path as it is once the lock is held: a move between agents'
-            // folders, under the same lock, may have just moved it.
             await tc.withTranscriptLock(lock, () => adapter.append((id && this.plugin.findTranscriptNoteBySessionId(id)?.path) || notePath, `\n![[${link}]]\n${marker}\n`));
           } catch (e) {
-            // Not embedded, so not done: the copy goes too, or the retry would make another.
-            try { await this.app.fileManager.trashFile(copy); } catch { /* best effort */ }
+            try { await this.app.fileManager.trashFile(copy); } catch { /* empty */ }
             throw e;
           }
           noteText += marker;
@@ -352,11 +284,6 @@ class ViewTranscriptMethods {
       this._sentFilesSaving = false;
     }
   }
-  // A link to the note this session was started from, for its transcript note's
-  // `source` property, so the note's backlinks list every transcript of it, side chats
-  // included. Linked from the transcripts folder, as Obsidian would write it there. A
-  // session started from a folder gets the folder's vault path with a trailing slash
-  // instead, since a wikilink can't name a folder; a resume reads either back (sourceOf).
   _sourceLink(this: Session): string | null {
     if (!this._notePath && this._folderPath) {
       const dir = this.app.vault.getAbstractFileByPath(this._folderPath);
@@ -367,29 +294,23 @@ class ViewTranscriptMethods {
     const from = `${this.plugin.folderOf("transcriptsFolder")}/x.md`;
     return `[[${this.app.metadataCache.fileToLinktext(f, from, true)}]]`;
   }
-  // Has this session's transcript file grown since the last durable reconcile? One
-  // statSync — the cheap gate every capture path (poll, focus, close) runs through
-  // before paying for the full read. True when never reconciled, so a fresh or
-  // repointed view reconciles on its first check.
   transcriptGrewSinceReconcile(this: Session): boolean {
     const file = this._modelFile;
-    // No file resolved yet: worth a full try, which resolves it.
     if (!file) return true;
     let size: number;
     try { size = fs.statSync(file).size; } catch { return false; }
-    return this._durableReconciledSize == null || size !== this._durableReconciledSize;
+    if (this._durableReconciledSize == null || size !== this._durableReconciledSize) return true;
+    const backend = this.getBackendKey();
+    return (backend === "claude" || backend === "codex") && this.plugin.subagentsGrew(file, backend, this._ownSessionId() || this.plugin._tc().deriveSessionId(file, backend));
   }
-  // Open this session's durable transcript note, written up to date first.
   async openDurableTranscriptNote(this: Session): Promise<void> {
     const file = await this._transcriptFile();
-    if (!file) { new import_obsidian.Notice("No transcript yet."); return; }
+    if (!file) { notice("No transcript yet."); return; }
     let res: TranscriptWrite | null = null;
-    try { res = await this.updateDurableTranscript(); } catch { /* best effort */ }
+    try { res = await this.updateDurableTranscript(); } catch { /* empty */ }
     const id = this._ownSessionId() || this.plugin._tc().deriveSessionId(file, this.getBackendKey());
     const af = (res && res.path && this.app.vault.getAbstractFileByPath(res.path)) || this.plugin.findTranscriptNoteBySessionId(id);
-    // A note: the writer's, or the one found by its id (a folder at the writer's path would
-    // be no note to open).
-    if (!(af instanceof import_obsidian.TFile)) { new import_obsidian.Notice("Transcript note not written yet."); return; }
+    if (!(af instanceof import_obsidian.TFile)) { notice("Transcript note not written yet."); return; }
     await this.plugin.openInNotesArea(af);
   }
 }

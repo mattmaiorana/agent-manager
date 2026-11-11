@@ -1,19 +1,13 @@
-// Finding Python, the login shell, the user's PATH, and claude, for an app
-// started from the Dock with launchd's minimal environment. Nothing here
-// blocks the renderer, and nothing ever runs /usr/bin/python3: on a Mac
-// without the developer tools it's a stub that opens an install prompt.
 
 import { execFile, spawn } from "child_process";
 import { constants, promises as fs } from "fs";
 import { homedir, userInfo } from "os";
-// Node's timers, not the window's: this also runs in the Node test harness, which has no window.
 import { clearTimeout, setTimeout } from "timers";
 import { delimiter, dirname, isAbsolute, join, normalize } from "path";
 
 const PYTHON_PROBE_MS = 5000;
 const PATH_PROBE_MS = 10000;
 const MIN_PYTHON: [number, number] = [3, 8];
-// Imports what the helper needs, so a Python missing a module is passed over.
 const PYTHON_PROBE = "import sys,pty,fcntl,termios,selectors,ctypes,json;print('%d.%d' % sys.version_info[:2])";
 const STUBS = new Set(["/usr/bin/python3", "/usr/bin/python"]);
 const DEVELOPER_PYTHONS = [
@@ -27,12 +21,10 @@ export class NotFoundError extends Error {
   }
 }
 
-/** Expands a leading ~ and normalizes an absolute filesystem path from a setting. */
 export function expandPath(p: string): string {
   const t = p.trim();
   if (!t) return "";
   const expanded = t === "~" ? homedir() : t.startsWith("~/") ? join(homedir(), t.slice(2)) : t;
-  // Not Obsidian's normalizePath: that's for vault-relative paths and strips the leading slash.
   return normalize(expanded);
 }
 
@@ -57,8 +49,6 @@ async function listDirs(parent: string): Promise<string[]> {
 
 function probePython(candidate: string): Promise<string | null> {
   return new Promise((resolve) => {
-    // SIGKILL, and a deadline of its own: a wrapper that ignores SIGTERM can't
-    // leave the terminal waiting.
     const deadline = setTimeout(() => resolve(null), PYTHON_PROBE_MS + 1000);
     const child = execFile(candidate, ["-I", "-c", PYTHON_PROBE], { timeout: PYTHON_PROBE_MS, killSignal: "SIGKILL", env: { PATH: "/usr/bin:/bin" } }, (err, stdout) => {
       clearTimeout(deadline);
@@ -71,16 +61,12 @@ function probePython(candidate: string): Promise<string | null> {
   });
 }
 
-/**
- * Whether a path is, or leads by symlink to, the /usr/bin placeholder, and
- * the developer tools that make it a real Python aren't installed.
- */
 async function isStub(p: string): Promise<boolean> {
   let real = p;
   try {
     real = await fs.realpath(p);
   } catch {
-    // missing; isExecutable reports it
+    /* empty */
   }
   if (!STUBS.has(p) && !STUBS.has(real)) return false;
   for (const dev of DEVELOPER_PYTHONS) if (await isExecutable(dev)) return false;
@@ -88,8 +74,6 @@ async function isStub(p: string): Promise<boolean> {
 }
 
 async function pythonCandidates(setting: string, pathDirs: string[]): Promise<string[]> {
-  // A location the user set is the only one tried, so a mistake there is
-  // reported rather than quietly passed over.
   if (setting) return [expandPath(setting)];
   const home = homedir();
   const list: string[] = [];
@@ -104,7 +88,6 @@ async function pythonCandidates(setting: string, pathDirs: string[]): Promise<st
   for (const d of ["miniconda3", "anaconda3", "miniforge3", "mambaforge"]) list.push(join(home, d, "bin/python3"));
   list.push(join(home, ".local/bin/python3"));
   for (const dir of pathDirs) list.push(join(dir, "python3"));
-  // The developer tools' own Python, by path, only when it's really there.
   list.push(...DEVELOPER_PYTHONS);
   const seen = new Set<string>();
   const kept = list.filter((p) => {
@@ -112,12 +95,10 @@ async function pythonCandidates(setting: string, pathDirs: string[]): Promise<st
     seen.add(p);
     return true;
   });
-  // A symlink elsewhere can lead to the placeholder, too.
   const stubs = await Promise.all(kept.map(async (p) => STUBS.has(await fs.realpath(p).catch(() => p))));
   return kept.filter((_, i) => !stubs[i]);
 }
 
-/** The first usable Python 3. Never runs the /usr/bin stub. */
 export async function findPython(setting: string, pathDirs: string[]): Promise<{ path: string; version: string }> {
   const tried: string[] = [];
   for (const candidate of await pythonCandidates(setting, pathDirs)) {
@@ -136,7 +117,6 @@ export async function findPython(setting: string, pathDirs: string[]): Promise<{
   throw new NotFoundError("Python 3 not found", tried);
 }
 
-/** The user's login shell from the account record, which a Dock launch doesn't put in $SHELL reliably. */
 export function loginShell(setting: string): string {
   const fromSetting = expandPath(setting);
   if (fromSetting) return fromSetting;
@@ -144,38 +124,23 @@ export function loginShell(setting: string): string {
     const shell = userInfo().shell;
     if (shell) return shell;
   } catch {
-    // no account record
+    /* empty */
   }
   return process.env.SHELL || "/bin/zsh";
 }
 
-/** The PATH the login shell's startup files build (probeLoginEnv). */
 export async function probeLoginPath(shell: string, env: NodeJS.ProcessEnv, signal?: AbortSignal): Promise<string> {
   const path = (await probeLoginEnv(shell, env, signal)).PATH ?? "";
   if (!path.trim()) throw new Error("the login shell reported an empty PATH");
   return path.trim();
 }
 
-/** The end of the probe's answer: no "=", so it's never read as a variable. */
 const PROBE_DONE = "VAULT_TERMINAL_PROBE_DONE";
 
-/**
- * Asks the login shell for the environment its startup files build. The answer comes
- * back on fd 3, so whatever the startup files print can't corrupt it, and the
- * probe runs in its own process group so a timeout ends anything it started
- * (a sleep in a startup file would otherwise hold fd 3 open). The answer
- * ends with a marker, and is used as soon as the marker arrives: a job a
- * startup file leaves running in the background keeps fd 3 open, so the
- * pipe's end can be long in coming.
- */
 export function probeLoginEnv(shell: string, env: NodeJS.ProcessEnv, signal?: AbortSignal): Promise<Record<string, string>> {
-  // env -0: each variable ends in a NUL, so values with newlines come back whole.
   const script = `/usr/bin/env -0 >&3; printf '%s\\0' ${PROBE_DONE} >&3`;
   return new Promise((resolve, reject) => {
     if (signal?.aborted) return reject(new Error("stopped"));
-    // A watchdog in the probe's own group ends it if Obsidian dies before
-    // the timeout below can: nothing in the renderer is left to do it then.
-    // It lets go of fd 3, so the answer's end isn't held up by it.
     const watchdog = `(sleep ${PATH_PROBE_MS / 1000 + 5}; kill -9 0) </dev/null >/dev/null 2>&1 3>&- & exec "$0" -l -i -c "$1"`;
     const child = spawn("/bin/sh", ["-c", watchdog, shell, script], {
       cwd: homedir(),
@@ -192,7 +157,7 @@ export function probeLoginEnv(shell: string, env: NodeJS.ProcessEnv, signal?: Ab
       try {
         process.kill(-child.pid!, "SIGKILL");
       } catch {
-        // already gone
+        /* empty */
       }
       const vars: Record<string, string> = {};
       for (const entry of out.split("\0")) {
@@ -204,7 +169,6 @@ export function probeLoginEnv(shell: string, env: NodeJS.ProcessEnv, signal?: Ab
       else resolve(vars);
     };
     const timer = setTimeout(() => finish(new Error(`the login shell took longer than ${PATH_PROBE_MS / 1000} s`)), PATH_PROBE_MS);
-    // The plugin unloading ends the probe and its shell at once.
     signal?.addEventListener("abort", () => finish(new Error("stopped")), { once: true });
     const pipe = child.stdio[3] as NodeJS.ReadableStream;
     pipe.setEncoding("utf8");
@@ -218,11 +182,6 @@ export function probeLoginEnv(shell: string, env: NodeJS.ProcessEnv, signal?: Ab
   });
 }
 
-/**
- * A PATH that works before the login shell has answered: path_helper's plus
- * the usual folders. Asked once per load, since every launch and every
- * host call merges it in and it doesn't change while Obsidian runs.
- */
 let fallbackPathOnce: Promise<string> | null = null;
 export function fallbackPath(): Promise<string> {
   return (fallbackPathOnce ??= readFallbackPath());
@@ -247,24 +206,8 @@ function readFallbackPath(): Promise<string> {
   });
 }
 
-// What the probe's shell says about itself, not about the user's setup.
 const PROBE_ONLY = /^(VAULT_TERMINAL_ENV_PROBE|SHLVL|_|PWD|OLDPWD)$/;
 
-/**
- * An agent's environment: the app's own (programEnv),
- * then what the login shell's startup files set on top, then the user's own
- * NAME=value lines from the settings on top of both, and PWD the folder the
- * agent starts in. path is the PATH: the login shell's, when it has answered
- * (with node's folder added for a node script that needs it). The probe
- * starts from the app's own variables, so one missing from its answer was
- * unset by a startup file, and is left out here too.
- */
-/**
- * The variables an agent gets: the login shell's, then the setting's own
- * (extra), then PATH and PWD; last, the names in strip are taken out, after
- * the setting's own are merged, so a key in a startup file or the setting
- * never reaches the agent (a host's list, such as Agent Manager's API keys).
- */
 export function agentEnv(path: string, login: Record<string, string> | null, extra: string, cwd: string, strip: readonly string[] = []): NodeJS.ProcessEnv {
   const overlay: Record<string, string> = {};
   for (const [k, v] of Object.entries(login ?? {})) if (!PROBE_ONLY.test(k)) overlay[k] = v;
@@ -272,20 +215,12 @@ export function agentEnv(path: string, login: Record<string, string> | null, ext
   for (const [k, v] of own) overlay[k] = v;
   const env = programEnv(path, overlay);
   if (login) for (const k of Object.keys(process.env)) if (!(k in login) && !(k in overlay) && !PROBE_ONLY.test(k) && !/^(PATH|HOME|TERM|COLORTERM|LANG)$/.test(k)) delete env[k];
-  // A PATH of the user's own wins over the login shell's too.
   for (const [k, v] of own) if (k === "PATH") env.PATH = v;
   env.PWD = cwd;
-  // PATH and PWD are the terminal's own: never taken out.
   for (const k of strip) if (k !== "PATH" && k !== "PWD") delete env[k];
   return env;
 }
 
-/**
- * What agents never get from the login shell or the settings, by default:
- * API keys and the switches that move Claude to another
- * provider. A key in .zshrc would otherwise quietly move Claude onto API
- * billing or another provider.
- */
 export const DEFAULT_STRIPPED_VARIABLES = [
   "ANTHROPIC_API_KEY",
   "ANTHROPIC_BASE_URL",
@@ -299,7 +234,6 @@ export const DEFAULT_STRIPPED_VARIABLES = [
   "CLAUDE_CODE_USE_VERTEX",
 ].join("\n");
 
-/** Variable names, one per line or separated by spaces or commas; # comments and names a shell couldn't export skipped. */
 export function parseNames(text: string): string[] {
   const out: string[] = [];
   for (const raw of text.split(/\r?\n/)) {
@@ -309,7 +243,6 @@ export function parseNames(text: string): string[] {
   return out;
 }
 
-/** NAME=value lines; blank lines and # comments skipped, and names a shell couldn't export ignored. */
 export function parseVariables(text: string): [string, string][] {
   const out: [string, string][] = [];
   for (const raw of text.split(/\r?\n/)) {
@@ -336,7 +269,6 @@ export function mergePath(...paths: string[]): string {
   return out.join(delimiter);
 }
 
-/** Splits a command setting into words, honoring single and double quotes and backslashes. */
 export function splitCommand(command: string): string[] {
   const words: string[] = [];
   let cur = "";
@@ -367,10 +299,6 @@ export function splitCommand(command: string): string[] {
   return words;
 }
 
-/**
- * Resolves the first word of the claude command: the location setting, then
- * PATH, then the places claude's installers use.
- */
 export async function findProgram(name: string, locationSetting: string, path: string): Promise<string> {
   const tried: string[] = [];
   const check = async (p: string) => {
@@ -402,10 +330,6 @@ export async function findProgram(name: string, locationSetting: string, path: s
   throw new NotFoundError(`${name} not found`, tried);
 }
 
-/**
- * If the program is a script run by `env node`, the node it needs must be on
- * PATH; when it sits beside the script (npm's layout), make sure that folder is.
- */
 export async function pathForScript(program: string, path: string): Promise<string> {
   try {
     const fh = await fs.open(program, "r");
@@ -414,22 +338,15 @@ export async function pathForScript(program: string, path: string): Promise<stri
     await fh.close();
     const first = buf.toString("utf8").split("\n")[0];
     if (!first.startsWith("#!") || !/\bnode\b/.test(first)) return path;
-    // npm puts the link to the script beside the node that installed it.
     for (const dir of [dirname(program), dirname(await fs.realpath(program))]) {
       if (await isExecutable(join(dir, "node"))) return mergePath(normalize(dir), path);
     }
   } catch {
-    // unreadable; leave PATH alone
+    /* empty */
   }
   return path;
 }
 
-/**
- * The environment a terminal's program gets: the GUI app's own, minus what
- * belongs to Electron or to whatever terminal launched Obsidian (its LINES
- * and COLUMNS would override the pty's size), plus the recovered PATH and the
- * terminal's identity.
- */
 export function programEnv(path: string, overlay: Record<string, string> = {}): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const [k, v] of Object.entries({ ...process.env, ...overlay })) {
@@ -444,16 +361,9 @@ export function programEnv(path: string, overlay: Record<string, string> = {}): 
   return env;
 }
 
-/**
- * Settings for one claude session, passed with --settings (values there
- * override the user's settings files for that session only, never changing
- * them). Each key is added only where the command doesn't set it itself: a
- * command with its own inline --settings JSON gets the missing keys merged
- * in; one that points --settings at a file is left alone, since the two
- * can't be merged here.
- */
 export function withSessionSettings(words: string[], extra: Record<string, unknown>): void {
   if (!Object.keys(extra).length) return;
+  collapseSettings(words);
   const i = words.findIndex((w) => w === "--settings" || w.startsWith("--settings="));
   if (i < 0) {
     words.push("--settings", JSON.stringify(extra));
@@ -464,7 +374,6 @@ export function withSessionSettings(words: string[], extra: Record<string, unkno
   const settings = inlineSettings(value);
   if (!settings) return;
   const missing = Object.entries(extra).filter(([k]) => !(k in settings));
-  // Hooks add to the command's own, event by event: both run.
   const hooks = mergedHooks(settings.hooks, extra.hooks);
   if (!missing.length && !hooks) return;
   const merged = JSON.stringify({ ...settings, ...Object.fromEntries(missing), ...(hooks ? { hooks } : {}) });
@@ -472,7 +381,29 @@ export function withSessionSettings(words: string[], extra: Record<string, unkno
   else words[i] = `--settings=${merged}`;
 }
 
-/** The command's own hooks with ours added; null when there's nothing to merge. */
+function collapseSettings(words: string[]): void {
+  const at: { i: number; inline: boolean; value: Record<string, unknown> }[] = [];
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i];
+    if (w !== "--settings" && !w.startsWith("--settings=")) continue;
+    const inline = w === "--settings";
+    const value = inlineSettings(inline ? words[i + 1] ?? "" : w.slice("--settings=".length));
+    if (!value) return;
+    at.push({ i, inline, value });
+    if (inline) i++;
+  }
+  if (at.length < 2) return;
+  let merged: Record<string, unknown> = {};
+  for (const a of at) {
+    const hooks = mergedHooks(merged.hooks, a.value.hooks);
+    merged = { ...merged, ...a.value, ...(hooks ? { hooks } : {}) };
+  }
+  for (const a of at.slice(1).reverse()) words.splice(a.i, a.inline ? 2 : 1);
+  const first = at[0];
+  if (first.inline) words[first.i + 1] = JSON.stringify(merged);
+  else words[first.i] = `--settings=${JSON.stringify(merged)}`;
+}
+
 function mergedHooks(theirs: unknown, ours: unknown): Record<string, unknown> | null {
   if (!theirs || !ours || typeof theirs !== "object" || typeof ours !== "object" || Array.isArray(theirs)) return null;
   const merged: Record<string, unknown> = { ...(theirs as Record<string, unknown>) };
@@ -483,7 +414,6 @@ function mergedHooks(theirs: unknown, ours: unknown): Record<string, unknown> | 
   return merged;
 }
 
-/** A --settings value that's inline JSON, parsed; null for a file path or JSON claude wouldn't accept either. */
 export function inlineSettings(value: string): Record<string, unknown> | null {
   if (!value.trim().startsWith("{")) return null;
   try {
@@ -494,11 +424,6 @@ export function inlineSettings(value: string): Record<string, unknown> | null {
   }
 }
 
-/**
- * claude notifies only terminals it recognizes unless told a channel. Kitty's
- * (OSC 99) says what claude needs, which the tab shows. Set for this session
- * only, unless the command names a channel itself.
- */
 export function withNotificationChannel(words: string[]): void {
   withSessionSettings(words, { preferredNotifChannel: "kitty" });
 }

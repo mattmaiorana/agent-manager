@@ -1,9 +1,6 @@
-// One terminal in an Obsidian view. The program starts only once the pane has
-// a real size, so its first output is drawn at the right size, and a tab
-// restored in the background starts the first time it's shown.
 
-import { ItemView, Menu, Notice, Scope, getIconIds, setIcon, type Modifier, type ViewStateResult, type WorkspaceLeaf } from "obsidian";
-import { Terminal, type ILink, type IBuffer, type IBufferLine, type IMarker } from "@xterm/xterm";
+import { ItemView, Menu, Scope, getIconIds, setIcon, type Modifier, type ViewStateResult, type WorkspaceLeaf } from "obsidian";
+import { Terminal, type ILink, type IBuffer, type IBufferLine, type IBufferRange, type IMarker } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { SearchAddon, type ISearchOptions } from "@xterm/addon-search";
@@ -12,96 +9,80 @@ import { execFileSync } from "child_process";
 import { homedir, hostname } from "os";
 import { isAbsolute, join, resolve as resolvePath } from "path";
 import { fileURLToPath } from "url";
-import { confirmClose, type VaultTerminal } from "./core";
+import { confirmClose, type NotificationHandle, type VaultTerminal } from "./core";
 import type { CloseReason } from "./close";
 import type { TerminalController } from "./host";
-import { afterExitKey, ctrlCCopies, gestureReports, KeyQueue, replayPlan, selectsInBox, typesCharacter, type Cell, type Gesture, type QueueItem } from "./keys";
+import { afterExitKey, ctrlCCopies, dragSelection, gestureFocus, gestureReports, KeyQueue, movesTo, replayPlan, rowBreaks, SELECT_MOVE_KEYS, selectMove, selectsInBox, startSelection, textMove, typesCharacter, unwrapCopy, dedentCopy, type Cell, type InputRow, type Gesture, type QueueHold, type QueueItem, type SelectMove, type TextArea } from "./keys";
 import { HelperSession, validSize, type ExitInfo, type Foreground, type StartError } from "./session";
-import { findPaths, findUrls, type FoundPath } from "./links";
+import { cliWrapped, findPaths, findUrlsAcross, type FoundPath, type RowCells } from "./links";
 import { clipboardHasOnlyImage, clipboardText, copyText } from "./clipboard";
 import { StatusTracker, type Attention, type ProgramState } from "./status";
 import { agentById, agentFor, agentForProgram, type AgentProfile } from "./agents";
 import { readLook } from "./theme";
 import { ReportQueue, WheelCounter, scrollSpeed } from "./wheel";
-import { cellSize, resyncViewport, scrollBuffer, sendButtonReport, sendWheelReport } from "./xterm-internals";
+import { cellSize, resyncViewport, scrollBuffer, sendButtonReport, sendWheelReport, stopUnderliningLinks, underlineLinks } from "./xterm-internals";
 import { PictureLayer } from "./pictures";
 import { GraphicsFilter, PICTURE_LINK, findPattern, withoutPlaceholders } from "./kitty";
+import { addCloseX, noticeMs, noticesOn } from "./notice";
+import { toDesktop, toObsidian } from "./settings";
 
 
-/** The bundled xterm.js's version, from its package.json at build time (esbuild.config.mjs). */
 declare const XTERM_VERSION: string;
 
 interface TopAnchor {
   marker: IMarker;
-  /** How far into its line the top row started, in characters. */
   chars: number;
-  /** The line's whole text, its wrapped rows joined (wholeLine), to confirm the marker still points at it. */
   text: string;
-  /** How many whole lines come after it to the buffer's end: unchanged by reflow. */
   fromEnd: number;
 }
-/** A shell, or an agent CLI by its id in agents.ts ("claude", "codex", ...). */
 export type TerminalKind = string;
 
-/** How a terminal is started, besides what it runs (main.ts, LaunchOptions). */
 interface StartOptions {
   plain?: boolean;
   noIntegration?: boolean;
 }
 
-// Shells by their process name, with a version or not (zsh, zsh-5.9): a shell's own pid running one is still the shell.
 const SHELLS = /^(zsh|bash|fish|sh|dash|ksh|mksh|tcsh|csh|nu|elvish|xonsh)(-[\d.]+)?$/;
-// xterm's own word separators, then claude's box lines and corners, curly quotes and bars.
 const WORD_SEPARATORS = " ()[]{}',\"`─│┌┐└┘├┤┬┴┼╭╮╯╰‘’“”|";
-// The least time between two fits to a new size while a program runs.
 const RESIZE_SPACING_MS = 125;
-// A start still going after this shows a line naming its step.
 const SLOW_START_MS = 5000;
-// An agent that exits nonzero within this of starting is tried once without the terminal's additions.
 const RETRY_WITHIN_MS = 5000;
 
-// Output backpressure: pause the helper while xterm has this much unparsed.
 const OUTPUT_HIGH = 512 * 1024;
 const OUTPUT_LOW = 128 * 1024;
-// Frames to wait for xterm to measure its font after opening.
 const MEASURE_RETRIES = 30;
-// When no animation frame comes (a covered window), lay out after this anyway.
 const FRAME_FALLBACK_MS = 300;
 
-// Keys the terminal claims from Obsidian's hotkeys while it has focus.
-// Obsidian's keymap sees every key before xterm does, so a hotkey bound to one
-// of these (Ctrl+Tab switches tabs, for one) would otherwise never reach the
-// program, and one bound to Cmd+C or Cmd+V would take copy and paste. Printable keys are never claimed: Option characters, dead keys and
-// input methods must reach xterm untouched. Cmd keys stay Obsidian's, except
-// the few a terminal uses.
 const CTRL_COMBOS: Modifier[][] = [["Ctrl"], ["Ctrl", "Shift"], ["Ctrl", "Alt"], ["Ctrl", "Shift", "Alt"]];
 const ANY_MODIFIERS = ["Escape", "Tab", "Enter", "Backspace", "Delete", "Home", "End", "PageUp", "PageDown", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"];
 const FUNCTION_KEYS = Array.from({ length: 20 }, (_, i) => `F${i + 1}`);
 const CMD_KEYS = ["A", "C", "V", "X", "K", "F", "G", "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End", "Backspace", "Delete", "Z"];
-// Prompt marks kept for Cmd+Up and Cmd+Down; older ones are dropped.
 const MAX_PROMPT_MARKS = 1000;
-// After a scrollback reset while scrolled up, how long to look for the same text again.
+const cursorStyleOf = (c: string): "bar" | "block" | "underline" => (c === "block" || c === "underline" ? c : "bar");
+const inactiveCursorOf = (c: string): "bar" | "outline" | "underline" => (c === "block" ? "outline" : c === "underline" ? "underline" : "bar");
+const SELECT_HOLD_MS = 400;
+const SELECT_SETTLE_MS = 80;
 const RESET_FOLLOW_MS = 1000;
-// How many rows at the top are matched to find the place again.
 const RESET_ROWS = 5;
-// Keys that alone are no action of the user's (cancelReset).
 const MODIFIER_KEYS = new Set(["Shift", "Control", "Alt", "Meta", "CapsLock", "Fn"]);
-// OSC 52 payloads past this are ignored rather than decoded.
 const CLIPBOARD_WRITE_LIMIT = 8 * 1024 * 1024;
-/** How far from the cursor Cmd+A looks for the borders of claude's input box. */
 const PROMPT_ROWS = 80;
-/** The gap between the reports of Cmd+A's drag over claude's input. */
 const DRAG_STEP_MS = 20;
-/** The gap between the keys that clear claude's input, so each is read as a key, not a paste. */
+const COPY_UNWRAP_MS = 2000;
+const COPY_KEEP_MS = 2500;
+const COPY_CHECK_MS = 25;
 const CLEAR_KEY_GAP_MS = 15;
-/** How much of copied text the notice shows, and for how long. */
 const COPIED_SHOWN = 80;
-const COPIED_NOTICE_MS = 5000;
-/** How long a line's file paths are kept before its files are checked again. */
-const PATHS_KEPT_MS = 2000;
+const TOAST_STACK = 3;
+const INFO_STACK = 3;
+let noticeKeys = 0;
 
-// Each state's tab icon, first choice first: icon names vary between the
-// Lucide versions Obsidian has shipped.
+const PATHS_KEPT_MS = 5000;
+const PATHS_KEPT_MAX = 600;
+const LINKS_CHANGED_MS = 100;
+const LINK_ROWS_KEPT = 2000;
+const JOINED_LINES = 2;
+
 const STATE_ICONS: Record<ProgramState | "bell", string[]> = {
   running: [],
   unknown: ["circle-help", "circle-question-mark", "help-circle"],
@@ -115,13 +96,10 @@ const STATE_ICONS: Record<ProgramState | "bell", string[]> = {
   bell: ["bell"],
 };
 
-// The view type of the view being constructed (makeTerminalView): ItemView's
-// constructor asks for it before the view knows its core.
 let constructingType = "";
 
-/** A terminal view for a host's view type. The only way to make one: TerminalView's constructor needs its type set first. */
-export function makeTerminalView(leaf: WorkspaceLeaf, core: VaultTerminal): TerminalView {
-  constructingType = core.viewType;
+export function makeTerminalView(leaf: WorkspaceLeaf, core: VaultTerminal, plain = false): TerminalView {
+  constructingType = plain && core.plainViewType ? core.plainViewType : core.viewType;
   try {
     return new TerminalView(leaf, core);
   } finally {
@@ -147,34 +125,23 @@ export class TerminalView extends ItemView {
   private unhookMigrate: (() => void) | null = null;
   private unparsed = 0;
   private paused = false;
-  /**
-   * The program asked whether the terminal speaks the kitty keyboard
-   * protocol, so it reads keys in that encoding (claude does). Cmd+C and
-   * Cmd+V are passed to such a program in it; others never see them.
-   */
   private readsKittyKeys = false;
-  /** The agent the running program is, by its file name; null for a shell or any other program. */
   private runningAgent: AgentProfile | null = null;
   private winFocus: { win: Window; fn: () => void } | null = null;
-  /** What the program is doing, as far as it has said. Null before the first start. */
   private status: StatusTracker | null = null;
-  /** A bell rang while the user wasn't looking; cleared when they look. */
   private bellMarked = false;
-  /** The folder the program started in, which relative paths in its output are from. */
   private startDir = homedir();
-  /** The shell's current folder, once it reports one (OSC 7); then relative paths are from here. */
   private currentDir: string | null = null;
-  /** The file paths last found in a line, for a moment (linksOn). */
-  private pathsKept: { text: string; dir: string; at: number; found: FoundPath[] } | null = null;
-  /** The last selection Cmd+A made of claude's input, and its rows' indent (selectPrompt). */
+  private pathsKept = new Map<string, { at: number; found: FoundPath[] }>();
+  private linkRowsDrawn = new Map<number, string>();
+  private linksThisRender = new Map<number, ILink[]>();
+  private pointer: { x: number; y: number; alt: boolean } | null = null;
+  private linksChanged = 0;
+  private linksChangedWin: Window | null = null;
+  private hoverCheck = 0;
+  private hoverCheckWin: Window | null = null;
   private promptSelection: { text: string; indent: number; col: number; row: number; length: number } | null = null;
-  /** What Cmd+A's drag still has to send (later, cancelPending). */
   private pendingSends = new Set<number>();
-  /**
-   * The keys that delete a selection in claude's input, and whatever was
-   * typed or pasted while they go out, after them (replaceSelection). Only
-   * to the program it began in (queueSession).
-   */
   private keyQueue = new KeyQueue(
     (data) => {
       if (this.session && this.session === this.queueSession) this.sendNow(data);
@@ -185,126 +152,98 @@ export class TerminalView extends ItemView {
     CLEAR_KEY_GAP_MS,
   );
   private queueSession: HelperSession | null = null;
-  /** While keyQueue itself sends through xterm's input (a mouse report), which onInput lets through. */
   private queueWriting = false;
-  /**
-   * How claude's own selection in its input box was made, in its full screen,
-   * where the plugin can't see it; null when there's none. Set by a drag or a
-   * double or triple click there (selectsInBox) and by Cmd+A's drag, and
-   * dropped by anything else (claude clears its selection on nearly any key,
-   * Cmd+C included), since a wrong yes deletes a character the user meant to
-   * keep. Cut makes it again after the copy (cutSelection).
-   */
-  private claudeSelection: Gesture | null = null;
-  /** Where and when (performance.now()) the left button last went down while claude has the mouse, for Cut's replay (replayPlan). */
+  private selectionKnown: Gesture | null = null;
+  private get claudeSelection(): Gesture | null {
+    return this.selectionKnown;
+  }
+  private set claudeSelection(g: Gesture | null) {
+    this.selectionKnown = g && g.top === undefined ? { ...g, top: this.promptBox()?.top } : g;
+    if (!!g === this.pane?.hasClass("vault-terminal-selecting")) return;
+    this.pane?.toggleClass("vault-terminal-selecting", !!g);
+    this.applyCursor();
+  }
+
+  private applyCursor(): void {
+    if (!this.term) return;
+    const s = this.core.settings;
+    const hidden = !!this.selectionKnown;
+    this.term.options.cursorStyle = hidden ? "bar" : cursorStyleOf(s.cursor);
+    this.term.options.cursorBlink = !hidden && s.cursorBlink;
+    this.term.options.cursorInactiveStyle = hidden ? "bar" : inactiveCursorOf(s.cursor);
+  }
   private lastPress: Cell & { at: number } = { col: -9, row: -9, at: 0 };
-  /** Where the left button went down, while claude has the mouse, for claudeSelection. */
   private pressedAt: Cell | null = null;
-  /** The notice that says a program copied to the clipboard, while it shows. */
-  private copiedNotice: Notice | null = null;
-  /** Undoes guardClose's hold on the leaf's detach. */
+  private copyBreaks: { breaks: { breaks: string[]; indent: number } | null; at: number; copied?: () => void }[] = [];
+  private toasts: HTMLElement | null = null;
+  private toastTimers = new Map<HTMLElement, { win: Window; id: number }>();
+  private cutTimers = new Set<{ win: Window; id: number }>();
+  readonly noticeKey = `session-${++noticeKeys}`;
   private unguardClose: (() => void) | null = null;
-  /** Where each prompt started (OSC 133;A), for Cmd+Up and Cmd+Down. */
   private promptMarks: IMarker[] = [];
   private search = new SearchAddon();
   private searchBar: HTMLElement | null = null;
   private searchInput: HTMLInputElement | null = null;
   private searchCount: HTMLElement | null = null;
-  /** The self-test turns this off to compare with xterm's own wheel handling. */
   ownWheel = true;
-  /** What a start found the pane hidden for, to start when it's shown. */
   private pending: { kind: TerminalKind; folder: string; opts: StartOptions } | null = null;
-  /** The running program's launch: what was added to it, and when it started. */
   private launch: { kind: TerminalKind; folder: string; added: string[]; integration: boolean; plain: boolean; at: number } | null = null;
-  /** A start in progress, and the line it shows when it's slow. */
   private slow: { timer: number; step: string; shown: boolean } | null = null;
-  /** What's running is the tab's own program (an agent), not a shell started after it or with S. */
   private ranProgram = false;
-  /** Wheel travel not yet turned into lines (wheel.ts). */
   private wheel = new WheelCounter();
-  /** Scroll reports waiting to go to a full-screen program, a frame apart (wheel.ts), where they go, and the frame that sends the next. */
   private reports = new ReportQueue();
   private reportAt: { col: number; row: number; mods: { shift: boolean; alt: boolean; ctrl: boolean }; px: { x: number; y: number } } | null = null;
   private reportFrame = 0;
   private reportWin: Window | null = null;
-  /** The rows that were at the top when a program erased the scrollback, to find again in its reprint. */
   private reset: { rows: string[]; from: number; until: number; timer: number; lastLook: number; trailing: number } | null = null;
-  /** The line at the top of the view, kept across a move to another window until the next layout. */
   private anchor: TopAnchor | null = null;
-  /** When the terminal was last fit to a new size, and the fit waiting to follow it. */
   private lastFitAt = 0;
   private fitTimer = 0;
   private fitTimerWin: Window | null = null;
-  /** Pictures: null while "Pictures in the terminal" is off, and then none of their code runs. */
   private picturesLayer: PictureLayer | null = null;
-  /**
-   * Turned off mid-command: the pictures are gone at once, and only the
-   * filter stays, swallowing the rest of that command so it isn't printed
-   * as text, then goes too.
-   */
   private picturesDrain: GraphicsFilter | null = null;
-  /** The terminal's foreground program, as the helper last reported it. */
   private foreground: Foreground | null = null;
-  /** An agent recognized in a shell tab's foreground, and the shell's own status, kept for when it ends. */
   private recognized: AgentProfile | null = null;
   private shellStatus: StatusTracker | null = null;
-  /** The host's hold on this view (host.ts), or null for a plain terminal. */
   readonly controller: TerminalController | null;
-  /** Waiting for the controller's releaseStart() before the program starts. */
   private holdStart = false;
-  /** Above the terminal, for the host (the pane shrinks to fit it), and the area holding the pane. */
   private top!: HTMLElement;
   private stage!: HTMLElement;
-  /** The running program's output, decoded for the controller. */
   private decoder: TextDecoder | null = null;
+
+  private readonly ownType: string;
 
   constructor(leaf: WorkspaceLeaf, private core: VaultTerminal) {
     super(leaf);
-    this.controller = core.host.controller?.(this) ?? null;
+    this.ownType = constructingType;
+    this.controller = this.ownType === core.plainViewType ? null : (core.host.controller?.(this) ?? null);
     this.holdStart = !!this.controller?.gated;
     this.navigation = false;
-    // Pushed by Obsidian while this view has focus. A handler that returns
-    // anything but false leaves the key unprevented, so xterm still gets it;
-    // keys not listed here go on to Obsidian's own hotkeys.
     this.scope = new Scope(this.app.scope);
     const claim = () => true;
-    // Ctrl+Tab and Ctrl+Shift+Tab are Obsidian's (switching tabs): no
-    // program in a terminal uses them. Registered before the claim on every
-    // Ctrl key, and run as the hotkey Obsidian has for them.
     this.scope.register(["Ctrl"], "Tab", (e) => this.obsidianHotkey(e));
     this.scope.register(["Ctrl", "Shift"], "Tab", (e) => this.obsidianHotkey(e));
     for (const mods of CTRL_COMBOS) this.scope.register(mods, null, claim);
     for (const key of [...ANY_MODIFIERS, ...FUNCTION_KEYS]) {
-      // Cmd+Shift and Cmd+Alt with these stay Obsidian's (Cmd+Alt+Left goes back).
       for (const mods of [[], ["Shift"], ["Alt"], ["Shift", "Alt"]] as Modifier[][]) this.scope.register(mods, key, claim);
     }
     for (const key of CMD_KEYS) this.scope.register(["Meta"], key, claim);
-    // Find the previous match.
     this.scope.register(["Meta", "Shift"], "G", claim);
   }
 
   override getViewType(): string {
-    // Obsidian's ItemView asks this in its own constructor, before the core is set.
-    return this.core?.viewType ?? constructingType;
+    return this.ownType || constructingType;
   }
 
   override getDisplayText(): string {
-    // The host's name for it (a session's title) stands alone.
     const own = this.controller?.name?.();
     if (own) return own;
     const name = this.status?.title || this.foregroundName() || agentById(this.kind)?.name || "Terminal";
-    // A progress percent and a session status text, as programs report them.
     const percent = this.status?.percent;
     const text = this.status?.statusText;
     return `${percent !== null && percent !== undefined ? `${percent}% ` : ""}${name}${text ? ` · ${text}` : ""}`;
   }
 
-  /**
-   * A parser callback that can't throw into xterm: an exception inside one
-   * leaves the chunk being parsed in xterm's write queue with nothing
-   * scheduled, so the terminal never draws again.
-   * It's logged, and parsing goes on as if the handler had answered fallback.
-   */
   private guarded<A extends unknown[], R>(fallback: R, fn: (...args: A) => R): (...args: A) => R {
     return (...args: A) => {
       try {
@@ -321,14 +260,12 @@ export class TerminalView extends ItemView {
     const has = (id: string) => ids.includes(id) || ids.includes(`lucide-${id}`);
     const hostIcon = this.controller?.icon?.();
     const plain = (hostIcon && has(hostIcon) ? hostIcon : null) ?? agentById(this.kind)?.icons.find(has) ?? (this.kind === "shell" ? "terminal-square" : "bot");
-    // The status icons are a setting: off, the tab keeps its own icon.
     if (this.core?.settings.statusIcons === false) return plain;
     const state = this.bellMarked ? "bell" : this.status?.shown;
     if (!state) return plain;
     return (Object.hasOwn(STATE_ICONS, state) ? STATE_ICONS[state] : []).find(has) ?? plain;
   }
 
-  /** The program's state, for the self-test and the tab. */
   get programState(): ProgramState | null {
     return this.status?.shown ?? null;
   }
@@ -345,16 +282,13 @@ export class TerminalView extends ItemView {
   override getState(): Record<string, unknown> {
     const state: Record<string, unknown> = { ...super.getState(), kind: this.kind };
     if (this.cwd) state.cwd = this.cwd;
-    // The host's own, under a key of its own.
     const hosted = this.controller?.getState?.();
     if (hosted) state.host = hosted;
     return state;
   }
 
-  /** A folder this terminal was asked to start in, instead of the vault's. */
   private cwd = "";
 
-  /** The folder the shell is in, as far as it has said; otherwise where it started. */
   get folder(): string {
     return this.currentDir ?? this.startDir;
   }
@@ -372,7 +306,6 @@ export class TerminalView extends ItemView {
     this.controller?.setState?.(hosted && typeof hosted === "object" ? (hosted as Record<string, unknown>) : {});
     this.stateKnown = true;
     await super.setState(state, result);
-    // The tab header was drawn before the kind was known.
     (this.leaf as unknown as { updateHeader?: () => void }).updateHeader?.();
     this.schedule();
   }
@@ -381,58 +314,33 @@ export class TerminalView extends ItemView {
     this.core.liveViews.add(this);
     this.contentEl.empty();
     this.contentEl.addClass("vault-terminal-content");
-    // A slot for the host above the terminal, and the terminal's own area
-    // below it, which the pane fills; the host's overlay goes in the area,
-    // beside the pane and outside its handlers.
     this.top = this.contentEl.createDiv({ cls: "vault-terminal-top" });
     this.stage = this.contentEl.createDiv({ cls: "vault-terminal-stage" });
     this.pane = this.stage.createDiv({ cls: "vault-terminal-view" });
 
     const term = new Terminal({
-      allowProposedApi: true, // unicode11 sets term.unicode.activeVersion
+      allowProposedApi: true,
       fontSize: this.core.settings.fontSize,
       letterSpacing: this.core.settings.letterSpacing,
       lineHeight: this.core.settings.lineHeight,
       scrollback: this.core.settings.scrollback,
       macOptionIsMeta: this.core.settings.optionKey === "meta",
       macOptionClickForcesSelection: true,
-      cursorBlink: false,
+      cursorStyle: cursorStyleOf(this.core.settings.cursor),
+      cursorBlink: this.core.settings.cursorBlink,
+      cursorInactiveStyle: inactiveCursorOf(this.core.settings.cursor),
       drawBoldTextInBrightColors: false,
-      // Text too close to its background is shifted until readable, as VS
-      // Code does by default: bright white was white on
-      // white in light mode. Only text changes, never a
-      // background a program draws.
       minimumContrastRatio: 4.5,
-      // The size reports claude asks for once it knows the terminal: CSI 14 t (text area in CSS pixels, as the
-      // window size's pixel fields), 16 t (the cell, each side rounded),
-      // 18 t (rows and columns). xterm answers them itself; nothing else in
-      // windowOptions is turned on.
       windowOptions: { getWinSizePixels: true, getCellSizePixels: true, getWinSizeChars: true },
-      // The cursor's line is reflowed like any other when the terminal
-      // narrows. Off (xterm's default), its text past the new width is cut
-      // and lost, even widened again: a line a program printed without a
-      // newline lost all but its first 40 characters at 40 columns (95,
-      // xterm.js #6130).
       reflowCursorLine: true,
-      // Double-click selects a word, stopping at these as well as xterm's
-      // own: claude's box lines, curly quotes and a bar.
-      // The vertical box line too, which claude draws its boxes' sides with.
       wordSeparator: WORD_SEPARATORS,
-      // Links a program marks itself (OSC 8): Cmd+click (or a plain click, by
-      // the setting) opens them, as with any other link. Without a handler xterm asks with a confirm() box.
       linkHandler: {
-        // With plain clicks on, a link whose text isn't its address still
-        // takes Cmd+click: a program can put any address behind any text,
-        // and a click to focus the pane mustn't open one unseen.
         activate: (event, uri, range) => {
           const shown = this.textIn(range).trim();
           if (event.metaKey || (this.core.opensLink(event) && sameAddress(shown, uri))) this.openUri(uri);
         },
-        // Where it goes, since a program's link text can differ from its address.
         hover: (event, uri, range) => {
           if (uri !== PICTURE_LINK) this.showLinkTip(event, uri, sameAddress(this.textIn(range).trim(), uri));
-          // A picture's link is the terminal's own (kitty.ts) and opens nothing, so no pointing hand
-          // over it: xterm sets the hand just before this runs.
           else term.element?.querySelector(".xterm-screen")?.classList.remove("xterm-cursor-pointer");
         },
         leave: () => this.hideLinkTip(),
@@ -447,21 +355,15 @@ export class TerminalView extends ItemView {
     term.registerLinkProvider({ provideLinks: (y, cb) => cb(this.linksOn(y)) });
     term.onData((d) => this.onInput(d));
     term.onBinary((d) => this.session?.write(Buffer.from(d, "binary")));
-    // CSI > q, XTVERSION: the terminal's name and version, answered as VS
-    // Code answers it, with xterm.js's own name and the version bundled,
-    // never another terminal's. xterm 6.0.0 doesn't answer it.
     term.parser.registerCsiHandler({ prefix: ">", final: "q" }, this.guarded(false, (params: (number | number[])[]) => {
       if (params.length > 1 || (params[0] !== undefined && params[0] !== 0)) return false;
       this.session?.write(`\x1bP>|xterm.js(${XTERM_VERSION})\x1b\\`);
       return true;
     }));
-    // CSI ? u: the kitty keyboard query. Noted, then left unanswered, as xterm 6.0.0 does.
     term.parser.registerCsiHandler({ prefix: "?", final: "u" }, this.guarded(false, () => {
       this.readsKittyKeys = true;
       return false;
     }));
-    // What the program says about itself (status.ts). Each OSC here is one
-    // xterm 6.0.0 would otherwise drop.
     term.parser.registerOscHandler(7501, this.guarded(true, (data: string) => {
       if (data === "?") this.status?.statusQuery();
       return true;
@@ -482,30 +384,25 @@ export class TerminalView extends ItemView {
       this.status?.otherNotification(777, data);
       return true;
     }));
-    // Shell integration: the current folder (OSC 7, file://host/path) and
-    // where each prompt starts (OSC 133;A).
     term.parser.registerOscHandler(7, this.guarded(true, (data: string) => {
       const m = data.match(/^file:\/\/([^/]*)(\/.*)$/);
-      // Only this Mac's folders: a remote shell's (over ssh) mean nothing here.
       if (m && isThisMac(m[1])) {
         let path = m[2];
         try {
           path = decodeURIComponent(path);
         } catch {
-          // sent unencoded; use as is
+          /* empty */
         }
         this.currentDir = path;
       }
       return true;
     }));
-    // the terminal's own: the zsh integration reporting a failure of its own.
     term.parser.registerOscHandler(7766, this.guarded(true, (data: string) => {
       if (data === "integration-failed") this.integrationFailed();
       return true;
     }));
     term.parser.registerOscHandler(133, this.guarded(true, (data: string) => {
       if (data === "A" || data.startsWith("A;")) {
-        // Back at the shell's prompt: whatever ran in it has ended.
         if (!this.runningAgent) {
           this.readsKittyKeys = false;
           this.status?.programReturned();
@@ -519,55 +416,41 @@ export class TerminalView extends ItemView {
       }
       return true;
     }));
-    // OSC 52, a program setting or reading the clipboard: setting is
-    // allowed, and said in a notice with the start of what was copied, so
-    // text that turns up on a paste is never a surprise; reading is
-    // refused, so nothing on the clipboard ever goes back to a program
-    // without the user pasting it.
     term.parser.registerOscHandler(52, this.guarded(true, (data: string) => {
       if (!this.core.settings.programClipboard) return true;
       const semi = data.indexOf(";");
       const payload = semi < 0 ? "" : data.slice(semi + 1);
       if (!payload || payload === "?" || payload.length > CLIPBOARD_WRITE_LIMIT) return true;
-      // Base64 only: Node's decoder never fails, so anything else would be copied as garbage.
       if (!/^[A-Za-z0-9+/]*={0,2}$/.test(payload)) return true;
-      const text = Buffer.from(payload, "base64").toString("utf8");
+      const raw = Buffer.from(payload, "base64").toString("utf8");
+      while (this.copyBreaks[0] && performance.now() - this.copyBreaks[0].at > COPY_UNWRAP_MS) this.copyBreaks.shift();
+      const sent = this.copyBreaks.shift();
+      const breaks = sent?.breaks;
+      const text = breaks ? unwrapCopy(raw, breaks.breaks, breaks.indent) : this.isClaude() ? dedentCopy(raw) : raw;
       copyText(text);
+      if (text !== raw) this.keepCopy(raw, text);
       this.saidCopied(text, true);
+      sent?.copied?.();
       return true;
     }));
-    // Which Option key is down, before xterm sees the key it modifies.
     this.registerDomEvent(this.pane, "keydown", (e) => this.trackOption(e), { capture: true });
     this.registerDomEvent(this.pane, "keyup", (e) => this.trackOption(e), { capture: true });
-    // A key released while focus was elsewhere never sends its keyup.
     this.registerDomEvent(this.pane, "focusout", () => {
       this.rightOption = this.leftOption = false;
       this.applyOptionKey();
     });
-    // Before xterm's own listeners, which send a full-screen program one
-    // report per event whatever its distance.
     this.registerDomEvent(this.pane, "wheel", (e) => this.onWheel(e), { capture: true, passive: false });
-    // A paste with no text (an image alone on the clipboard): xterm would
-    // send the program an empty bracketed paste. Stopped
-    // before it; an agent gets Ctrl+V from the Cmd+V keydown instead.
     this.registerDomEvent(this.pane, "paste", (e) => {
       if (!e.clipboardData?.getData("text/plain")) {
         e.preventDefault();
         e.stopPropagation();
       }
     }, { capture: true });
-    // The right button is the terminal's (its menu), not a program's, even
-    // when the program has the mouse: otherwise both would act on it.
-    // Shift+right-click goes to the program, for those that use it.
-    // The release goes where its press went, whatever Shift does in between,
-    // so a program never sees a press without its release.
     let rightHeld = false;
     this.registerDomEvent(this.pane, "mousedown", (e) => {
       if (e.button !== 2) {
         this.promptSelection = null;
-        // Any press ends claude's selection or starts a new one, which the release settles.
         this.claudeSelection = null;
-        // Option+drag is the terminal's own selection, which claude never sees.
         this.pressedAt = e.button === 0 && !e.altKey && term.modes.mouseTrackingMode !== "none" && this.isClaude() ? this.cellAt(e) : null;
         if (this.pressedAt) this.lastPress = { ...this.pressedAt, at: performance.now() };
         return;
@@ -586,16 +469,12 @@ export class TerminalView extends ItemView {
       if (rightHeld) e.stopPropagation();
       rightHeld = false;
     }, { capture: true });
-    // With the mouse the program's, its selection is its own: xterm's handler
-    // would select the word under the pointer, and Copy would take that.
     this.registerDomEvent(this.pane, "contextmenu", (e) => {
       if (term.modes.mouseTrackingMode === "none") return;
       e.stopPropagation();
       e.preventDefault();
       if (!e.shiftKey) this.showMenu(e);
     }, { capture: true });
-    // Files dropped from Finder or Obsidian's file list: their paths, typed
-    // as a paste.
     this.registerDomEvent(this.pane, "dragover", (e) => {
       if (this.droppedPaths(e).length || e.dataTransfer?.types.includes("Files")) {
         e.preventDefault();
@@ -610,13 +489,9 @@ export class TerminalView extends ItemView {
       e.stopPropagation();
       this.typePaths(paths);
     }, { capture: true });
-    // After xterm's own handler, which selects the word under the pointer.
     this.registerDomEvent(this.pane, "contextmenu", (e) => {
       if (term.modes.mouseTrackingMode === "none") this.showMenu(e);
     });
-    // CSI 3 J, erase scrollback: claude's classic renderer sends it (with a
-    // clear and a reprint) from time to time, and xterm then parks a
-    // scrolled-up view at the first line. Noted before xterm acts on it.
     term.parser.registerCsiHandler({ final: "J" }, this.guarded(false, (params: (number | number[])[]) => {
       if (params[0] === 3) this.noteReset();
       return false;
@@ -624,12 +499,15 @@ export class TerminalView extends ItemView {
     term.onWriteParsed(this.guarded(undefined, () => this.followReset(false)));
     term.onTitleChange(this.guarded(undefined, (title: string) => this.status?.setTitle(title)));
     term.onBell(this.guarded(undefined, () => this.onBell()));
-    // The link under the pointer moves with the text: xterm doesn't always say it was left.
     term.onScroll(() => this.hideLinkTip());
-    // Focus anywhere in the terminal, or its window coming forward, is looking.
+    term.onRender(this.guarded(undefined, (e: { start: number; end: number }) => this.afterRender(e.start, e.end)));
+    this.registerDomEvent(this.pane, "mousemove", (e) => {
+      if (e.isTrusted) this.pointer = { x: e.clientX, y: e.clientY, alt: e.altKey };
+    }, { passive: true });
+    this.registerDomEvent(this.pane, "mouseleave", () => {
+      this.pointer = null;
+    });
     this.registerDomEvent(this.pane, "focusin", () => this.lookedAt());
-    // Back at a full-screen program's end, or a shell's prompt, whatever
-    // asked the kitty query has gone; a shell never gets claude's keys.
     term.buffer.onBufferChange((buf) => {
       this.wheel.reset();
       this.cancelReports();
@@ -675,93 +553,59 @@ export class TerminalView extends ItemView {
     this.cancelReset();
     this.cancelReports();
     if (this.fitTimer) this.fitTimerWin?.clearTimeout(this.fitTimer);
+    for (const t of this.toastTimers.values()) t.win.clearTimeout(t.id);
+    this.toastTimers.clear();
+    for (const t of this.cutTimers) t.win.clearTimeout(t.id);
+    this.cutTimers.clear();
     this.fitTimer = 0;
     this.unhookMigrate?.();
     this.unhookMigrate = null;
+    this.flushHeld(true);
     this.stopSession();
+    if (this.hoverCheck) this.hoverCheckWin?.clearTimeout(this.hoverCheck);
+    this.hoverCheck = 0;
+    if (this.linksChanged) this.linksChangedWin?.clearTimeout(this.linksChanged);
+    this.linksChanged = 0;
     this.picturesLayer?.dispose();
     this.picturesLayer = null;
     this.picturesDrain = null;
-    // The retry's notice is about this terminal: it goes with it.
     this.retryNotice?.hide();
     this.retryNotice = null;
     this.term?.dispose();
     this.term = null;
     this.status = null;
-    // Once this view is gone from the workspace, it no longer counts.
     window.setTimeout(() => this.core.updateBadge(), 0);
   }
 
-  /**
-   * Selects what's typed in claude's input box, so Cmd+C copies it: the
-   * cells after its prompt mark (❯ and a no-break space) through the last
-   * written cell before the box's lower border. The box is the rows between
-   * the two borders (rows starting with a run of ─, the top one with the
-   * session's name in it) around the cursor, which is always in it. An empty box, or one showing only its dim placeholder, selects
-   * nothing. False when there's no box to find. Read from the screen, so
-   * it's checked at every step: anything it doesn't recognize is no box.
-   */
   private selectPrompt(): boolean {
     const term = this.term;
     if (!term) return false;
-    const buf = term.buffer.active;
     this.promptSelection = null;
     const box = this.promptBox();
-    if (!box) return false;
-    const { top, bottom, mark } = box;
-    const cell = buf.getNullCell();
-    const first = buf.getLine(top + 1);
-    if (!first) return false;
-    const start = mark + 2;
-    // The last row of the box with text written in it, and that text's last column.
-    const lastCol = (y: number): number => {
-      const line = buf.getLine(y);
-      if (!line) return -1;
-      for (let x = term.cols - 1; x >= (y === top + 1 ? start : 0); x--) {
-        const c = line.getCell(x, cell);
-        const ch = c?.getChars() ?? "";
-        if (ch && ch.trim()) return x + Math.max(1, c?.getWidth() ?? 1) - 1;
-      }
-      return -1;
-    };
-    let last = bottom - 1;
-    while (last > top + 1 && lastCol(last) < 0) last--;
-    const end = lastCol(last);
+    const area = box && this.textArea(box);
+    if (!box || !area) return false;
+    const { top, bottom } = box;
+    const start = area.x1;
     term.clearSelection();
-    if (end < 0) return true;
-    // Only the dim placeholder claude shows in an empty box: nothing to select.
-    if (last === top + 1 && first.getCell(start, cell)?.isDim()) return true;
+    if (area.empty) return true;
+    const last = area.last;
+    const end = area.limits[last - area.first] ?? start;
     const length = (last - top - 1) * term.cols + end + 1 - start;
-    // With the mouse claude's (its full screen), it's claude's own selection,
-    // made as a drag would be: a press at the first character, a drag to the
-    // last, a release. That's the selection a drag by hand makes, in claude's
-    // colors, which Backspace deletes and Cmd+C copies as claude does.
     if (term.modes.mouseTrackingMode !== "none" && this.dragInClaude(start, top + 1, end, last, bottom)) return true;
     term.select(start, top + 1, length);
-    // claude lines each later row up under the first by indenting it as far as
-    // the prompt mark: a copy of this selection drops that indent.
     this.promptSelection = { text: term.getSelection(), indent: start, col: start, row: top + 1, length };
     return true;
   }
 
-  /**
-   * Claude's input box around the cursor: the buffer rows of its two borders,
-   * and the column of its prompt mark (❯). Null when there's none: a border
-   * missing, no mark, a dialog or menu showing. Read from the screen, so it's
-   * checked at every step.
-   */
   private promptBox(): { top: number; bottom: number; mark: number } | null {
     const term = this.term;
     if (!term) return null;
     const buf = term.buffer.active;
     const text = (y: number) => buf.getLine(y)?.translateToString(true) ?? "";
-    // A border starts with a run of ─ and spans the width (the top one can
-    // carry the session's name in it), so a rule pasted into the input isn't one.
     const border = (y: number) => {
       const row = text(y);
       return /^\s*─{8,}/.test(row) && row.length >= term.cols - 2;
     };
-    // A question claude is asking (a permission dialog, a menu) is no input box.
     if (this.controller?.dialogShowing?.()) return null;
     const cursor = buf.baseY + buf.cursorY;
     let top = -1;
@@ -771,19 +615,46 @@ export class TerminalView extends ItemView {
     if (top < 0 || bottom <= top + 1) return null;
     const first = buf.getLine(top + 1);
     if (!first) return null;
-    // The prompt mark's column, read by cell, since a wide character takes two.
     const cell = buf.getNullCell();
     let mark = -1;
     for (let x = 0; x < term.cols && x < 4; x++) {
       if (first.getCell(x, cell)?.getChars() === "❯") { mark = x; break; }
     }
     if (mark < 0) return null;
-    // A menu's chosen option ("❯ 1. Yes") is marked the same way.
     if (/^\s*❯\s*\d+\./.test(text(top + 1))) return null;
     return { top, bottom, mark };
   }
 
-  /** The buffer cell under a mouse event, or null when xterm's internals have moved. */
+  private textArea(box: { top: number; bottom: number; mark: number }): TextArea | null {
+    const term = this.term;
+    if (!term) return null;
+    const buf = term.buffer.active;
+    const cell = buf.getNullCell();
+    const first = buf.getLine(box.top + 1);
+    if (!first) return null;
+    const x1 = box.mark + 2;
+    const lastCol = (y: number): number => {
+      const line = buf.getLine(y);
+      if (!line) return -1;
+      for (let x = term.cols - 1; x >= (y === box.top + 1 ? x1 : 0); x--) {
+        const c = line.getCell(x, cell);
+        const ch = c?.getChars() ?? "";
+        if (ch && ch.trim()) return x + Math.max(1, c?.getWidth() ?? 1) - 1;
+      }
+      return -1;
+    };
+    let last = box.bottom - 1;
+    while (last > box.top + 1 && lastCol(last) < 0) last--;
+    const col = lastCol(last);
+    const empty = col < 0 || (last === box.top + 1 && !!first.getCell(x1, cell)?.isDim());
+    const limits: number[] = [];
+    for (let y = box.top + 1; y <= last; y++) {
+      const end = Math.max(x1 - 1, lastCol(y));
+      limits.push(Math.min(term.cols - 1, Math.max(x1, y < last ? end + 1 : end)));
+    }
+    return { first: box.top + 1, last, x1, cols: term.cols, limits, empty };
+  }
+
   private cellAt(e: MouseEvent): Cell | null {
     const term = this.term;
     const size = term && cellSize(term);
@@ -794,45 +665,23 @@ export class TerminalView extends ItemView {
     return { col, row: row + term.buffer.active.viewportY };
   }
 
-  /**
-   * Whether a key can replace a selection in claude's input: claude's own
-   * (claudeSelection), or the terminal's selection Cmd+A made of it
-   * (promptSelection). Never while a dialog shows.
-   */
   private inputSelected(): boolean {
     const term = this.term;
     if (!term || !this.isClaude() || this.controller?.dialogShowing?.()) return false;
-    // A selection of the terminal's own (Option+drag) means claude has none.
     if (term.modes.mouseTrackingMode !== "none") return !!this.claudeSelection && !term.hasSelection();
     return !!this.promptSelection && term.hasSelection() && term.getSelection() === this.promptSelection.text;
   }
 
-  /**
-   * Deletes the selection in claude's input, as Backspace does, then sends
-   * `after` (a typed character, or nothing). `gesture`: how claude's own
-   * selection was made, in its full screen. Everything typed or pasted
-   * meanwhile waits behind it (keyQueue), so it lands after the deletion, in
-   * order. Claude's own selection gets a Backspace, which it deletes it on.
-   * The terminal's selection Cmd+A made gets claude's line-editing keys, which
-   * never interrupt a turn (Escape would): Ctrl+K deletes to the end of the
-   * line (and, at the end, joins the next), Ctrl+U to the start, which
-   * claude's docs say clears across lines when repeated. One of each per row
-   * the input takes, and one more. Each key its own write, a moment apart.
-   */
   private replaceSelection(after: string | null, gesture: Gesture | null): void {
     const term = this.term;
     if (!term || !this.session) return;
     const items: QueueItem[] = [];
     if (term.modes.mouseTrackingMode !== "none") {
       items.push("\x7f");
-      // Cmd+A's selection was the whole input, now empty: the draft tracker
-      // saw one Backspace.
-      if (gesture?.whole) items.push(() => this.controller?.inputCleared?.());
+      items.push(gesture?.whole ? () => this.controller?.inputCleared?.() : () => this.controller?.inputEdited?.());
     } else if (this.promptSelection) {
       const rows = Math.ceil((this.promptSelection.col + this.promptSelection.length) / term.cols) + 1;
       items.push(...Array<string>(rows).fill("\x0b"), ...Array<string>(rows).fill("\x15"));
-      // Once all are sent the input is empty, which the host's draft tracking
-      // can't tell from the keys alone.
       items.push(() => this.controller?.inputCleared?.());
     }
     this.claudeSelection = null;
@@ -842,59 +691,91 @@ export class TerminalView extends ItemView {
     this.queue(items);
   }
 
-  /** Sends items through keyQueue, to the program running now. */
   private queue(items: QueueItem[]): void {
     if (!this.keyQueue.busy) this.queueSession = this.session;
     this.keyQueue.push(...items);
   }
 
-  /**
-   * Cut, on a selection in claude's input: what Cmd+C does, then what
-   * Backspace does. In claude's full screen the copy clears claude's
-   * selection, so it's made again first, with the gesture that made it, its
-   * reports sent through keyQueue a moment apart, planned so claude doesn't
-   * count them as more of the user's clicks (replayPlan: a double click two
-   * cells along in its word, else after claude's click window). Cmd+A's
-   * selection is cleared with claude's line-editing keys instead. Only the copy
-   * when that can't be done: the box moved or scrolled off, a word-by-word
-   * drag (a double click held and dragged, which two clicks don't remake),
-   * xterm's internals moved.
-   */
   private cutSelection(gesture: Gesture | null): void {
     const term = this.term;
-    this.copy();
+    const hold = this.core.settings.programClipboard ? this.cutHold() : null;
+    const waits = this.copy(gesture, hold?.copied);
     if (!term) return;
     if (term.modes.mouseTrackingMode === "none") {
       this.replaceSelection(null, null);
       return;
     }
+    const queue = (items: QueueItem[]) => this.queue(waits && hold ? [{ hold: hold.hold, then: items }] : items);
     if (!gesture) return;
     const box = this.promptBox();
-    // Cmd+A's selection is the whole input, which claude's line-editing keys
-    // clear without remaking it: one Ctrl+K and one Ctrl+U per row of the box,
-    // and one more.
+    if (gesture.top !== undefined && gesture.top !== box?.top) return;
     if (gesture.whole) {
       if (!box) return;
+      const area = this.textArea(box);
+      if (area && !area.empty) {
+        const g = dragSelection({ col: area.limits[area.last - area.first] ?? area.x1, row: area.last }, { col: area.x1, row: area.first }, area.cols);
+        const plan = replayPlan(g, this.lastPress, performance.now(), () => false);
+        const items = this.reportItems(term, gestureReports(plan.gesture));
+        if (items) {
+          const keys = (g.keys ?? []).map((k) => SELECT_MOVE_KEYS[k]);
+          queue([...(plan.wait > 0 ? [{ wait: plan.wait }] : []), ...items, ...keys, "\x7f", () => this.controller?.inputCleared?.()]);
+          return;
+        }
+      }
       const rows = box.bottom - box.top;
-      this.queue([...Array<string>(rows).fill("\x0b"), ...Array<string>(rows).fill("\x15"), () => this.controller?.inputCleared?.()]);
+      queue([...Array<string>(rows).fill("\x0b"), ...Array<string>(rows).fill("\x15"), () => this.controller?.inputCleared?.()]);
       return;
     }
-    const size = cellSize(term);
-    const top = term.buffer.active.viewportY;
     const line = term.buffer.active.getLine(gesture.to.row);
     const cell = term.buffer.active.getNullCell();
     const plan = replayPlan(gesture, this.lastPress, performance.now(), (col) => /^[\p{L}\p{N}_]$/u.test(line?.getCell(col, cell)?.getChars() ?? ""));
     const reports = gestureReports(plan.gesture);
     const wordDrag = gesture.clicks >= 2 && (gesture.from.col !== gesture.to.col || gesture.from.row !== gesture.to.row);
-    if (!size || wordDrag || !selectsInBox(gesture.from, gesture.to, gesture.clicks, box)) return;
-    if (reports.some((r) => r.at.row - top < 0 || r.at.row - top >= term.rows)) return;
-    const items: QueueItem[] = reports.map((r) => () => {
+    if (wordDrag || !selectsInBox(gesture.from, gesture.to, gesture.clicks, box)) return;
+    const items = this.reportItems(term, reports);
+    if (!items) return;
+    const keys = (gesture.keys ?? []).map((k) => SELECT_MOVE_KEYS[k]);
+    queue([...(plan.wait > 0 ? [{ wait: plan.wait }] : []), ...items, ...keys, "\x7f", () => this.controller?.inputEdited?.()]);
+  }
+
+  private cutHold(): { copied: () => void; hold: QueueHold["hold"] } {
+    let copied = false;
+    let answer: ((go: boolean) => boolean) | null = null;
+    return {
+      copied: () => {
+        copied = true;
+        answer?.(true);
+        answer = null;
+      },
+      hold: (done) => {
+        if (copied) {
+          done(true);
+          return;
+        }
+        answer = done;
+        const win = this.pane.win;
+        const timer = {
+          win,
+          id: win.setTimeout(() => {
+            this.cutTimers.delete(timer);
+            if (answer !== done) return;
+            answer = null;
+            if (done(false) && this.term) this.showToast("Cut failed", `${this.getDisplayText()}'s copy didn't come, so the text was left in place.`, undefined, undefined, `${this.noticeKey}-cut`);
+          }, COPY_UNWRAP_MS),
+        };
+        this.cutTimers.add(timer);
+      },
+    };
+  }
+
+  private reportItems(term: Terminal, reports: { at: Cell; action: "down" | "move" | "up" }[]): QueueItem[] | null {
+    const size = cellSize(term);
+    const top = term.buffer.active.viewportY;
+    if (!size || reports.some((r) => r.at.row - top < 0 || r.at.row - top >= term.rows)) return null;
+    return reports.map((r) => () => {
       if (this.term !== term || this.session !== this.queueSession) return;
       const row = r.at.row - top;
       const px = { x: Math.round((r.at.col + 0.5) * size.width), y: Math.round((row + 0.5) * size.height) };
-      // A report goes out through xterm's input (onInput), which mustn't
-      // queue it behind the keys it comes before.
-      // Claude counts the replay's presses too, so the next Cut plans from them.
       if (r.action === "down") this.lastPress = { ...r.at, at: performance.now() };
       this.queueWriting = true;
       try {
@@ -903,25 +784,76 @@ export class TerminalView extends ItemView {
         this.queueWriting = false;
       }
     });
-    this.queue([...(plan.wait > 0 ? [{ wait: plan.wait }] : []), ...items, "\x7f"]);
   }
 
-  /**
-   * Drags over claude's input with mouse reports, from the first character
-   * (buffer column and row, 0-based) to the last: press, drag, release, each
-   * its own report a moment apart, as a hand would. False when the reports
-   * can't be sent (xterm's internals moved), for the terminal's own selection.
-   * `below`: the box's lower border row. Each report goes only to the
-   * program the drag began in, and any key cancels what's left of it.
-   */
+  private extendSelection(move: SelectMove, gesture: Gesture | null): boolean {
+    const term = this.term;
+    if (!term || !this.session || term.modes.mouseTrackingMode === "none" || !this.isClaude() || this.controller?.dialogShowing?.() || term.hasSelection()) return false;
+    const box = this.promptBox();
+    const area = box && this.textArea(box);
+    if (!area) return false;
+    if (gesture && gesture.top !== undefined && gesture.top !== box?.top) {
+      this.claudeSelection = null;
+      return false;
+    }
+    if (gesture) {
+      const focus = gestureFocus(gesture) ?? (gesture.focus === undefined ? this.clickFocus(gesture, area) : null);
+      if (!focus) {
+        if (move === "up" || move === "down") return false;
+        this.claudeSelection = { ...gesture, whole: false, keys: [...(gesture.keys ?? []), move], focus: null };
+        this.queue([SELECT_MOVE_KEYS[move]]);
+        return true;
+      }
+      const target = textMove(focus, move, area);
+      const moves = movesTo(focus, target, area.cols);
+      if (!moves.length) return true;
+      this.claudeSelection = gesture.clicks < 2 ? dragSelection(gesture.from, target, area.cols) : { ...gesture, whole: false, keys: [...(gesture.keys ?? []), ...moves], focus: target };
+      this.queue(moves.map((m) => SELECT_MOVE_KEYS[m]));
+      return true;
+    }
+    if (this.keyQueue.busy) return true;
+    const buf = term.buffer.active;
+    const caret = { col: buf.cursorX, row: buf.baseY + buf.cursorY };
+    if (caret.row < area.first || caret.row > area.last || caret.col < area.x1) return false;
+    const start = startSelection(move, caret, area);
+    if (!start) return true;
+    const items = this.reportItems(term, gestureReports(start));
+    if (!items) return false;
+    const wait = replayPlan(start, this.lastPress, performance.now(), () => false).wait;
+    const release = items.pop();
+    const keys = (start.keys ?? []).map((k) => SELECT_MOVE_KEYS[k]);
+    const press = keys.length ? items.shift() : undefined;
+    if (press) items.unshift(() => {
+      this.holdOutput(performance.now() + SELECT_HOLD_MS);
+      if (typeof press === "function") press();
+    });
+    items.push(() => {
+      if (typeof release === "function") release();
+      if (this.session && this.session === this.queueSession) for (const k of keys) this.sendNow(k);
+      if (keys.length) this.holdOutput(performance.now() + SELECT_SETTLE_MS);
+    });
+    this.queue([...(wait > 0 ? [{ wait }] : []), ...items]);
+    this.claudeSelection = start;
+    return true;
+  }
+
+  private clickFocus(g: Gesture, area: TextArea): Cell | null {
+    if (g.clicks >= 3) return { col: area.cols - 1, row: g.to.row };
+    const line = this.term?.buffer.active.getLine(g.to.row);
+    const cell = this.term?.buffer.active.getNullCell();
+    const word = (col: number) => /^[\p{L}\p{N}_/.\-+~\\]$/u.test(line?.getCell(col, cell)?.getChars() ?? "");
+    if (!word(g.to.col)) return null;
+    let col = g.to.col;
+    while (col < area.cols - 1 && word(col + 1)) col++;
+    return { col, row: g.to.row };
+  }
+
   private dragInClaude(col: number, row: number, endCol: number, endRow: number, below: number): boolean {
     const term = this.term;
     const cell = term && cellSize(term);
     if (!term || !cell) return false;
     const top = term.buffer.active.viewportY;
     const at = (c: number, r: number) => ({ col: c, row: r - top, px: { x: Math.round((c + 0.5) * cell.width), y: Math.round((r - top + 0.5) * cell.height) } });
-    // The release lands just past the last character, so it's in the selection:
-    // for text that fills its row, at the start of the next row inside the box.
     const from = at(col, row);
     const to = endCol + 1 < term.cols ? at(endCol + 1, endRow) : endRow + 1 < below ? at(0, endRow + 1) : at(term.cols - 1, endRow);
     if (from.row < 0 || to.row >= term.rows) return false;
@@ -939,7 +871,6 @@ export class TerminalView extends ItemView {
     return true;
   }
 
-  /** Runs `fn` after `ms` unless cancelPending runs first (a key, the program stopping, the tab closing). */
   private later(fn: () => void, ms: number): void {
     const win = this.pane.win;
     const id = win.setTimeout(() => {
@@ -949,13 +880,11 @@ export class TerminalView extends ItemView {
     this.pendingSends.add(id);
   }
 
-  /** Drops what Cmd+A and its Backspace still had to send. */
   private cancelPending(): void {
     for (const id of this.pendingSends) this.pane.win.clearTimeout(id);
     this.pendingSends.clear();
   }
 
-  /** Copies the terminal's selection, and says so. Cmd+A's selection of claude's input drops the indent claude lines later rows up with. */
   private copySelection(): void {
     const term = this.term;
     if (!term) return;
@@ -967,46 +896,79 @@ export class TerminalView extends ItemView {
     this.saidCopied(copied, false);
   }
 
-  /** Says text went on the clipboard, with its first words: every copy, the user's or a program's, so the notice never shows only sometimes. */
   private saidCopied(text: string, byProgram: boolean): void {
     const flat = text.replace(/\s+/g, " ").trim();
     const shown = flat.length > COPIED_SHOWN ? `${flat.slice(0, COPIED_SHOWN)}…` : flat;
-    const message = `${byProgram ? `${this.getDisplayText()} copied` : "Copied"} to the clipboard: “${shown}”`;
-    // A fresh notice each time, so its timer starts again; the last one goes, so a
-    // burst never stacks them.
-    this.copiedNotice?.hide();
-    this.copiedNotice = new Notice(message, COPIED_NOTICE_MS);
+    this.showToast(byProgram ? `${this.getDisplayText()} copied` : "Copied", shown || "(nothing)");
   }
 
-  /** For the dev self-test. */
+  showToast(title: string, text: string, ms = noticeMs(), onClick?: () => void, key?: string, info = false): NotificationHandle {
+    const el = this.term?.element;
+    if (!el || (!key && !noticesOn())) return { hide: () => {}, shown: () => false };
+    if (!this.toasts?.isConnected) this.toasts = el.createDiv({ cls: "vault-terminal-toasts xterm-hover" });
+    const stack = this.toasts;
+    const toast = createDiv({ cls: "vault-terminal-toast" });
+    if (info) {
+      toast.addClass("is-info");
+      stack.insertBefore(toast, stack.querySelector(":scope > .is-copy"));
+      const infos = stack.querySelectorAll(":scope > .is-info");
+      for (let i = 0; i < infos.length - INFO_STACK; i++) this.dropToast(infos[i] as HTMLElement);
+    } else if (key) {
+      toast.dataset.key = key;
+      for (const old of Array.from(stack.querySelectorAll<HTMLElement>(":scope > [data-key]"))) if (old.dataset.key === key) this.dropToast(old);
+      stack.prepend(toast);
+      const all = stack.querySelectorAll(":scope > [data-key]");
+      for (let i = TOAST_STACK; i < all.length; i++) this.dropToast(all[i] as HTMLElement);
+    } else {
+      const copy = stack.querySelector<HTMLElement>(":scope > .is-copy");
+      if (copy) this.dropToast(copy);
+      toast.addClass("is-copy");
+      stack.append(toast);
+    }
+    const clear = () => this.dropToast(toast);
+    toast.addClass("is-clickable");
+    for (const type of ["mousedown", "mouseup", "pointerdown", "pointerup", "dblclick", "wheel"]) toast.addEventListener(type, (e) => e.stopPropagation(), { passive: true });
+    toast.addEventListener("click", () => {
+      clear();
+      onClick?.();
+    });
+    addCloseX(toast, clear);
+    toast.style.fontFamily = this.term?.options.fontFamily ?? "";
+    toast.style.fontSize = `${this.term?.options.fontSize ?? 13}px`;
+    toast.createDiv({ cls: "vault-terminal-toast-title", text: title });
+    toast.createDiv({ cls: "vault-terminal-toast-text", text });
+    if (ms) this.toastTimers.set(toast, { win: this.pane.win, id: this.pane.win.setTimeout(clear, ms) });
+    return { hide: clear, shown: () => toast.isConnected };
+  }
+
+  private dropToast(toast: HTMLElement): void {
+    const t = this.toastTimers.get(toast);
+    if (t) t.win.clearTimeout(t.id);
+    this.toastTimers.delete(toast);
+    toast.remove();
+  }
+
+  get toastText(): string | null {
+    return this.toasts?.isConnected && this.toasts.childElementCount ? (this.toasts.textContent ?? "") : null;
+  }
+
   get terminal(): Terminal | null {
     return this.term;
   }
 
-  /** For the dev self-test. */
   get current(): HelperSession | null {
     return this.session;
   }
 
-  /** For the dev self-test: the pictures layer, null while pictures are off. */
   get pictures(): PictureLayer | null {
     return this.picturesLayer;
   }
 
-  /**
-   * Follows "Pictures in the terminal". On: output goes through the pictures
-   * layer. Off: the layer and every picture in it go, and output reaches
-   * xterm untouched, whose parser drops graphics commands without a trace
-   * or a reply. The pictures go at once; a command half-received when it's
-   * turned off is swallowed to its end, so its rest isn't printed as text.
-   */
   applyPictures(): void {
     const term = this.term;
     if (!term) return;
     const on = this.core.settings.showPictures;
     if (on && !this.picturesLayer) {
-      // Back on mid-command: the new layer takes the filter that was
-      // swallowing it, so the rest is read as the command it is, not printed.
       const drain = this.picturesDrain;
       this.picturesDrain = null;
       if (drain) drain.draining = false;
@@ -1017,7 +979,6 @@ export class TerminalView extends ItemView {
       this.picturesLayer = null;
       layer.dispose();
       const filter = layer.filter;
-      // the terminal's link around a placeholder run, closed, so later text isn't in it.
       const close = filter.closeLink();
       if (close) term.write(close);
       filter.draining = true;
@@ -1029,7 +990,6 @@ export class TerminalView extends ItemView {
     this.schedule();
   }
 
-  /** Theme or font changed. */
   refreshLook(): void {
     if (!this.term || !this.opened) return;
     const look = readLook(this.contentEl);
@@ -1040,18 +1000,16 @@ export class TerminalView extends ItemView {
     this.term.options.fontSize = s.fontSize;
     this.term.options.letterSpacing = s.letterSpacing;
     this.term.options.lineHeight = s.lineHeight;
+    this.applyCursor();
     if (this.term.options.scrollback !== s.scrollback) {
       this.term.options.scrollback = s.scrollback;
-      // Fewer lines may have taken the last cells of a picture deleted while they showed it.
       this.picturesLayer?.bufferChanged();
     }
     this.applyOptionKey();
-    // The status icons setting may have changed.
     this.updateHeader();
     this.schedule();
   }
 
-  /** Ends the program and everything it started; used on plugin unload. */
   stopSession(withFallback = true): void {
     this.cancelPending();
     this.keyQueue.clear();
@@ -1062,38 +1020,30 @@ export class TerminalView extends ItemView {
     this.core.sessions.delete(s);
     s.close(withFallback);
     if (withFallback) {
-      // The fallback timer belongs to the plugin, so unload can drop it.
       this.core.closing.add(s);
-      // Gone when its process has exited, whether or not its streams have
-      // closed: held any longer, it holds this view and its terminal.
       s.child.once("exit", () => this.core.closing.delete(s));
       s.child.once("close", () => this.core.closing.delete(s));
     }
   }
 
-  // --- sizing ---
-
   private observe(): void {
     this.observer?.disconnect();
     const win = this.pane.win as Window & typeof window;
-    // Coming back to Obsidian with this terminal showing is looking at it.
     if (this.winFocus) this.winFocus.win.removeEventListener("focus", this.winFocus.fn);
     const fn = () => this.lookedAt();
     win.addEventListener("focus", fn);
     this.winFocus = { win, fn };
-    // The pane's own window's observer: a popout has its own.
     this.observer = new win.ResizeObserver(() => this.layout());
     this.observer.observe(this.pane);
   }
 
   private onMigrated(): void {
     this.cancelFrame();
-    // Its timer was the old window's, which may never fire now.
+    this.flushHeld();
     this.keyQueue.clear();
     this.observe();
     this.anchor ??= this.topAnchor();
     if (this.term && this.opened) {
-      // xterm's documented step when its element changes browser window.
       this.term.open(this.pane);
       this.refreshLook();
     }
@@ -1109,9 +1059,6 @@ export class TerminalView extends ItemView {
       this.layout();
     };
     this.frame = win.requestAnimationFrame(run);
-    // A hidden or covered window gets no animation frames (or resize
-    // callbacks) until it's seen again, but its timers still run, slowly: so
-    // a terminal opened just before switching apps starts anyway.
     this.fallback = win.setTimeout(run, FRAME_FALLBACK_MS);
   }
 
@@ -1124,17 +1071,10 @@ export class TerminalView extends ItemView {
     this.fallback = 0;
   }
 
-  /**
-   * Fit the terminal to the pane and tell the program, but only when the pane
-   * is really showing: a hidden pane measures as zero or as the fit addon's
-   * 2-by-1 floor, and neither may reach the program.
-   */
   private layout(): void {
     const term = this.term;
     if (!term || !this.stateKnown) return;
     if (!this.showing()) {
-      // A host's terminal that starts while hidden (its sessions all load at
-      // once): at the terminal's default size, fitted when it's first shown.
       if (this.controller?.startHidden && !this.holdStart && !this.session && !this.starting && !this.ended) void (this.pending ? this.start(this.pending.kind, this.pending.folder, this.pending.opts) : this.start());
       return;
     }
@@ -1146,15 +1086,11 @@ export class TerminalView extends ItemView {
     }
     const dims = this.fit.proposeDimensions();
     if (!dims || !Number.isFinite(dims.rows) || !Number.isFinite(dims.cols) || !validSize(dims.rows, dims.cols)) {
-      // Not measured yet (the font may still be loading); try again next frame.
       if (this.retries++ < MEASURE_RETRIES) this.schedule();
       return;
     }
     this.retries = 0;
     if (this.bellMarked) this.lookedAt();
-    // A burst of size changes (a sidebar edge being dragged) is applied at
-    // most every RESIZE_SPACING_MS, the last always: each fit reflows the
-    // whole scrollback, and the program redraws for each size it's told.
     if (this.session && (dims.rows !== term.rows || dims.cols !== term.cols)) {
       const now = performance.now();
       const wait = this.lastFitAt + RESIZE_SPACING_MS - now;
@@ -1184,12 +1120,6 @@ export class TerminalView extends ItemView {
     else if (!this.starting && !this.ended && !this.holdStart) void (this.pending ? this.start(this.pending.kind, this.pending.folder, this.pending.opts) : this.start());
   }
 
-  /**
-   * Where the view is when scrolled up, so a resize or a move keeps it:
-   * a marker on the first row of the line at the top, which xterm keeps on
-   * that line as text reflows, and how far into the line the top row was.
-   * Null at the bottom, which then simply follows the output.
-   */
   private topAnchor(): TopAnchor | null {
     const term = this.term;
     const buf = term?.buffer.active;
@@ -1207,16 +1137,9 @@ export class TerminalView extends ItemView {
     return { marker, chars: rowsIn * term.cols, text: wholeLine(buf, row), fromEnd };
   }
 
-  /**
-   * Where the anchor's line is now. Its marker, unless that no longer
-   * shows the line's text: when narrowing a full scrollback drops rows off
-   * its top, xterm.js 6.0.0 leaves markers where they were (seen in 91), so
-   * then the line that many whole lines from the end, if its text matches.
-   */
   private anchorLine(anchor: TopAnchor): number {
     const buf = this.term!.buffer.active;
     const line = anchor.marker.line;
-    // The whole line, not its start: log lines often share their first 40 characters.
     const same = (y: number) => y >= 0 && !buf.getLine(y)?.isWrapped && wholeLine(buf, y) === anchor.text;
     if (same(line)) return line;
     let count = 0;
@@ -1240,17 +1163,11 @@ export class TerminalView extends ItemView {
     else resyncViewport(term);
   }
 
-  /**
-   * The scrollback is about to be erased. If the view is scrolled up, keep
-   * the text of its top rows: the erase takes the lines themselves (and any
-   * marker on them), so the place can only be found again by content.
-   */
   private noteReset(): void {
     const term = this.term;
     const buf = term?.buffer.active;
     if (!term || !buf || buf.type !== "normal") return;
     if (this.reset) {
-      // Another erase in the same reprint: keep looking for the first place, a second from now.
       const reset = this.reset;
       reset.until = Date.now() + RESET_FOLLOW_MS;
       window.clearTimeout(reset.timer);
@@ -1260,18 +1177,11 @@ export class TerminalView extends ItemView {
     if (buf.viewportY >= buf.baseY) return;
     const rows: string[] = [];
     for (let r = 0; r < Math.min(RESET_ROWS, term.rows); r++) rows.push(buf.getLine(buf.viewportY + r)?.translateToString(true) ?? "");
-    // Blank rows can't be found again (they match anywhere), but the
-    // fallback still applies: the bottom, not line 1.
     if (!rows.some((t) => t.trim())) rows.length = 0;
     const timer = window.setTimeout(() => this.followReset(true), RESET_FOLLOW_MS + 50);
     this.reset = { rows, from: buf.viewportY, until: Date.now() + RESET_FOLLOW_MS, timer, lastLook: 0, trailing: 0 };
   }
 
-  /**
-   * Recovery steps aside once the user acts (a key, a paste, the wheel):
-   * where they've gone stands. Not on the program's input in general,
-   * since xterm's answers to its queries arrive the same way mid-reprint.
-   */
   private cancelReset(): void {
     if (!this.reset) return;
     window.clearTimeout(this.reset.timer);
@@ -1279,18 +1189,12 @@ export class TerminalView extends ItemView {
     this.reset = null;
   }
 
-  /**
-   * After a reset: once the same rows are back in the buffer, put them at
-   * the top again; if they don't come back within a second, go to the
-   * bottom rather than leave the view at the first line.
-   */
   private followReset(final: boolean): void {
     const reset = this.reset;
     const term = this.term;
     if (!reset || !term) return;
     const now = Date.now();
     if (!final && now - reset.lastLook < 50) {
-      // Looked just now: look again once this burst of output has been parsed.
       reset.trailing ||= window.setTimeout(() => {
         if (this.reset === reset) reset.trailing = 0;
         this.followReset(false);
@@ -1299,12 +1203,6 @@ export class TerminalView extends ItemView {
     }
     reset.lastLook = now;
     const buf = term.buffer.active;
-    // The copy nearest where the view was: a reprint puts the same text at
-    // about the same line, and the same rows can recur elsewhere (a rule, a
-    // short reply). Only a place that can be scrolled to the top counts;
-    // one still in the last screen means the reprint hasn't got past it,
-    // and one at the last screen's very top may be a reprint that paused
-    // there, so it waits for more output or the last look.
     let found = -1;
     if (buf.type === "normal" && reset.rows.length) {
       for (let i = 0; i + reset.rows.length <= buf.length; i++) {
@@ -1322,11 +1220,6 @@ export class TerminalView extends ItemView {
     if (target !== buf.viewportY) scrollBuffer(term, target - buf.viewportY);
   }
 
-  /**
-   * The text area in CSS pixels, columns and rows times the cell xterm
-   * measured: what the window size's pixel fields carry.
-   * Zeros when the cell isn't measured, as before.
-   */
   pixelSize(): [number, number] {
     const term = this.term;
     const cell = term ? cellSize(term) : null;
@@ -1343,19 +1236,16 @@ export class TerminalView extends ItemView {
     return el.isConnected && el.isShown() && el.clientWidth > 0 && el.clientHeight > 0;
   }
 
-  // --- the program ---
-
   private async start(kind: TerminalKind = this.kind, folder = this.cwd, opts: StartOptions = {}): Promise<void> {
     const term = this.term;
     if (!term) return;
+    this.flushHeld();
     this.starting = true;
     this.ended = false;
-    // Counted from now: a terminal hidden until shown starts when it's shown.
     this.beginSlowStart();
     try {
-      // The host's part of an agent's command, decided now: each start (a retry, Enter after an exit) asks again.
       const host = kind !== "shell" && this.controller?.launch ? await this.controller.launch(kind, !!opts.plain) : undefined;
-      if (!this.term) return; // closed while asking
+      if (!this.term) return;
       if (host && "error" in host) {
         this.endSlowStart();
         this.pending = null;
@@ -1364,11 +1254,7 @@ export class TerminalView extends ItemView {
         return;
       }
       const launch = await this.core.prepareLaunch(kind, folder, { ...opts, host, step: (what) => this.slowStep(what) });
-      if (!this.term) return; // closed while preparing
-      // Hidden while Python was being found (another tab, a collapsed
-      // sidebar): start when it's shown again, at the size it has then,
-      // and the same program (a shell after an agent, not the agent again).
-      // A host's terminal that starts hidden goes on at the default size.
+      if (!this.term) return;
       if (!this.showing() && !this.controller?.startHidden) {
         this.pending = { kind, folder, opts };
         this.endSlowStart();
@@ -1389,8 +1275,6 @@ export class TerminalView extends ItemView {
       this.ranProgram = kind !== "shell";
       this.startDir = launch.cwd;
       this.currentDir = null;
-      // Unknown until it says something, for an agent that reports its
-      // state (claude); any other program shows running.
       this.status = new StatusTracker(
         this.runningAgent?.reportsState ? "unknown" : "running",
         !!this.runningAgent?.reportsState,
@@ -1429,26 +1313,16 @@ export class TerminalView extends ItemView {
         this.explainRetry(session, this.retryNote);
         this.retryNote = null;
       }
-      // The pane may have changed size while Python was being found.
       this.schedule();
     } finally {
       this.starting = false;
     }
   }
 
-  /**
-   * Terminal.app's keys that xterm doesn't do itself. Returns false when the
-   * key is handled here or belongs to Obsidian, so xterm leaves it alone.
-   */
   private onKey(e: KeyboardEvent): boolean {
     const term = this.term;
     if (!term) return false;
-    // An input method is composing: its keys are its own.
-    // Some input methods mark their keys only as "Process", and a dead key's
-    // first press (Option+E on a Mac) comes before composition starts: both
-    // were keyCode 229.
     if (e.isComposing || e.key === "Process" || e.key === "Dead") {
-      // What it composes clears claude's selection, as any key does.
       this.claudeSelection = null;
       return true;
     }
@@ -1464,37 +1338,34 @@ export class TerminalView extends ItemView {
       return false;
     };
     const plain = !e.metaKey && !e.ctrlKey && !e.altKey;
-    // Escape with text selected clears the selection, and the program reads
-    // nothing: in claude and Codex, Escape would interrupt the turn.
     if (e.key === "Escape" && plain && !e.shiftKey && term.hasSelection()) {
       e.preventDefault();
       term.clearSelection();
       return false;
     }
-    // A selection in claude's input, as in a text field: a typed character,
-    // Cmd+X and Cmd+V replace it (replaceSelection). Read before the flag
-    // below drops it.
     const selected = !MODIFIER_KEYS.has(e.key) && this.inputSelected();
-    // Claude's own selection, which the plugin can't see, is forgotten on any
-    // key, as claude clears it on nearly every one (Cmd+C included). Cut keeps
-    // how it was made, to make it again after its copy.
     const gesture = this.claudeSelection;
+    const move = selectMove(e);
+    if (move && this.extendSelection(move, gesture)) {
+      e.preventDefault();
+      return false;
+    }
+    const lineKey = e.metaKey ? e.key === "ArrowLeft" || e.key === "ArrowRight" : e.key === "Home" || e.key === "End";
+    if (gesture && lineKey && e.shiftKey && !e.ctrlKey && !e.altKey && term.modes.mouseTrackingMode !== "none") {
+      e.preventDefault();
+      return false;
+    }
     if (!MODIFIER_KEYS.has(e.key)) this.claudeSelection = null;
     if (selected && typesCharacter(e, !!term.options.macOptionIsMeta)) {
       e.preventDefault();
       this.replaceSelection(e.key, gesture);
       return false;
     }
-    // Backspace or Delete on a selection in claude's input deletes it
-    // (replaceSelection): outside the full screen, only what Cmd+A selected.
     if ((e.key === "Backspace" || e.key === "Delete") && plain && !e.shiftKey && selected) {
       e.preventDefault();
       this.replaceSelection(null, gesture);
       return false;
     }
-    // Page Up and Page Down (Fn+Up, Fn+Down) page the scrollback in a normal
-    // screen, as in Terminal.app; Shift sends them to the program instead.
-    // A full-screen program gets them either way.
     if ((e.key === "PageUp" || e.key === "PageDown") && plain) {
       const up = e.key === "PageUp";
       if (term.buffer.active.type === "normal" && !e.shiftKey) {
@@ -1510,50 +1381,30 @@ export class TerminalView extends ItemView {
       return false;
     }
     if (cmd && !e.shiftKey) {
-      // With Caps Lock on, Cmd+K comes as "K".
       switch (e.key.length === 1 ? e.key.toLowerCase() : e.key) {
         case "a":
-          // In claude, selects what's typed in its input box (selectPrompt),
-          // as Cmd+A does in a text field. Anywhere else, or with no box found,
-          // nothing: selecting the whole terminal on a reflex Cmd+A only
-          // confuses; it's Select all in the right-click
-          // menu. The program reads nothing. The find bar's own Cmd+A isn't here.
           e.preventDefault();
           if (this.isClaude()) this.selectPrompt();
           return false;
         case "c":
-          // Cmd+C never interrupts; Ctrl+C is the interrupt.
           e.preventDefault();
-          this.copy();
+          this.copy(selected ? gesture : null);
           return false;
         case "Delete":
-          // Cmd+Fn+Delete: delete to the end of the line, Ctrl+K (65).
           return send("\x0b");
         case "z":
-          // Undo the last edit in the prompt, Ctrl+_ (65): claude documents it,
-          // zsh binds it; an agent shown to do something else with it gets nothing.
           if (this.runningAgent && !this.runningAgent.undoKey) {
             e.preventDefault();
             return false;
           }
           return send("\x1f");
         case "Backspace":
-          // Delete to the start of the line, as in a Mac text field: Ctrl+U,
-          // which shells and claude read that way.
           return send("\x15");
         case "v":
-          // Text: the browser's own paste event follows, and xterm pastes
-          // from it, in brackets when the program asked for that. An image
-          // alone has no text to paste; an agent CLI (claude, Codex,
-          // Antigravity) gets Ctrl+V, which each attaches it on.
-          // Text over a selection in claude's input replaces it: the deletion
-          // goes first, and the paste waits behind it (keyQueue).
           if (this.agentKeys() && clipboardHasOnlyImage()) this.onInput("\x16");
           else if (selected && clipboardText()) this.replaceSelection(null, gesture);
           return false;
         case "x":
-          // Cut, on a selection in claude's input: what Cmd+C does, then what
-          // Backspace does. Anywhere else, only the copy.
           e.preventDefault();
           if (selected) this.cutSelection(gesture);
           else this.copy();
@@ -1568,13 +1419,8 @@ export class TerminalView extends ItemView {
           return false;
         case "k":
           e.preventDefault();
-          // The full-screen buffer has no scrollback, and the program owns its
-          // screen; claude there is asked to redraw instead (Ctrl+L, which its
-          // docs say redraws and keeps the input), so Cmd+K does something
-          // without blanking it.
           if (term.buffer.active.type === "normal") {
             term.clear();
-            // Pictures deleted while the cleared lines showed them can go now.
             this.picturesLayer?.bufferChanged();
           }
           else if (this.isClaude()) this.onInput("\x0c");
@@ -1585,9 +1431,6 @@ export class TerminalView extends ItemView {
           return send("\x05");
         case "Home":
         case "End": {
-          // The top or bottom of the scrollback. A full-screen program
-          // has none of its own here, so it gets Ctrl+Home or Ctrl+End,
-          // which claude, vim and less read as its top and bottom.
           e.preventDefault();
           const buf = term.buffer.active;
           if (buf.type === "normal") scrollBuffer(term, (e.key === "Home" ? 0 : buf.baseY) - buf.viewportY);
@@ -1596,45 +1439,33 @@ export class TerminalView extends ItemView {
         }
         case "ArrowUp":
         case "ArrowDown":
-          // To the previous or next prompt, when the shell marks them.
           e.preventDefault();
           this.jumpToPrompt(e.key === "ArrowUp" ? -1 : 1);
           return false;
       }
     }
     if (e.metaKey) return false;
-    // Ctrl+C copies a selection, unless the setting says it always interrupts (keys.ts).
     if (ctrlCCopies(e, term.hasSelection(), !!this.core.settings.ctrlCInterrupts)) {
       e.preventDefault();
       this.copySelection();
       return false;
     }
-    // Obsidian's (the scope above runs its hotkey); xterm would send a Tab.
     if (e.key === "Tab" && e.ctrlKey && !e.altKey) return false;
     if (e.altKey && !e.ctrlKey && !e.shiftKey) {
       if (e.key === "ArrowLeft") return send("\x1bb");
       if (e.key === "ArrowRight") return send("\x1bf");
-      // Option+Fn+Delete: delete the next word, Escape then d.
       if (e.key === "Delete") return send("\x1bd");
     }
-    // Shift+Enter is a new line in claude's prompt, as Esc then Return.
     if (e.key === "Enter" && e.shiftKey && !e.altKey && !e.ctrlKey) return send("\x1b\r");
     return true;
   }
 
-  /**
-   * The wheel, in lines of travel (wheel.ts): scroll reports to a program
-   * that has the mouse, queued and sent a frame apart (ReportQueue), arrow keys to a full-screen program that doesn't
-   * (as xterm does, one per line instead of one per event), and the
-   * scrollback otherwise. Ctrl is a trackpad pinch, left to xterm.
-   */
   private onWheel(e: WheelEvent): void {
-    // Claude's selection may not survive a scroll; better to forget it than guess.
     this.claudeSelection = null;
     const term = this.term;
     if (!term || !this.opened || e.ctrlKey || !this.ownWheel) return;
     const cell = cellSize(term);
-    if (!cell) return; // xterm's internals moved: its own handling stands
+    if (!cell) return;
     const mode = term.modes.mouseTrackingMode;
     const reports = mode === "vt200" || mode === "drag" || mode === "any";
     const buf = term.buffer.active;
@@ -1663,10 +1494,6 @@ export class TerminalView extends ItemView {
     e.stopPropagation();
   }
 
-  /**
-   * Sends what the report queue allows now, and asks for a frame to send the
-   * rest. False when xterm's internals have moved, so the wheel is xterm's.
-   */
   private sendReports(): boolean {
     const term = this.term;
     const at = this.reportAt;
@@ -1699,53 +1526,76 @@ export class TerminalView extends ItemView {
     this.reportFrame = 0;
   }
 
-  /**
-   * Cmd+C, and the menu's Copy: the terminal's own selection (a shell's, or
-   * an Option-drag); otherwise, when the program has the mouse, any
-   * selection is its own, and claude and Codex copy it on Super+C (the
-   * kitty encoding of Cmd+C), doing nothing when there's none.
-   */
-  private copy(): void {
+  private copy(gesture: Gesture | null = null, copied?: () => void): boolean {
     const term = this.term;
-    if (!term) return;
-    // A picture's placeholder cells are no text.
+    if (!term) return false;
     if (term.hasSelection()) this.copySelection();
     else if (this.programCopies()) {
-      this.onInput("\x1b[99;9u");
-      // Claude clears its selection on its copy.
+      const breaks = gesture && this.selectionBreaks(gesture);
+      const send = () => {
+        this.copyBreaks.push({ breaks: breaks && { breaks: breaks.breaks, indent: breaks.indent }, at: performance.now(), copied });
+        this.copyBreaks.splice(0, this.copyBreaks.length - 4);
+        this.sendNow("\x1b[99;9u");
+      };
+      if (this.session && this.keyQueue.busy) this.keyQueue.push(send);
+      else send();
       this.claudeSelection = null;
+      return true;
     }
+    return false;
   }
 
-  /** Whether closing asks first: closeReason says why, null when it doesn't. */
+  private keepCopy(raw: string, text: string): void {
+    const win = this.pane.win;
+    const until = performance.now() + COPY_KEEP_MS;
+    const check = () => {
+      if (!this.term || performance.now() > until) return;
+      const now = clipboardText();
+      if (now === raw) copyText(text);
+      else if (now === text) win.setTimeout(check, COPY_CHECK_MS);
+    };
+    win.setTimeout(check, COPY_CHECK_MS);
+  }
+
+  private selectionBreaks(g: Gesture): { breaks: string[]; indent: number; at: number } | null {
+    const term = this.term;
+    const box = this.promptBox();
+    const area = box && this.textArea(box);
+    if (!term || !area || term.modes.mouseTrackingMode === "none") return null;
+    const ends = [g.from.row, g.to.row, gestureFocus(g)?.row ?? g.to.row];
+    if (!g.whole && (Math.max(...ends) < area.first || Math.min(...ends) > area.last)) return null;
+    const top = Math.max(area.first, g.whole ? area.first : Math.min(...ends));
+    const bottom = Math.min(area.last, g.whole ? area.last : Math.max(...ends));
+    const buf = term.buffer.active;
+    const text = (y: number) => (buf.getLine(y)?.translateToString(true) ?? "").slice(y === area.first ? area.x1 : 0);
+    const rows: InputRow[] = [];
+    for (let y = top; y < bottom; y++) {
+      const row = text(y).replace(/^ +/, "");
+      const end = text(y).trimEnd().length - 1 + (y === area.first ? area.x1 : 0);
+      rows.push({ end: Math.max(area.x1 - 1, end), nextWord: text(y + 1).trim().split(/\s/)[0]?.length ?? 0, oneWord: !/\s/.test(row.trim()) && end >= term.cols - 4 });
+    }
+    return { breaks: rowBreaks(rows, term.cols), indent: area.x1, at: performance.now() };
+  }
+
   needsCloseConfirm(): boolean {
     return this.closeReason() !== null;
   }
 
-  /**
-   * Why closing this terminal asks first, or null. An agent of the tab's
-   * own asks while it's working or waiting for the user. A shell asks
-   * while it runs anything besides itself, in the foreground or as a
-   * background job, checked now rather than from the last report; an
-   * agent recognized in it asks as a tab's own agent does, and only for
-   * itself.
-   */
   closeReason(): CloseReason | null {
     const own = this.terminalCloseReason();
     return this.controller?.closeReason ? this.controller.closeReason(own) : own;
   }
 
-  /** The terminal's own reason, before the host's (closeReason). */
   terminalCloseReason(): CloseReason | null {
     const session = this.session;
     if (!session) return null;
     const state = this.status?.shown;
     const busy = state === "working" || state === "waiting";
-    if (this.ranProgram) return this.runningAgent && busy ? { agent: true, name: this.runningAgent.name } : null;
+    const background = !busy && !!this.status?.backgroundWork;
+    const agentReason = (name: string): CloseReason | null => (busy ? { agent: true, name } : background ? { agent: true, name, background: true } : null);
+    if (this.ranProgram) return this.runningAgent ? agentReason(this.runningAgent.name) : null;
     const others = this.processesNow(session);
     if (others === null) {
-      // ps failed, so a background job can't be ruled out, beside an idle
-      // agent too: ask, naming what the last report knew.
       const fg = this.foreground;
       const name = fg && fg.pgid !== session.programPid ? (this.recognized?.name ?? (fg.script || fg.name)) : `something (${this.core.name} couldn't check)`;
       return { agent: !!this.recognized, name };
@@ -1753,14 +1603,10 @@ export class TerminalView extends ItemView {
     const agentGroup = this.recognized && this.foreground ? this.foreground.pgid : -1;
     const rest = others.filter((p) => p.pgid !== agentGroup);
     if (rest.length) return { agent: false, name: (rest.find((p) => p.foreground) ?? rest[0]).name };
-    if (this.recognized && others.length) return busy ? { agent: true, name: this.recognized.name } : null;
+    if (this.recognized && others.length) return agentReason(this.recognized.name);
     return null;
   }
 
-  /**
-   * The processes on the terminal's tty besides the shell itself, from ps
-   * at this moment; null if ps couldn't say. Exited ones (zombies) don't count.
-   */
   private processesNow(session: HelperSession): { pid: number; pgid: number; foreground: boolean; name: string }[] | null {
     const tty = session.tty.replace(/^\/dev\//, "");
     if (!tty) return null;
@@ -1768,14 +1614,8 @@ export class TerminalView extends ItemView {
       const out = execFileSync("/bin/ps", ["-t", tty, "-o", "pid=,pgid=,stat=,comm="], { encoding: "utf8", timeout: 2000 });
       const list: { pid: number; pgid: number; foreground: boolean; name: string }[] = [];
       const rows = out.split("\n").map((line) => line.trim().match(/^(\d+)\s+(\d+)\s+(\S+)\s+(.*)$/)).filter((m): m is RegExpMatchArray => !!m);
-      // The shell's own process group is its own work (startup files, a
-      // prompt's substitutions); job control gives every command and job a
-      // group of its own.
       const shellRow = rows.find((m) => Number(m[1]) === session.programPid);
       const shellGroup = shellRow?.[2];
-      // A shell that ran exec is now that program (exec sleep 100): it counts.
-      // Still the shell: the name it was started as, or any shell's, since a
-      // wrapper or a link can start a shell under another name.
       const shellName = (shellRow?.[4].split("/").pop() ?? "").replace(/^-/, "");
       const stillShell = !shellRow || shellName === session.programName || SHELLS.test(shellName);
       for (const m of rows) {
@@ -1785,32 +1625,23 @@ export class TerminalView extends ItemView {
       }
       return list;
     } catch (e) {
-      // ps exits 1 when nothing matches: nothing else is running.
       if ((e as { status?: number }).status === 1) return [];
       return null;
     }
   }
 
-  /** The foreground program's name for the tab's title, when it isn't the shell. */
   private foregroundName(): string {
     const fg = this.foreground;
     if (!fg || !this.session || fg.pgid === this.session.programPid) return "";
     return this.recognized?.name ?? (fg.script || fg.name);
   }
 
-  /** For the self-test: the foreground program's name, and whether an agent was recognized in it. */
   get foregroundInfo(): { name: string; agent: string | null; at: number } {
     return { name: this.foregroundName(), agent: this.recognized?.id ?? null, at: this.foregroundAt };
   }
 
   private foregroundAt = 0;
 
-  /**
-   * The foreground program changed. In a shell tab, a known agent gets
-   * its profile (keys, Cmd+K, Cmd+Z) and its state signals as if the terminal
-   * had started it; when it ends, the shell's identity, title and state
-   * come back. A tab's own agent is left as it is.
-   */
   private onForeground(session: HelperSession, info: Foreground): void {
     if (this.session !== session) return;
     this.foreground = info;
@@ -1819,15 +1650,12 @@ export class TerminalView extends ItemView {
       const agent = info.pgid === session.programPid ? null : agentForProgram(info.script || info.name);
       if (agent !== this.recognized) {
         if (this.recognized && this.shellStatus) {
-          // The agent ended: the shell is back as it was.
           this.status = this.shellStatus;
           this.shellStatus = null;
           this.status.programReturned();
         }
         this.recognized = agent;
         this.runningAgent = agent;
-        // The agent may have asked for kitty keys before the helper's report
-        // named it: that stays. Another program in its place starts afresh.
         if (!agent) this.readsKittyKeys = false;
         if (agent) {
           this.shellStatus = this.status;
@@ -1843,7 +1671,6 @@ export class TerminalView extends ItemView {
             (id, atStart) => this.onBridge(id, atStart),
           );
           this.status.start();
-          // What it said before it was recognized, to the shell's tracker, is its own.
           if (this.shellStatus) this.status.adopt(this.shellStatus);
         }
         this.core.updateBadge();
@@ -1852,17 +1679,10 @@ export class TerminalView extends ItemView {
     this.updateHeader();
   }
 
-  /**
-   * Closing the tab (its close button, Cmd+W, any command) goes through the
-   * leaf's detach, which Obsidian offers no way to veto: so this leaf's
-   * detach asks first when the agent is busy. Moving the tab doesn't detach it.
-   */
   private guardClose(): void {
     const leaf = this.leaf as WorkspaceLeaf & { detach(): void };
     const own = Object.prototype.hasOwnProperty.call(leaf, "detach");
     const detach = leaf.detach.bind(leaf);
-    // Put back when this view closes: the leaf can outlive it (another view
-    // type opened in it), and must not keep calling into a closed terminal.
     this.unguardClose = () => {
       if (leaf.detach !== guarded) return;
       if (own) leaf.detach = detach;
@@ -1871,21 +1691,17 @@ export class TerminalView extends ItemView {
     const guarded = () => {
       const why = this.core.closingAllowed || this.core.confirmedWindows.has(this.pane.win) ? null : this.closeReason();
       if (!why) return detach();
-      // In the terminal's own window: closing a popout detaches its tabs
-      // first, so a confirmed close that empties a popout closes it too.
       const win = this.pane.win;
       const container = this.leaf.getContainer() as unknown as { close?: () => void };
       confirmClose(this.app, [why], () => {
         detach();
         if (win === window) return;
-        // Once the detach has settled: a popout with nothing left in it closes.
         window.setTimeout(() => {
           let left = 0;
           this.app.workspace.iterateAllLeaves((l) => {
             if (l.view.containerEl.win === win) left++;
           });
           if (left || win.closed) return;
-          // Obsidian's own window close (internal), which a script's window.close() doesn't reach.
           if (typeof container.close === "function") container.close();
           else win.close();
         }, 100);
@@ -1894,17 +1710,10 @@ export class TerminalView extends ItemView {
     leaf.detach = guarded;
   }
 
-  /** Whether the program is claude: the terminal's own, or recognized by its questions (claudeKeys). */
   private isClaude(): boolean {
     return this.runningAgent?.id === "claude" || this.claudeKeys();
   }
 
-  /**
-   * The Option key setting: with "right", the right Option key acts as
-   * Meta while it's held and the left one still types characters. Which one
-   * is down is known from the modifier's own keydown and keyup (its code is
-   * AltLeft or AltRight); xterm then encodes Meta itself.
-   */
   private trackOption(e: KeyboardEvent): void {
     const term = this.term;
     if (!term || (e.code !== "AltLeft" && e.code !== "AltRight")) return;
@@ -1917,7 +1726,6 @@ export class TerminalView extends ItemView {
   private rightOption = false;
   private leftOption = false;
 
-  /** For the self-test. */
   get optionIsMeta(): boolean {
     return !!this.term?.options.macOptionIsMeta;
   }
@@ -1930,16 +1738,13 @@ export class TerminalView extends ItemView {
     if (term.options.macOptionIsMeta !== meta) term.options.macOptionIsMeta = meta;
   }
 
-  /** Whether Cmd+C goes to the program, which has the mouse and copies its own selection. */
   private programCopies(): boolean {
     return !!this.term && this.agentKeys() && this.term.modes.mouseTrackingMode !== "none";
   }
 
-  /** The menu's Paste: what Cmd+V does for the same clipboard, an image alone included. */
   private pasteFromMenu(): void {
     const term = this.term;
     if (!term) return;
-    // Claude clears its selection on a paste, as on any key.
     this.claudeSelection = null;
     if (clipboardHasOnlyImage()) {
       if (this.agentKeys()) this.onInput("\x16");
@@ -1951,7 +1756,6 @@ export class TerminalView extends ItemView {
     term.paste(text);
   }
 
-  /** Absolute paths of what's being dragged: files from Finder, or notes and folders from Obsidian's own lists. */
   private droppedPaths(e: DragEvent): string[] {
     const paths: string[] = [];
     for (const f of Array.from(e.dataTransfer?.files ?? [])) {
@@ -1959,21 +1763,18 @@ export class TerminalView extends ItemView {
       if (p) paths.push(p);
     }
     if (paths.length) return paths;
-    // A drag inside Obsidian (its file list) carries Obsidian's own record, not files.
     const drag = (this.app as unknown as { dragManager?: { draggable?: { type?: string; file?: { path: string }; files?: { path: string }[] } | null } }).dragManager?.draggable;
     const items = drag?.files ?? (drag?.file ? [drag.file] : []);
     for (const item of items) paths.push(this.core.absolutePath(item.path));
     return paths;
   }
 
-  /** Paths typed at the cursor as one paste, each quoted for a shell as needed, nothing run. */
   typePaths(paths: string[]): void {
     if (!this.term || !paths.length) return;
     this.cancelReset();
     this.term.paste(`${paths.map(shellQuote).join(" ")} `);
   }
 
-  /** Right-click: Copy, Paste, and Select all (the whole terminal, scrollback with it). */
   private showMenu(e: MouseEvent): void {
     if (!this.term) return;
     e.preventDefault();
@@ -1990,22 +1791,18 @@ export class TerminalView extends ItemView {
 
   private linkTip: HTMLElement | null = null;
 
-  /**
-   * A small tip by the pointer naming where a link goes, and how to open
-   * it. A link whose text isn't its address always takes Cmd+click.
-   */
-  private showLinkTip(event: MouseEvent, address: string, textIsAddress: boolean): void {
+  private showLinkTip(event: MouseEvent, address: string, textIsAddress: boolean, choose = false): void {
     const el = this.term?.element;
     if (!el) return;
     this.hideLinkTip();
-    // xterm-hover: xterm lets mouse events over it pass as if it weren't there.
     const tip = el.createDiv({ cls: "vault-terminal-link-tip xterm-hover" });
-    const how = this.core.settings.linkClick === "click" && textIsAddress ? "Click to open" : "Cmd+click to open";
+    const how = `${this.core.settings.linkClick === "click" && textIsAddress ? "Click" : "Cmd+click"} to ${choose ? "choose" : "open"}`;
+    const target = this.core.obsidianTarget(address);
+    if (target) tip.createDiv({ cls: "vault-terminal-link-tip-target", text: target.text });
     tip.createDiv({ cls: "vault-terminal-link-tip-address", text: address });
     tip.createDiv({ cls: "vault-terminal-link-tip-how", text: how });
     const r = el.getBoundingClientRect();
     tip.style.left = `${Math.max(0, Math.min(event.clientX - r.left + 12, r.width - 320))}px`;
-    // Below the pointer, or above it where below would be cut off at the terminal's bottom.
     const below = event.clientY - r.top + 18;
     const above = event.clientY - r.top - 8 - tip.offsetHeight;
     tip.style.top = `${Math.max(0, below + tip.offsetHeight > r.height && above >= 0 ? above : below)}px`;
@@ -2017,22 +1814,14 @@ export class TerminalView extends ItemView {
     this.linkTip = null;
   }
 
-  /** For the self-test: the link tip's text while it shows. */
   get linkTipText(): string | null {
     return this.linkTip?.isConnected ? this.linkTip.innerText || this.linkTip.textContent : null;
   }
 
-  /** For the self-test: the last right-click menu shown. */
   lastMenu: { items: { title: string; disabled: boolean; run: () => void }[]; hide(): void } | null = null;
 
-  /** For the dev self-test: what the last Ctrl+Tab did. */
   lastHotkey: { id: string | null; removed: boolean; ran: boolean } | null = null;
 
-  /**
-   * Ctrl+Tab or Ctrl+Shift+Tab: runs the command Obsidian has on that hotkey
-   * (by default, the next or previous tab). The view's scope claims every
-   * other Ctrl key for the program, so Obsidian's own matching never sees it.
-   */
   private obsidianHotkey(e: KeyboardEvent): false {
     type Hotkey = { modifiers: string[]; key: string };
     const app = this.app as unknown as {
@@ -2051,84 +1840,219 @@ export class TerminalView extends ItemView {
         }
       }
     } catch {
-      // Obsidian's hotkey list moved; the defaults below
+      /* empty */
     }
     const fallback = e.shiftKey ? "workspace:previous-tab" : "workspace:next-tab";
-    // The default command's own hotkeys changed (even to none), and nothing
-    // has Ctrl+Tab: the user took it off, so it does nothing.
     let removed = false;
     try {
       removed = !id && app.hotkeyManager?.getHotkeys(fallback) !== undefined;
     } catch {
-      // as above
+      /* empty */
     }
     const ran = !removed && app.commands.executeCommandById(id ?? fallback);
     this.lastHotkey = { id, removed, ran };
     return false;
   }
 
-  /**
-   * Web addresses on buffer line y (1-based), for Cmd+click. A long address
-   * wraps onto the rows below, so the whole wrapped line is read and each
-   * address spans the rows it's on.
-   */
-  private linksOn(y: number): ILink[] | undefined {
-    const buf = this.term?.buffer.active;
-    if (!buf?.getLine(y - 1)) return undefined;
-    let first = y - 1;
-    while (first > 0 && buf.getLine(first)?.isWrapped) first--;
-    let last = y - 1;
-    while (buf.getLine(last + 1)?.isWrapped) last++;
-    // Text, and the cell each character starts in; wide characters take two.
-    let text = "";
-    const cells: { x: number; y: number }[] = [];
-    for (let row = first; row <= last; row++) {
-      const part = cellsOf(buf.getLine(row)!);
-      text += part.text;
-      for (const x of part.columns) cells.push({ x: x + 1, y: row + 1 });
+  private afterRender(start: number, end: number): void {
+    const term = this.term;
+    if (!term) return;
+    if (this.core.settings.markLinks) underlineLinks(term, this.linkColumns);
+    else stopUnderliningLinks(term);
+    const top = term.buffer.active.viewportY;
+    for (let r = Math.max(0, start - JOINED_LINES); r <= Math.min(term.rows - 1, end + JOINED_LINES); r++) {
+      if (r >= start && r <= end) continue;
+      const drawn = this.linkRowsDrawn.get(top + r);
+      if (drawn !== undefined && drawn !== this.linkColumnsOf(top + r).join(" ")) term.refresh(r, r);
     }
-    const urls = findUrls(text).map(
-      (l): ILink => ({
-        text: l.url,
-        range: { start: cells[l.start], end: cells[l.end - 1] },
-        activate: (event, url) => {
-          if (this.core.opensLink(event)) this.openUri(url);
-        },
-        hover: (event, url) => this.showLinkTip(event, url, true),
-        leave: () => this.hideLinkTip(),
-      }),
+    this.restoreLinkHover();
+  }
+
+  private readonly linkColumns = (row: number): Array<[number, number]> => {
+    const cols = this.linkColumnsOf(row);
+    if (this.linkRowsDrawn.size >= LINK_ROWS_KEPT) for (const old of [...this.linkRowsDrawn.keys()].slice(0, LINK_ROWS_KEPT / 4)) this.linkRowsDrawn.delete(old);
+    this.linkRowsDrawn.delete(row);
+    this.linkRowsDrawn.set(row, cols.join(" "));
+    return cols;
+  };
+
+  private linkColumnsOf(row: number): Array<[number, number]> {
+    const term = this.term;
+    if (!term || !this.core.settings.markLinks) return [];
+    const y = row + 1;
+    let links = this.linksThisRender.get(row);
+    if (!links) {
+      if (!this.linksThisRender.size) queueMicrotask(() => this.linksThisRender.clear());
+      links = this.linksOn(y, true) ?? [];
+      const buf = term.buffer.active;
+      let first = row;
+      while (first > 0 && buf.getLine(first)?.isWrapped) first--;
+      for (let r = first; r === first || buf.getLine(r)?.isWrapped; r++) this.linksThisRender.set(r, links);
+    }
+    const out: Array<[number, number]> = [];
+    for (const { range } of links) {
+      if (range.start.y > y || range.end.y < y) continue;
+      out.push([range.start.y === y ? range.start.x - 1 : 0, range.end.y === y ? range.end.x - 1 : term.cols - 1]);
+    }
+    return out;
+  }
+
+  refreshLinks(): void {
+    if (!this.term) return;
+    const win = this.pane.win;
+    if (this.linksChanged && this.linksChangedWin === win) return;
+    if (this.linksChanged) this.linksChangedWin?.clearTimeout(this.linksChanged);
+    this.linksChangedWin = win;
+    this.linksChanged = win.setTimeout(this.guarded(undefined, () => {
+      this.linksChanged = 0;
+      this.pathsKept.clear();
+      this.term?.refresh(0, this.term.rows - 1);
+    }), LINKS_CHANGED_MS);
+  }
+
+  private restoreLinkHover(): void {
+    if (!this.pointer) return;
+    const win = this.pane.win;
+    if (this.hoverCheck && this.hoverCheckWin === win) return;
+    if (this.hoverCheck) this.hoverCheckWin?.clearTimeout(this.hoverCheck);
+    this.hoverCheckWin = win;
+    this.hoverCheck = win.setTimeout(this.guarded(undefined, () => {
+      this.hoverCheck = 0;
+      const term = this.term;
+      const p = this.pointer;
+      const screen = term?.element?.querySelector<HTMLElement>(".xterm-screen");
+      const cell = term && cellSize(term);
+      if (!term || !p || !screen || !cell || screen.classList.contains("xterm-cursor-pointer")) return;
+      const box = screen.getBoundingClientRect();
+      const col = Math.floor((p.x - box.left) / cell.width);
+      const row = Math.floor((p.y - box.top) / cell.height);
+      if (col < 0 || row < 0 || col >= term.cols || row >= term.rows) return;
+      const y = term.buffer.active.viewportY + row + 1;
+      const at = y * term.cols + col + 1;
+      const over = (this.linksOn(y) ?? []).some(({ range }) => at >= range.start.y * term.cols + range.start.x && at <= range.end.y * term.cols + range.end.x);
+      if (!over) return;
+      const away = row > 0 ? -cell.height : cell.height;
+      screen.dispatchEvent(new MouseEvent("mousemove", { bubbles: false, clientX: p.x, clientY: p.y + away, altKey: p.alt }));
+      screen.dispatchEvent(new MouseEvent("mousemove", { bubbles: false, clientX: p.x, clientY: p.y, altKey: p.alt }));
+    }), 0);
+  }
+
+  private linksOn(y: number, whole = false): ILink[] | undefined {
+    const term = this.term;
+    const buf = term?.buffer.active;
+    if (!term || !buf?.getLine(y - 1)) return undefined;
+    const lineAt = (row: number): { first: number; last: number } => {
+      let first = row;
+      while (first > 0 && buf.getLine(first)?.isWrapped) first--;
+      let last = row;
+      while (buf.getLine(last + 1)?.isWrapped) last++;
+      return { first, last };
+    };
+    const rowCells = (row: number): RowCells => cellsOf(buf.getLine(row)!);
+    const lines = [lineAt(y - 1)];
+    for (let k = 0; k < JOINED_LINES; k++) {
+      const top = lines[0];
+      if (top.first === 0) break;
+      const above = lineAt(top.first - 1);
+      if (!cliWrapped(rowCells(above.last), rowCells(top.first), term.cols)) break;
+      lines.unshift(above);
+    }
+    for (let k = 0; k < JOINED_LINES; k++) {
+      const bottom = lines[lines.length - 1];
+      if (!buf.getLine(bottom.last + 1)) break;
+      const below = lineAt(bottom.last + 1);
+      if (!cliWrapped(rowCells(bottom.last), rowCells(below.first), term.cols)) break;
+      lines.push(below);
+    }
+    let text = "";
+    const cells: ({ x: number; y: number } | null)[] = [];
+    const edges = new Set<number>();
+    let lastCell: { x: number; y: number } | undefined;
+    lines.forEach((line, i) => {
+      let part = "";
+      const partCells: { x: number; y: number }[] = [];
+      for (let row = line.first; row <= line.last; row++) {
+        const got = cellsOf(buf.getLine(row)!);
+        part += got.text;
+        for (const x of got.columns) partCells.push({ x: x + 1, y: row + 1 });
+      }
+      if (i > 0) {
+        const indent = part.length - part.trimStart().length;
+        part = part.slice(indent);
+        partCells.splice(0, indent);
+        if (lastCell?.x === term.cols) edges.add(text.length);
+        text += " ";
+        cells.push(null);
+      }
+      if (i < lines.length - 1) {
+        part = part.trimEnd();
+        partCells.length = part.length;
+      }
+      text += part;
+      for (const cell of partCells) cells.push(cell);
+      lastCell = partCells[partCells.length - 1];
+    });
+    const rangesOf = (start: number, end: number): IBufferRange[] => {
+      const out: IBufferRange[] = [];
+      let open = false;
+      for (let i = start; i < end; i++) {
+        const cell = cells[i];
+        if (!cell) open = false;
+        else if (open) out[out.length - 1].end = cell;
+        else {
+          out.push({ start: cell, end: cell });
+          open = true;
+        }
+      }
+      return out;
+    };
+    const chosen = findUrlsAcross(text, edges, (long, short) => this.core.obsidianTarget(long)?.found === false && this.core.obsidianTarget(short)?.found === true);
+    const urls = chosen.flatMap((l) =>
+      rangesOf(l.start, l.end).map(
+        (range): ILink => ({
+          text: l.url,
+          range,
+          activate: (event, url) => {
+            if (this.core.opensLink(event)) this.openUri(url);
+          },
+          hover: (event, url) => this.showLinkTip(event, url, true),
+          leave: () => this.hideLinkTip(),
+        }),
+      ),
     );
-    // File paths that exist, from the folder the program started in,
-    // or a note in the vault by its vault path or its name alone. A :line after the path opens a note at that line.
-    // xterm asks once per row the pointer enters, and a line's search costs
-    // a stat per candidate, so a line's answer is kept for a moment: moving
-    // across a wrapped line's rows, or back to it, searches it once.
     const now = Date.now();
-    const kept = this.pathsKept;
-    const found = kept && kept.text === text && kept.dir === this.folder && now - kept.at < PATHS_KEPT_MS ? kept.found : findPaths(text, (p) => exists(this.resolve(p)) || !!this.core.vaultNote(p));
-    if (found !== kept?.found) this.pathsKept = { text, dir: this.folder, at: now, found };
-    const paths = found.map(
-      (l): ILink => ({
-        text: l.path,
-        range: { start: cells[l.start], end: cells[l.end - 1] },
-        hover: (event) => {
-          const abs = this.resolve(l.path);
-          this.showLinkTip(event, exists(abs) ? abs : (this.core.vaultNote(l.path)?.path ?? l.path), true);
-        },
-        leave: () => this.hideLinkTip(),
-        activate: (event) => {
-          if (!this.core.opensLink(event)) return;
-          const line = Number(text.slice(l.end).match(/^:(\d+)/)?.[1] ?? 0) || undefined;
-          const abs = this.resolve(l.path);
-          if (exists(abs)) this.core.openPath(abs, line);
-          else {
-            const note = this.core.vaultNote(l.path);
-            if (note) void this.core.openNote(note, line);
-          }
-        },
-      }),
+    const key = `${this.folder}\0${text}`;
+    const kept = this.pathsKept.get(key);
+    let found = kept && now - kept.at < PATHS_KEPT_MS ? kept.found : null;
+    if (!found) {
+      found = findPaths(text, (p) => exists(this.resolve(p)) || this.core.vaultNotes(p).length > 0);
+      if (this.pathsKept.size >= PATHS_KEPT_MAX) this.pathsKept.clear();
+      this.pathsKept.set(key, { at: now, found });
+    }
+    const paths = found.flatMap((l) =>
+      rangesOf(l.start, l.end).map(
+        (range): ILink => ({
+          text: l.path,
+          range,
+          hover: (event) => {
+            const abs = this.resolve(l.path);
+            if (exists(abs)) return this.showLinkTip(event, abs, true);
+            const notes = this.core.vaultNotes(l.path);
+            if (notes.length > 1) this.showLinkTip(event, `${notes.length} files named ${notes[0].name}`, true, true);
+            else this.showLinkTip(event, notes[0]?.path ?? l.path, true);
+          },
+          leave: () => this.hideLinkTip(),
+          activate: (event) => {
+            if (!this.core.opensLink(event)) return;
+            const line = Number(text.slice(l.end).match(/^:(\d+)/)?.[1] ?? 0) || undefined;
+            const abs = this.resolve(l.path);
+            if (exists(abs)) this.core.openPath(abs, line);
+            else this.core.openNotes(this.core.vaultNotes(l.path), line);
+          },
+        }),
+      ),
     );
-    const links = [...urls, ...paths].filter((l) => l.range.start.y <= y && l.range.end.y >= y);
+    const links = whole ? [...urls, ...paths] : [...urls, ...paths].filter((l) => l.range.start.y <= y && l.range.end.y >= y);
     return links.length ? links : undefined;
   }
 
@@ -2138,7 +2062,6 @@ export class TerminalView extends ItemView {
     return isAbsolute(p) ? p : join(this.folder, p);
   }
 
-  /** Scrolls so the previous (-1) or next (1) prompt is at the top. */
   private jumpToPrompt(direction: -1 | 1): void {
     const term = this.term;
     if (!term || term.buffer.active.type !== "normal") return;
@@ -2153,7 +2076,6 @@ export class TerminalView extends ItemView {
     term.scrollToLine(target);
   }
 
-  /** The terminal's text: everything in its scrollback and on screen, or the full-screen program's screen. */
   text(): string {
     const term = this.term;
     if (!term) return "";
@@ -2162,7 +2084,6 @@ export class TerminalView extends ItemView {
     for (let i = 0; i < buf.length; i++) {
       const line = buf.getLine(i);
       if (!line) continue;
-      // A row that continues on the next keeps its trailing spaces: they're text, not padding.
       const t = line.translateToString(!buf.getLine(i + 1)?.isWrapped);
       if (line.isWrapped && lines.length) lines[lines.length - 1] += t;
       else lines.push(t);
@@ -2171,7 +2092,6 @@ export class TerminalView extends ItemView {
     return withoutPlaceholders(lines.join("\n"));
   }
 
-  /** The text in a buffer range, as xterm gives a link's (1-based, end inclusive). */
   private textIn(range: { start: { x: number; y: number }; end: { x: number; y: number } }): string {
     const buf = this.term?.buffer.active;
     if (!buf) return "";
@@ -2186,19 +2106,17 @@ export class TerminalView extends ItemView {
     return text;
   }
 
-  /** A link's address: web addresses in the Web viewer or the browser, file addresses as paths. */
   private openUri(uri: string): void {
     if (/^https?:\/\//i.test(uri)) this.core.openUrl(uri);
+    else if (/^obsidian:\/\//i.test(uri)) this.core.openObsidianUri(uri);
     else if (/^file:\/\//i.test(uri)) {
       try {
         this.core.openPath(fileURLToPath(uri));
       } catch {
-        // not a local file address
+        /* empty */
       }
     }
   }
-
-  // --- search ---
 
   private openSearch(): void {
     if (!this.searchBar) {
@@ -2214,9 +2132,7 @@ export class TerminalView extends ItemView {
       button("chevron-down", "Next match", () => this.find(true));
       button("x", "Close", () => this.closeSearch());
       input.addEventListener("input", () => this.find(true, true));
-      // On the whole bar, so Escape works from its buttons too.
       bar.addEventListener("keydown", (e) => {
-        // An input method is composing: Enter and Escape are its own.
         if (e.isComposing || e.key === "Process" || e.key === "Dead") return;
         if (e.key === "Escape") {
           e.preventDefault();
@@ -2241,7 +2157,6 @@ export class TerminalView extends ItemView {
     if (selected && !selected.includes("\n")) this.searchInput!.value = selected;
     this.searchInput!.focus();
     this.searchInput!.select();
-    // Opening the bar doesn't move the view: Enter or typing finds.
   }
 
   private find(forward: boolean, incremental = false): void {
@@ -2260,7 +2175,6 @@ export class TerminalView extends ItemView {
         activeMatchColorOverviewRuler: "#ff9d00",
       },
     };
-    // A query with one of a picture's marks never matches inside a picture.
     const pattern = findPattern(q);
     if (pattern) options.regex = true;
     if (forward) this.search.findNext(pattern ?? q, options);
@@ -2273,13 +2187,11 @@ export class TerminalView extends ItemView {
     this.term?.focus();
   }
 
-  /** For the self-test: the search bar's input and its count, when open. */
   get searchState(): { open: boolean; count: string } {
     return { open: !!this.searchBar?.isShown(), count: this.searchCount?.getText() ?? "" };
   }
 
   private onInput(data: string): void {
-    // While a selection's deletion goes out, everything else waits behind it.
     if (this.session && this.keyQueue.busy && !this.queueWriting) {
       this.keyQueue.push(data);
       return;
@@ -2287,7 +2199,6 @@ export class TerminalView extends ItemView {
     this.sendNow(data);
   }
 
-  /** Input to the program now, or after it ends, to start it again. */
   private sendNow(data: string): void {
     if (this.session) {
       if (data.includes("\r")) this.status?.answered();
@@ -2295,8 +2206,6 @@ export class TerminalView extends ItemView {
       this.session.write(data);
       this.controller?.input?.(data);
     } else if (this.ended && !this.starting) {
-      // After the program ends, Enter starts it again; S starts a shell,
-      // except in a host's terminal, whose Enter is the host's (keys.ts).
       const what = afterExitKey(data, !!this.controller);
       if (what === "restart") {
         if (this.controller?.restart) this.controller.restart();
@@ -2305,9 +2214,48 @@ export class TerminalView extends ItemView {
     }
   }
 
+  private holdOutput(until: number): void {
+    this.outputHeldUntil = until;
+    if (this.heldOutput.length) this.scheduleHeld();
+  }
+  private scheduleHeld(): void {
+    if (this.heldTimer) this.heldTimerWin?.clearTimeout(this.heldTimer);
+    const win = this.pane.win;
+    this.heldTimerWin = win;
+    this.heldTimer = win.setTimeout(() => {
+      this.heldTimer = 0;
+      this.flushHeld();
+    }, Math.max(1, this.outputHeldUntil - performance.now()));
+  }
+  private flushHeld(drop = false): void {
+    if (this.heldTimer) this.heldTimerWin?.clearTimeout(this.heldTimer);
+    this.heldTimer = 0;
+    this.outputHeldUntil = 0;
+    const held = this.heldOutput;
+    this.heldOutput = [];
+    if (drop || !held.length) return;
+    const all = new Uint8Array(held.reduce((n, c) => n + c.length, 0));
+    let at = 0;
+    for (const c of held) {
+      all.set(c, at);
+      at += c.length;
+    }
+    this.onOutput(all);
+  }
+  private outputHeldUntil = 0;
+  private heldOutput: Uint8Array[] = [];
+  private heldTimer = 0;
+  private heldTimerWin: Window | null = null;
+
   private onOutput(chunk: Uint8Array): void {
     const term = this.term;
     if (!term) return;
+    if (this.outputHeldUntil > performance.now()) {
+      this.heldOutput.push(chunk);
+      if (!this.heldTimer) this.scheduleHeld();
+      return;
+    }
+    if (this.heldOutput.length) this.flushHeld();
     if (this.slow) this.endSlowStart();
     const size = chunk.length;
     this.unparsed += size;
@@ -2339,23 +2287,18 @@ export class TerminalView extends ItemView {
     }
   }
 
-  /** For the self-test: how the last session ended, with its helper's diagnostics. */
   lastExit: { info: ExitInfo; helper: string; ranFor: number } | null = null;
 
   private onExit(session: HelperSession, info: ExitInfo): void {
     if (this.session === session) this.lastExit = { info, helper: session.diagnostics.slice(-600), ranFor: this.launch ? Date.now() - this.launch.at : -1 };
     if (this.session !== session) return;
+    this.flushHeld();
     this.endSlowStart();
     this.core.sessions.delete(session);
     this.session = null;
     this.ended = true;
     this.status?.exit();
-    // The host may take it from here (a resume after a failed attach).
     if (this.controller?.exit?.(info)) return;
-    // An agent that failed at once with the terminal's additions is started
-    // again once without them, before anything else is decided (the
-    // shell after an agent waits for this). What it printed stays. A code
-    // of 128 or more is a signal (Ctrl+C is 130): the user stopped it.
     const l = this.launch;
     if (l && this.ranProgram && l.added.length && !l.plain && typeof info.code === "number" && info.code !== 0 && info.code < 128 && !info.closed && (info.ran !== undefined ? info.ran * 1000 : Date.now() - l.at) < RETRY_WITHIN_MS) {
       this.retryPlain(l);
@@ -2364,8 +2307,6 @@ export class TerminalView extends ItemView {
     const how = info.signal ? `was ended by signal ${info.signal}` : `exited with code ${info.code ?? "unknown"}`;
     const agent = agentById(this.kind);
     const name = agent?.name ?? "The program";
-    // An agent's tab becomes a shell in the folder it started in, its
-    // scrollback kept, unless the setting says to wait.
     if (agent && this.core.settings.shellAfterExit && this.ranProgram && !this.controller) {
       this.resetModes(`\r\n\x1b[2m[${name} ${how}. A shell in the same folder:]\x1b[0m\r\n`);
       void this.start("shell", this.startDir);
@@ -2392,14 +2333,11 @@ export class TerminalView extends ItemView {
     this.controller?.launchFailed?.(message);
   }
 
-  // --- status, bell, notifications ---
-
   private updateHeader(): void {
     (this.leaf as unknown as { updateHeader?: () => void }).updateHeader?.();
   }
 
-  /** The user can see this terminal: it's showing, in a window that has focus. */
-  private looking(): boolean {
+  looking(): boolean {
     return !!this.pane && this.pane.isShown() && this.pane.doc.hasFocus();
   }
 
@@ -2416,7 +2354,6 @@ export class TerminalView extends ItemView {
     this.updateHeader();
   }
 
-  /** For the self-test: each state the tab showed, and each notification dispatched, with when. */
   readonly stateLog: { state: string; at: number }[] = [];
   readonly attentionLog: { how: string; at: number }[] = [];
 
@@ -2433,7 +2370,6 @@ export class TerminalView extends ItemView {
     if (this.stateLog.length > 200) this.stateLog.splice(0, 100);
   }
 
-  /** A hook said whether claude's Remote Control is connected (status.ts), for the host. */
   private onBridge(id: string, atStart: boolean): void {
     try {
       this.controller?.bridge?.(id, atStart);
@@ -2442,57 +2378,38 @@ export class TerminalView extends ItemView {
     }
   }
 
-  /** The program asked for attention. Notifications are a setting, off by default. */
   private onAttention(a: Attention): void {
-    if (!this.core.settings.notifications || this.looking()) return;
+    if (a.quiet) {
+      this.showToast(this.getDisplayText(), a.body);
+      return;
+    }
+    if (this.controller?.notifiesItself?.()) return;
+    const s = this.core.settings;
+    const looking = this.looking();
+    if ((!a.needs && s.finishedTo === "none") || (s.hideLooking && looking)) return;
     const text = a.body || a.title;
     const name = this.getDisplayText();
-    // An Obsidian notice only where it can be seen: Obsidian in front, and
-    // this terminal's own window showing. Minimized while another vault's
-    // window had focus, it went to the minimized window unseen.
-    const inFront = this.core.obsidianInFront() && this.pane.doc.visibilityState === "visible";
-    this.attentionLog.push({ how: inFront ? "notice" : "notification", at: Date.now() });
+    const to = a.needs ? s.needsYouTo : s.finishedTo;
+    const how = [toDesktop(to) && "notification", toObsidian(to) && (looking ? "toast" : "notice")].filter(Boolean).join("+");
+    this.attentionLog.push({ how: how || "none", at: Date.now() });
     if (this.attentionLog.length > 200) this.attentionLog.splice(0, 100);
-    if (inFront) {
-      const notice = new Notice(`${name}: ${text}`, 10000);
-      // The whole notice is the click target, not just its text.
-      (notice.messageEl.closest(".notice") ?? notice.messageEl).addEventListener("click", () => this.bringForward());
-    } else {
-      const n = new Notification(a.title || name, { body: a.title && a.title !== name ? `${name}: ${text}` : text, silent: true });
-      n.onclick = () => this.bringForward();
-    }
+    this.core.notify(a.title || name, a.title && a.title !== name ? `${name}: ${text}` : text, () => this.bringForward(), this.noticeKey, a.needs ? "needs" : "finished");
   }
 
-  /**
-   * Whether the program is claude, as far as the terminal can tell: it asked
-   * both the kitty keyboard query and the Program Status Protocol query
-   * (claude 2.1.295 or later does both), and it's the terminal's own program
-   * or has the full screen. Only then are Cmd+C and an image-only Cmd+V sent
-   * on as Super+C and Ctrl+V, which claude was seen to act on.
-   */
   private claudeKeys(): boolean {
     const term = this.term;
     if (!term || !this.readsKittyKeys || !this.status?.asksStatus) return false;
     return this.runningAgent?.id === "claude" || term.buffer.active.type === "alternate";
   }
 
-  /**
-   * Whether Cmd+C and an image-only Cmd+V go on as Super+C and Ctrl+V: to
-   * claude wherever it runs (above), and to the terminal's own program when
-   * its agent profile says it was shown to act on both (Codex, Antigravity).
-   * Never to a program only because it asked for kitty keys: an editor does
-   * too, and Ctrl+V there is visual block mode.
-   */
   private agentKeys(): boolean {
     return this.claudeKeys() || !!this.runningAgent?.agentKeys;
   }
 
-  /** For the self-test. */
   get readsAgentKeys(): boolean {
     return this.agentKeys();
   }
 
-  /** Brings Obsidian, this terminal's window, and the terminal itself forward. */
   bringForward(): void {
     this.core.activateApp();
     this.pane.win.focus();
@@ -2501,17 +2418,9 @@ export class TerminalView extends ItemView {
     this.term?.focus();
   }
 
-  /**
-   * A program that ended abruptly can leave its full-screen buffer, a hidden
-   * cursor, mouse reporting or bracketed paste on; the next program shouldn't
-   * inherit them. The screen's contents and scrollback stay.
-   */
   private resetModes(then: string): void {
     const term = this.term;
     if (!term) return;
-    // Once the program's last output is parsed: leaving the full-screen
-    // buffer also restores the cursor saved on entering it, so it's sent
-    // only when that buffer is showing.
     term.write("", () => {
       if (this.term !== term) return;
       const leave = term.buffer.active.type === "alternate" ? "\x1b[?1049l" : "";
@@ -2519,16 +2428,12 @@ export class TerminalView extends ItemView {
     });
   }
 
-  // --- starting ---
-
-  /** A start began: if it's still going in 5 s, a dim line says which step it's on. */
   private beginSlowStart(): void {
     this.endSlowStart();
     const slow = { timer: 0, step: "starting", shown: false };
     slow.timer = window.setTimeout(() => {
       if (this.slow !== slow || !this.term) return;
       slow.shown = true;
-      // On a row of its own: after a first start's text the cursor can be mid-row, where the line would wrap.
       const fresh = this.term.buffer.active.cursorX > 0 ? "\r\n" : "";
       this.term.write(`${fresh}\x1b[2m${this.slowLine(slow.step)}\x1b[0m`);
     }, SLOW_START_MS);
@@ -2542,17 +2447,12 @@ export class TerminalView extends ItemView {
     if (slow.shown) this.term?.write(`\r\x1b[2K\x1b[2m${this.slowLine(what)}\x1b[0m`);
   }
 
-  /**
-   * The slow-start line, cut to fit one row: a line that wrapped in a
-   * narrow sidebar would leave its first rows behind when erased.
-   */
   private slowLine(step: string): string {
     const text = `[Still starting: ${step}…]`;
     const room = Math.max(4, (this.term?.cols ?? 80) - 1);
     return text.length <= room ? text : `${text.slice(0, room - 2)}…]`;
   }
 
-  /** The start succeeded or failed: its line goes, so it's never left above the prompt. */
   private endSlowStart(): void {
     const slow = this.slow;
     if (!slow) return;
@@ -2561,15 +2461,10 @@ export class TerminalView extends ItemView {
     if (slow.shown) this.term?.write("\r\x1b[2K");
   }
 
-  /** For the self-test: the slow-start line's step while it shows, or null. */
   get slowStartShown(): string | null {
     return this.slow?.shown ? this.slow.step : null;
   }
 
-  /**
-   * zsh's shell integration reported a failure of its own (OSC 7766): the
-   * shell starts again once without it, and a dim line says so.
-   */
   private integrationFailed(): void {
     const l = this.launch;
     if (!this.session || !l?.integration || this.ranProgram) return;
@@ -2580,33 +2475,19 @@ export class TerminalView extends ItemView {
     });
   }
 
-  /** For the self-test: the last retry's outcome, if any. */
   lastRetry: { why: string; line: boolean; notice: boolean } | null = null;
 
-  /**
-   * The agent exited nonzero within 5 s of starting with the terminal's
-   * additions: it's started once more without them. the terminal can't
-   * tell whose settings failed, so the rule is by outcome. If the second
-   * start is still running 5 s later, a dim line names what was dropped; in
-   * a full-screen program's screen, a notice instead, since a line there
-   * would break its drawing. If it fails too, nothing is added.
-   */
   private retryPlain(l: NonNullable<TerminalView["launch"]>): void {
     this.resetModes("");
     this.lastRetry = { why: `exited at once with ${l.added.join(", ")}`, line: false, notice: false };
-    // Explained once the second start runs, whenever that is: at once, or
-    // when a tab hidden meanwhile is shown (start() defers it then).
     this.retryNote = l.added;
     void this.start(l.kind, l.folder, { plain: true });
   }
 
-  /** The notice a retry in a full screen left, for the self-test to see and dismiss. */
-  retryNotice: Notice | null = null;
+  retryNotice: NotificationHandle | null = null;
 
-  /** What the second start dropped, waiting for that start's session. */
   private retryNote: string[] | null = null;
 
-  /** The line, or in a full screen the notice, naming what was dropped, if the second start still runs after 5 s. */
   private explainRetry(second: HelperSession, added: string[]): void {
     window.setTimeout(() => {
       if (this.session !== second || !second.running || !this.term) return;
@@ -2615,26 +2496,19 @@ export class TerminalView extends ItemView {
         this.term.write(`\r\n\x1b[2m[${text}]\x1b[0m\r\n`);
         if (this.lastRetry) this.lastRetry.line = true;
       } else {
-        // A full screen has no line to spare, so a notice, and one that stays
-        // until clicked: the session runs without its tab
-        // state, notifications and pictures, and a notice that faded could go unseen.
         this.retryNotice?.hide();
-        this.retryNotice = new Notice(`${this.getDisplayText()}: ${text} Its tab state, notifications and pictures are off in this session. Click to dismiss.`, 0);
+        this.retryNotice = this.core.notify(this.getDisplayText(), `${text} Its tab state, notifications and pictures are off in this session.`, () => this.bringForward(), this.noticeKey, "info");
         if (this.lastRetry) this.lastRetry.notice = true;
       }
     }, RETRY_WITHIN_MS);
   }
 
-  // --- for a host's controller (host.ts) ---
-
-  /** The gate opens: the program starts once the pane has a size (or at once, for a terminal that starts hidden). */
   releaseStart(): void {
     if (!this.holdStart) return;
     this.holdStart = false;
     this.schedule();
   }
 
-  /** Starts the program again after it ended or a start failed; the host's launch decides what runs. Nothing while one runs or starts. */
   restart(): void {
     if (this.session || this.starting) return;
     this.ended = false;
@@ -2642,17 +2516,14 @@ export class TerminalView extends ItemView {
     void this.start(this.kind);
   }
 
-  /** Whether a program is running in the terminal now. */
   get running(): boolean {
     return !!this.session?.running;
   }
 
-  /** The running program's pid (the program's, not the helper's), or 0. */
   get programPid(): number {
     return this.session?.programPid ?? 0;
   }
 
-  /** Writes to the program as typed, without the input event: the host's own writes never count as the user's. */
   write(data: string): boolean {
     if (!this.session) return false;
     this.cancelReset();
@@ -2660,29 +2531,48 @@ export class TerminalView extends ItemView {
     return true;
   }
 
-  /** Whether the program asked for bracketed paste, so a long write can go in as one paste. */
   get bracketedPaste(): boolean {
     return !!this.term?.modes.bracketedPasteMode;
   }
 
-  /** Pastes as the user would (Cmd+V): bracketed when the program asked for it, and it counts as the user's input. */
   paste(text: string): void {
     if (!this.term || !text) return;
     this.cancelReset();
+    if (!this.opened) {
+      const body = text.replace(/\r?\n/g, "\r");
+      this.term.input(this.term.modes.bracketedPasteMode ? `\x1b[200~${body}\x1b[201~` : body, true);
+      return;
+    }
     this.term.paste(text);
   }
 
-  /** Focuses the terminal. */
   focus(): void {
     this.term?.focus();
   }
 
-  /** How many rows the screen shows. */
+  inputLooksEmpty(): boolean | null {
+    const term = this.term;
+    if (!term || !this.isClaude() || this.keyQueue.busy || this.unparsed > 0 || this.heldOutput.length) return null;
+    const box = this.promptBox();
+    if (!box) return null;
+    const buf = term.buffer.active;
+    const cell = buf.getNullCell();
+    for (let y = box.top + 1; y < box.bottom; y++) {
+      const line = buf.getLine(y);
+      if (!line) return null;
+      for (let x = y === box.top + 1 ? box.mark + 1 : 0; x < term.cols; x++) {
+        const c = line.getCell(x, cell);
+        if (!c) return null;
+        if (c.getChars().trim() && !c.isDim()) return false;
+      }
+    }
+    return true;
+  }
+
   get screenRows(): number {
     return this.term?.rows ?? 0;
   }
 
-  /** The last rows up to the bottom of the screen, as text, one line per row: cheap, for watching what a program shows now. */
   screenTail(rows = 40): string {
     const term = this.term;
     const buf = term?.buffer.active;
@@ -2696,27 +2586,26 @@ export class TerminalView extends ItemView {
     return withoutPlaceholders(out.join("\n"));
   }
 
-  /** Text selected in the terminal, or "". */
   get selection(): string {
     return this.term?.hasSelection() ? withoutPlaceholders(this.term.getSelection()) : "";
   }
 
-  /** The tab's name or icon changed (the host's). */
   refreshHeader(): void {
     this.updateHeader();
   }
 
-  /** The title the program last set (OSC 0 or 2), or "". */
   get programTitle(): string {
     return this.status?.title ?? "";
   }
 
-  /** The program's state as the terminal knows it, or null before the first start. */
   get state(): ProgramState | null {
     return this.status?.shown ?? null;
   }
 
-  /** A dim line of the host's in the terminal, on a row of its own (not sent to the program). */
+  get backgroundWork(): boolean {
+    return !!this.status?.backgroundWork;
+  }
+
   print(text: string): void {
     const term = this.term;
     if (!term) return;
@@ -2730,25 +2619,17 @@ export class TerminalView extends ItemView {
   }
 }
 
-/** A dropped file's path on disk, through Electron (File.path is gone in recent Electron). */
 function filePath(file: File): string {
   try {
     const electron = (window as unknown as { require(m: string): { webUtils?: { getPathForFile(f: File): string } } }).require("electron");
     const p = electron.webUtils?.getPathForFile(file);
     if (p) return p;
   } catch {
-    // no Electron; the older property below
+    /* empty */
   }
   return (file as File & { path?: string }).path ?? "";
 }
 
-/**
- * A line's whole text from its first row, the rows it wraps onto joined.
- * Each row ends at its last written cell: a wide character that didn't fit
- * at a row's end leaves a cell never written there (empty, where a space
- * the program wrote is " "), which another width doesn't have. Spaces the
- * program wrote stay, so lines that differ only by them don't match.
- */
 function wholeLine(buf: IBuffer, y: number): string {
   let text = "";
   const cell = buf.getNullCell();
@@ -2762,25 +2643,16 @@ function wholeLine(buf: IBuffer, y: number): string {
   return text.trimEnd();
 }
 
-/** A path as one shell word: as is when it's plain, otherwise in single quotes. */
 export function shellQuote(path: string): string {
   return /^[A-Za-z0-9_./:@%+=,-]+$/.test(path) ? path : `'${path.replace(/'/g, "'\\''")}'`;
 }
 
-/** Whether an OSC 7 host is this Mac: empty, localhost, or its own name. */
 function isThisMac(host: string): boolean {
   const h = host.toLowerCase();
   const me = hostname().toLowerCase();
   return !h || h === "localhost" || h === me || h === me.replace(/\.local$/, "") || `${h}.local` === me;
 }
 
-/**
- * Folders an automounter serves. A lookup under one can start a network
- * mount, with DNS and NFS timeouts, and links are looked up on a plain hover,
- * synchronously: hovering a printed /net/host/... path would freeze Obsidian.
- * Paths there are never looked up, so they aren't links. macOS's defaults,
- * plus what /sbin/mount lists as autofs (core.ts).
- */
 const AUTOMOUNTS = new Set(["/net", "/home", "/Network", "/System/Volumes/Data/home", "/System/Volumes/Data/Network"]);
 
 export function noteAutomounts(paths: string[]): void {
@@ -2793,7 +2665,6 @@ export function underAutomount(path: string): boolean {
   return false;
 }
 
-/** Whether a link's text is its address, give or take a trailing slash. */
 export function sameAddress(text: string, uri: string): boolean {
   const bare = (s: string) => s.replace(/\/+$/, "");
   return !!text && bare(text) === bare(uri);
@@ -2809,7 +2680,6 @@ function exists(path: string): boolean {
   }
 }
 
-/** A short, quiet tone for the bell, when the setting is on. */
 function playBell(win: Window): void {
   try {
     const Ctx = (win as unknown as { AudioContext: typeof AudioContext }).AudioContext;
@@ -2824,7 +2694,7 @@ function playBell(win: Window): void {
     osc.stop(ctx.currentTime + 0.16);
     osc.onended = () => void ctx.close();
   } catch {
-    // no audio; the tab mark still shows
+    /* empty */
   }
 }
 
