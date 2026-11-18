@@ -4,7 +4,7 @@ Run Claude Code, Codex, or Antigravity in a tab in Obsidian. Every session is li
 
 Desktop and macOS only, for now.
 
-![Agent Manager: the session sidebar beside a note, and a Claude Code session in the conversation view](assets/screenshot.png)
+![Agent Manager: the session sidebar with two agent profiles beside a note, and a Claude Code session in the conversation view](assets/screenshot.png)
 
 ## What it does
 
