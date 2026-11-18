@@ -886,15 +886,34 @@ button.agent-manager-find-earlier.is-shown {
 	margin-bottom: 36px;
 }
 .agent-manager-designed-tools {
-	margin: 0 0 12px;
+	margin: 20px 0;
+}
+.agent-manager-transcript-assistant + .agent-manager-designed-tools {
+	margin-top: -16px;
+}
+.agent-manager-transcript-overlay.is-designed .agent-manager-transcript-user + .agent-manager-designed-tools {
+	margin-top: -4px;
 }
 .agent-manager-designed-tools > summary {
 	list-style: none;
-	display: inline-flex;
+	display: flex;
 	align-items: center;
 	gap: 4px;
-	color: var(--text-muted);
+	color: color-mix(in srgb, var(--text-muted) 55%, var(--text-faint));
 	cursor: pointer;
+}
+.agent-manager-designed-tools-thumbs {
+	display: flex;
+	gap: 6px;
+	margin-left: auto;
+	padding-left: 12px;
+}
+.agent-manager-designed-tools-thumbs img.agent-manager-designed-thumb {
+	max-width: 72px;
+	max-height: 44px;
+	min-width: 32px;
+	min-height: 24px;
+	border-radius: 6px;
 }
 .agent-manager-designed-tools > summary::-webkit-details-marker {
 	display: none;
@@ -1180,14 +1199,14 @@ button.agent-manager-designed-model.is-staged {
 	right: auto;
 	left: 0;
 }
-.agent-manager-transcript-assistant:hover .agent-manager-designed-msg-actions,
+.agent-manager-transcript-assistant.is-turn-end:hover .agent-manager-designed-msg-actions,
 .agent-manager-transcript-user:hover .agent-manager-designed-msg-actions,
 .agent-manager-designed-msg-actions:focus-within {
 	opacity: 1;
 }
 button.agent-manager-designed-copy {
 	display: inline-flex;
-	padding: 2px 4px;
+	padding: 2px 4px 2px 0;
 	height: 20px;
 }
 button.agent-manager-designed-copy svg {
@@ -1226,6 +1245,68 @@ button.agent-manager-designed-latest svg {
 	height: 28px;
 	object-fit: cover;
 	border-radius: 6px;
+}
+.agent-manager-transcript-overlay.is-designed .agent-manager-designed-welcome {
+	box-sizing: border-box;
+	width: calc(100% - 2 * clamp(16px, 6%, 44px));
+	max-width: calc(760px - 2 * clamp(16px, 6%, 44px));
+	margin: 24px auto 4px;
+	padding: 14px 18px;
+	display: flex;
+	align-items: center;
+	gap: 18px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 10px;
+}
+.agent-manager-designed-welcome-art {
+	margin: 0;
+	padding: 0;
+	background: none;
+	border: none;
+	font-family: var(--font-monospace);
+	font-size: 16px;
+	line-height: 1.05;
+	color: #d97757;
+}
+.agent-manager-designed-welcome-text {
+	font-family: var(--font-monospace);
+	font-size: var(--font-ui-small);
+	line-height: 1.45;
+}
+.agent-manager-designed-welcome-title {
+	font-weight: var(--font-bold);
+	color: var(--text-normal);
+}
+.agent-manager-designed-welcome-version {
+	font-weight: normal;
+	color: var(--text-muted);
+}
+.agent-manager-designed-welcome-line {
+	color: var(--text-muted);
+}
+.agent-manager-designed-welcome-rc {
+	text-decoration: underline dotted;
+	text-underline-offset: 3px;
+	cursor: pointer;
+}
+.agent-manager-designed-welcome-rc.is-on {
+	color: var(--color-green);
+}
+.agent-manager-designed-welcome-rc.is-off {
+	color: var(--text-faint);
+}
+.agent-manager-designed-sent-images {
+	display: flex;
+	flex-wrap: wrap;
+	justify-content: flex-end;
+	gap: 8px;
+	margin: 0 0 8px auto;
+	max-width: 80%;
+}
+.agent-manager-designed-sent-images img.agent-manager-designed-thumb {
+	max-width: min(100%, 480px);
+	max-height: 360px;
+	border-radius: 12px;
 }
 .agent-manager-designed-sent-files {
 	display: flex;
@@ -3140,4 +3221,42 @@ details.agent-manager-designed-subagent.is-asking .agent-manager-designed-subage
 .agent-manager-designed-subagent-report:not(:empty) {
 	border-top: 1px solid var(--background-modifier-border);
 	padding-top: 8px;
+}
+
+details.agent-manager-designed-peer[open] .agent-manager-designed-subagent-latest {
+	display: none;
+}
+details.agent-manager-designed-peer > summary {
+	align-items: flex-start;
+}
+details.agent-manager-designed-peer > summary > .agent-manager-designed-subagent-icon,
+details.agent-manager-designed-peer > summary > .agent-manager-designed-subagent-status,
+details.agent-manager-designed-peer > summary > .agent-manager-designed-subagent-chevron {
+	display: flex;
+	align-items: center;
+	min-height: 20px;
+}
+details.agent-manager-designed-peer .agent-manager-designed-subagent-report {
+	font-size: var(--font-text-size);
+}
+
+.agent-manager-transcript-overlay.is-designed .agent-manager-transcript-user.is-command .agent-manager-transcript-usertext {
+	font-family: var(--font-monospace);
+	font-size: 0.9em;
+}
+.agent-manager-designed-output pre {
+	margin: 0;
+	max-height: 320px;
+	overflow: auto;
+	font-size: var(--font-ui-smaller);
+	white-space: pre-wrap;
+}
+.agent-manager-transcript-overlay.is-designed a.agent-manager-designed-path {
+	color: var(--link-color);
+	text-decoration: underline;
+	text-decoration-color: color-mix(in srgb, var(--link-color) 45%, transparent);
+	text-underline-offset: 2px;
+}
+.agent-manager-transcript-overlay.is-designed a.agent-manager-designed-path:hover {
+	text-decoration-color: var(--link-color);
 }

@@ -52,6 +52,7 @@ export interface PluginData {
   agents?: unknown;
   currentAgent?: unknown;
   defaultAgent?: unknown;
+  noAgentProfile?: boolean;
   sessionAgents?: Record<string, string>;
   sessionLaunchAgents?: Record<string, string>;
   sessionSources?: Record<string, ContextSource>;
@@ -201,6 +202,7 @@ export interface TranscriptIO {
   read(rel: string): Promise<string>;
   create(rel: string, content: string): Promise<void>;
   append(rel: string, content: string): Promise<void>;
+  write?(rel: string, content: string): Promise<void>;
   ensureDir(rel: string): Promise<void>;
   list(rel: string): Promise<string[]>;
   setProps?(rel: string, props: Record<string, string | number>): Promise<void>;
@@ -208,6 +210,7 @@ export interface TranscriptIO {
 
 export interface TranscriptWrite {
   added: number;
+  inserted?: number;
   path: string;
 }
 
@@ -223,6 +226,9 @@ export interface TranscriptWriteOptions {
   lockDir?: string;
   sidechain?: boolean;
   commands?: boolean;
+  dryRun?: boolean;
+  onlyExisting?: boolean;
+  backup?: (rel: string, text: string) => Promise<void>;
 }
 
 export interface TranscriptMeta {
@@ -241,10 +247,13 @@ export type TranscriptImage = { data: string; mediaType: string };
 export type TranscriptPart =
   | { kind: "md"; text: string }
   | { kind: "tool"; name: string; hint: string; command?: string; id?: string; agent?: { description: string; type: string } }
-  | { kind: "result"; toolUseId: string; images: TranscriptImage[]; agentId?: string; report?: string; error?: boolean; async?: boolean; durationMs?: number; stopped?: boolean };
+  | { kind: "result"; toolUseId: string; images: TranscriptImage[]; agentId?: string; report?: string; error?: boolean; async?: boolean; durationMs?: number; stopped?: boolean }
+  | { kind: "peer"; dir: "in"; name: string; text: string }
+  | { kind: "event"; text: string }
+  | { kind: "output"; text: string };
 export type TranscriptMessage =
   | { role: "boundary"; uuid: string }
-  | { role: "user"; text: string; uuid: string | undefined; at?: string; images?: TranscriptImage[] }
+  | { role: "user"; text: string; uuid: string | undefined; at?: string; images?: TranscriptImage[]; command?: boolean; parent?: string }
   | { role: "assistant"; parts: TranscriptPart[]; uuid: string | undefined; at?: string; model?: string; effort?: string };
 
 export type { TerminalSettings };

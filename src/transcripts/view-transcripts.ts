@@ -5,6 +5,7 @@ import { escapeRiskyHtml, imagesToLinks, markImageLinks, neutralizeFences, sanit
 import type { Session } from "../sessions/controller.js";
 import type { TranscriptMessage, TranscriptWrite } from "../types.js";
 import { notice } from "../vault-terminal/notice";
+import { findPaths } from "../vault-terminal/links";
 
 const FIRST_CHUNK = 512 * 1024;
 const EARLIER_CHUNK = 256 * 1024;
@@ -72,6 +73,7 @@ class ViewTranscriptMethods {
     if (this._transcriptRefreshing) return;
     this._transcriptRefreshing = true;
     try { await this._refreshTranscript(); } catch { /* empty */ } finally { this._transcriptRefreshing = false; }
+    if (this._transcriptOpen && this.designedOn()) { this._syncWelcome(); this._syncDesigned(); }
     if (this._transcriptOpen) this._refreshAgentCards();
   }
   async _refreshTranscript(this: Session): Promise<void> {
@@ -79,7 +81,7 @@ class ViewTranscriptMethods {
     const file = await this._transcriptFile();
     const body = this._transcriptBodyEl;
     if (!file) {
-      if (!this._transcriptFilePath && !body.hasChildNodes()) {
+      if (!this.designedOn() && !this._transcriptFilePath && !body.hasChildNodes()) {
         body.createDiv({ cls: "agent-manager-transcript-notice", text: "No transcript yet. It appears after the session's first turn." });
       }
       return;
@@ -167,7 +169,36 @@ class ViewTranscriptMethods {
     if (!ok) { el.createDiv({ cls: "agent-manager-transcript-usertext", text }); return; }
     sanitizeRendered(holder);
     el.append(...Array.from(holder.childNodes));
-    if (images) this._vaultImagesIn(el);
+    if (images) { this._vaultImagesIn(el); this._linkPaths(el); }
+  }
+  _linkPaths(this: Session, el: HTMLElement): void {
+    const view = this.view;
+    const walker = el.doc.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+    const nodes: Text[] = [];
+    for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+      const parent = (n as Text).parentElement;
+      if (parent && !parent.closest("a, pre")) nodes.push(n as Text);
+    }
+    for (const node of nodes) {
+      const text = node.data;
+      if (!/[./]/.test(text)) continue;
+      const found = findPaths(text, (p) => view.pathExists(p));
+      if (!found.length) continue;
+      const frag = createFragment();
+      let at = 0;
+      for (const f of found) {
+        if (f.start > at) frag.append(text.slice(at, f.start));
+        const line = Number(text.slice(f.end).match(/^:(\d+)/)?.[1] ?? 0) || undefined;
+        const a = frag.createEl("a", { cls: "agent-manager-designed-path", text: text.slice(f.start, f.end), attr: { href: "#", "aria-label": view.pathTip(f.path).text } });
+        a.addEventListener("click", (e) => {
+          e.preventDefault();
+          if (view.opensLink(e)) view.openFoundPath(f.path, line);
+        });
+        at = f.end;
+      }
+      if (at < text.length) frag.append(text.slice(at));
+      node.replaceWith(frag);
+    }
   }
   async _appendTranscriptMessage(this: Session, m: TranscriptMessage, target: HTMLElement | null | undefined = this._transcriptBodyEl): Promise<void> {
     const el = target;
@@ -192,7 +223,7 @@ class ViewTranscriptMethods {
         } catch {
           mdEl.setText(p.text);
         }
-      } else {
+      } else if (p.kind === "tool") {
         box.createDiv({ cls: "agent-manager-transcript-tool", text: p.hint ? `${p.name} · ${p.hint}` : p.name });
       }
     }
@@ -225,10 +256,12 @@ class ViewTranscriptMethods {
         if (m) await this._appendTranscriptMessage(m, holder);
       }
       if (this._transcriptGen !== gen || this._transcriptBodyEl !== body) return;
+      if (this.designedOn()) this._dropDeadEarlier(holder, body);
       const before = scroller.scrollHeight;
       const marker = this._transcriptEarlierEl;
       const anchor = marker && marker.parentElement === body ? marker.nextSibling : body.firstChild;
       while (holder.firstChild) body.insertBefore(holder.firstChild, anchor);
+      if (this.designedOn()) this._mergeTurnRows(body);
       this._transcriptStart = from;
       if (from === 0) { marker?.remove(); this._transcriptEarlierEl = null; }
       scroller.scrollTop += scroller.scrollHeight - before;
@@ -302,6 +335,7 @@ class ViewTranscriptMethods {
         ...this.plugin.transcriptTarget(agentId),
         agent: this.plugin.agentById(agentId)?.name || null,
         findExisting: () => this.plugin.findTranscriptNoteBySessionId(ownId)?.path || null,
+        backup: (rel: string, text: string) => this.plugin._transcriptBackup(rel, text),
         backend,
         sessionTitle: this.sessionTitle,
         sessionId: this._ownSessionId(),
@@ -389,3 +423,4 @@ class ViewTranscriptMethods {
   }
 }
 export { ViewTranscriptMethods };
+

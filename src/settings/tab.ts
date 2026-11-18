@@ -482,8 +482,17 @@ class AgentManagerSettingsTab extends import_obsidian.PluginSettingTab {
             p.refreshAgentColors();
             this.update();
           })), { visible: on }),
-        row("Default agent profile", "The profile a session started from a note or folder outside every agent folder starts with, and where sessions with no agent profile are listed in the sidebar. Left at no agent profile, the sidebar's switch offers that too.", (st) => st.addDropdown((dd) => {
-          dd.addOption("", "No agent profile");
+        row("No agent profile", "Lets a session have no agent profile: the default below can then be No agent profile, and while it is, the sidebar's switch offers it beside your profiles. Off, every session starts as a profile, the first one unless you pick another default.", (st) => st.addToggle((toggle) => toggle
+          .setValue(p.noAgentOn())
+          .onChange(async (value) => {
+            if (value) p.pluginData.noAgentProfile = true; else delete p.pluginData.noAgentProfile;
+            await this.save();
+            this.rerenderSidebars();
+            p.paintAgentTabs();
+            this.update();
+          })), { visible: on, aliases: ["no profile", "none"] }),
+        row("Default agent profile", "The profile a session started from a note or folder outside every agent folder starts with, and where sessions with no agent profile are listed in the sidebar. With No agent profile on, it can be that, and the sidebar's switch then offers it too.", (st) => st.addDropdown((dd) => {
+          if (p.noAgentOn()) dd.addOption("", "No agent profile");
           for (const a of p.agentList()) dd.addOption(a.id, a.name);
           dd.setValue(p.defaultAgent()?.id || "");
           dd.onChange(async (value) => {

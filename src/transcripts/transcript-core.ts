@@ -33,6 +33,7 @@ interface ClaudeLine {
   type?: unknown;
   subtype?: unknown;
   uuid?: string;
+  parentUuid?: unknown;
   timestamp?: string;
   isCompactSummary?: unknown;
   isVisibleInTranscriptOnly?: unknown;
@@ -43,8 +44,10 @@ interface ClaudeLine {
   version?: unknown;
   cwd?: unknown;
   toolUseResult?: unknown;
-  origin?: { kind?: unknown } | null;
+  origin?: ClaudeOrigin | null;
+  attachment?: { type?: unknown; prompt?: unknown; commandMode?: unknown; origin?: ClaudeOrigin | null; timestamp?: unknown; delivery_id?: unknown } | null;
 }
+interface ClaudeOrigin { kind?: unknown; name?: unknown; from?: unknown; body?: unknown }
 interface ClaudeUsage {
   input_tokens?: unknown;
   cache_creation_input_tokens?: unknown;
@@ -110,6 +113,42 @@ function claudeImages(blocks: unknown): TranscriptImage[] {
   }
   return out;
 }
+const ANSI = new RegExp(String.fromCharCode(27) + "\\[[0-9;]*m", "g");
+export function claudeCommand(text: string): { kind: "input" | "local" | "shell"; text: string } | null {
+  const t = text.trim();
+  const tag = (name: string) => new RegExp(`<${name}>([\\s\\S]*?)</${name}>`).exec(t)?.[1] ?? null;
+  if (/^(?:<command-(name|message|args)>[\s\S]*?<\/command-\1>\s*)+$/.test(t)) {
+    const name = (tag("command-name") ?? "").trim() || "/" + (tag("command-message") ?? "").trim();
+    if (name === "/") return null;
+    const args = (tag("command-args") ?? "").trim();
+    return { kind: "input", text: args ? `${name} ${args}` : name };
+  }
+  const bash = /^<bash-input>([\s\S]*)<\/bash-input>$/.exec(t);
+  if (bash) return { kind: "input", text: `! ${bash[1].trim()}` };
+  const local = /^<local-command-stdout>([\s\S]*)<\/local-command-stdout>$/.exec(t);
+  if (local) {
+    const out = local[1].replace(ANSI, "").trim();
+    return { kind: "local", text: /^Compacted \(ctrl\+o/.test(out) ? "" : out };
+  }
+  const shell = /^(?:<bash-stdout>([\s\S]*)<\/bash-stdout>)?\s*(?:<bash-stderr>([\s\S]*)<\/bash-stderr>)?$/.exec(t);
+  if (shell && (shell[1] !== undefined || shell[2] !== undefined)) {
+    const out = [shell[1], shell[2]].filter((x) => x && x.trim()).join("\n").replace(ANSI, "").trimEnd();
+    return { kind: "shell", text: out };
+  }
+  return null;
+}
+function claudePeer(origin: ClaudeOrigin, raw: string, uuid: string | undefined, at: unknown, results: boolean): TranscriptMessage | null {
+  const from = typeof origin.from === "string" ? origin.from : "";
+  const name = typeof origin.name === "string" && origin.name ? origin.name : from || "another session";
+  const unwrapped = raw.replace(/^[\s\S]*?<(agent-message|cross-session-message)[^>]*>\n?([\s\S]*?)\n?<\/\1>\s*$/, "$2");
+  const body = (typeof origin.body === "string" && origin.body.trim() ? origin.body : unwrapped).trim();
+  const handback = /^\[Subagent hand-back\]/.test(body);
+  if (!body || results && handback) return null;
+  const said = handback ? body.replace(/^[\s\S]*?The report follows:\n?/, "").split("\n").map((l) => l.replace(/^ {2}/, "")).join("\n").trim() : body;
+  if (results) return { role: "assistant", parts: [{ kind: "peer", dir: "in", name, text: body }], uuid, ...timeOf(at) };
+  const label = handback ? `Report from sub-agent ${name}` : `Message from ${name}`;
+  return { role: "assistant", parts: [{ kind: "md", text: `_${label.replace(/[_*`]/g, "")}:_\n\n${(said || body).split("\n").map((l) => "> " + l).join("\n")}` }], uuid, ...timeOf(at) };
+}
 const REPORT_MAX = 20000;
 function parseClaudeTranscript(o: ClaudeLine, sidechain = false, results = false): TranscriptMessage | null {
   if (o.isSidechain && !sidechain) return null;
@@ -117,7 +156,33 @@ function parseClaudeTranscript(o: ClaudeLine, sidechain = false, results = false
     return { role: "boundary", uuid: o.uuid || ("boundary-" + (o.timestamp || "")) };
   }
   if (o.isCompactSummary || o.isVisibleInTranscriptOnly) return null;
+  if (o.type === "attachment") {
+    const a = o.attachment;
+    if (!a || a.type !== "queued_command") return null;
+    let promptText = typeof a.prompt === "string" ? a.prompt : "";
+    if (isBlocks(a.prompt)) {
+      promptText = a.prompt.filter((b) => b && b.type === "text" && typeof b.text === "string").map((b) => String(b?.text ?? "")).join("\n\n");
+      if (!promptText.trim() && a.prompt.some((b) => b && b.type === "image")) promptText = "(image)";
+    }
+    if (!promptText.trim()) return null;
+    const at = typeof a.timestamp === "string" ? a.timestamp : o.timestamp;
+    const uuid = o.uuid || `queued-${String(typeof a.delivery_id === "string" ? a.delivery_id : at || "")}-${promptText.length}`.replace(/[^\w.-]/g, "_");
+    if (a.commandMode === "task-notification") {
+      if (!results) return null;
+      const r = parseClaudeTranscript({ type: "user", uuid, timestamp: at, message: { content: promptText } }, sidechain, true);
+      return r && r.role === "assistant" && r.parts.every((pt) => pt.kind === "result") ? r : null;
+    }
+    if (a.commandMode !== undefined && a.commandMode !== "prompt") return null;
+    if (a.origin && a.origin.kind === "peer") return claudePeer(a.origin, promptText, uuid, at, results);
+    if (a.origin && a.origin.kind !== "human") return null;
+    const qParent = typeof o.parentUuid === "string" ? o.parentUuid : undefined;
+    return { role: "user", text: promptText.trim(), uuid, ...timeOf(at), ...(qParent ? { parent: qParent } : {}) };
+  }
   if (o.type === "user") {
+    if (o.origin && o.origin.kind === "peer") {
+      const c0 = o.message && o.message.content;
+      return claudePeer(o.origin, typeof c0 === "string" ? c0 : "", o.uuid, o.timestamp, results);
+    }
     if (o.isMeta) return null;
     const c = o.message && o.message.content;
     let text = "";
@@ -140,7 +205,16 @@ function parseClaudeTranscript(o: ClaudeLine, sidechain = false, results = false
       }
       text = c.filter((b) => b && b.type === "text").map((b) => (b as ClaudeBlock).text).join("\n\n");
     }
-    text = (text || "").trim();
+    text = (text || "").replace(/<pasted_content id="([^"]*)">\n?([\s\S]*?)\n?<\/pasted_content(?: id="\1")?>/g, "$2").trim();
+    const cmd = claudeCommand(text);
+    if (cmd) {
+      const parent = typeof o.parentUuid === "string" ? o.parentUuid : undefined;
+      if (cmd.kind === "input") return { role: "user", text: cmd.text, uuid: o.uuid, ...timeOf(o.timestamp), command: true, ...(parent ? { parent } : {}) };
+      if (!cmd.text) return null;
+      if (!results && cmd.kind === "shell") return { role: "user", text: "```\n" + cmd.text.replace(/`{3,}/g, "``") + "\n```", uuid: o.uuid, ...timeOf(o.timestamp) };
+      const part: TranscriptPart = results ? (cmd.kind === "shell" ? { kind: "output", text: cmd.text } : { kind: "event", text: cmd.text }) : { kind: "md", text: `*${cmd.text.replace(/[*_`]/g, "").replace(/<!--/g, "&lt;!--")}*` };
+      return { role: "assistant", parts: [part], uuid: o.uuid, ...timeOf(o.timestamp) };
+    }
     if (results && /^<task-notification>/.test(text)) {
       const tag = (t: string) => new RegExp(`<${t}>([\\s\\S]*?)</${t}>`).exec(text)?.[1]?.trim() ?? "";
       const toolUseId = tag("tool-use-id");
@@ -151,7 +225,9 @@ function parseClaudeTranscript(o: ClaudeLine, sidechain = false, results = false
       return { role: "assistant", parts: [{ kind: "result", toolUseId, images: [], ...(agentId ? { agentId } : {}), report: (tag("result") || (toolUseId ? "" : tag("summary"))).slice(0, REPORT_MAX), ...(status && status !== "completed" ? { error: true } : {}), ...(status === "stopped" || status === "killed" ? { stopped: true } : {}), ...(Number.isFinite(ms) && ms > 0 ? { durationMs: ms } : {}) }], uuid: o.uuid, ...timeOf(o.timestamp) };
     }
     const images = results ? claudeImages(c) : [];
-    return text || images.length ? { role: "user", text, uuid: o.uuid, ...timeOf(o.timestamp), ...(images.length ? { images } : {}) } : null;
+    if (!text && !images.length && isBlocks(c) && c.some((b) => b && b.type === "image")) text = "(image)";
+    const parent = typeof o.parentUuid === "string" ? o.parentUuid : undefined;
+    return text || images.length ? { role: "user", text, uuid: o.uuid, ...timeOf(o.timestamp), ...(images.length ? { images } : {}), ...(parent ? { parent } : {}) } : null;
   }
   if (o.type === "assistant") {
     const c = o.message && o.message.content;
@@ -576,15 +652,15 @@ async function writeDurableTranscript(io: TranscriptIO, opts: TranscriptWriteOpt
       try { if (noteSessionId(await io.read(existing)) === fullId) relPath = existing; } catch { /* empty */ }
     }
     if (!relPath) relPath = await findNoteFor(io, dir, names, fullId);
+    if (!relPath && (opts.onlyExisting || opts.dryRun)) return null;
     const seen = new Set<string | undefined>();
     const made = !relPath;
     let had: Record<string, string> = {};
+    let noteText = "";
     if (relPath) {
-      const existing = await io.read(relPath);
+      const existing = noteText = await io.read(relPath);
       had = frontmatterValues(existing);
-      const re = /<!--\s*pl-rec:([^\s>]+)\s*-->/g;
-      let mm: RegExpExecArray | null;
-      while ((mm = re.exec(existing)) !== null) seen.add(mm[1]);
+      for (const seg of noteSegments(existing)) if (seg.key !== undefined) seen.add(seg.key);
     } else {
       const shortTaken = names.some((n) => n.endsWith("(" + noteIdKey(fullId) + ").md"));
       relPath = dir + "/" + transcriptBasename(fullId, title, shortTaken) + ".md";
@@ -592,24 +668,111 @@ async function writeDurableTranscript(io: TranscriptIO, opts: TranscriptWriteOpt
       await io.ensureDir(dir);
       await io.create(relPath, transcriptHeader(title, fullId, backend, opts.source || null, opts.agent || null, meta));
     }
-    let addition = "";
-    let added = 0;
+    const block = (m: TranscriptMessage, i: number) => "\n<!-- pl-rec:" + m.uuid + " -->\n" + transcriptMessageToMarkdown(m, decos[i]) + "\n";
+    const missing: number[] = [];
+    let lastSeen = -1;
+    const queued = new Set<string | undefined>();
     msgs.forEach((m, i) => {
-      if (seen.has(m.uuid)) return;
-      seen.add(m.uuid);
-      added++;
-      addition += "\n<!-- pl-rec:" + m.uuid + " -->\n" + transcriptMessageToMarkdown(m, decos[i]) + "\n";
+      if (seen.has(m.uuid)) { lastSeen = i; return; }
+      if (queued.has(m.uuid)) return;
+      queued.add(m.uuid);
+      missing.push(i);
     });
-    if (addition) await io.append(relPath, addition);
-    if (!made && io.setProps) {
+    const early = missing.filter((i) => i < lastSeen);
+    let added = missing.length;
+    let inserted = io.write ? early.length : 0;
+    if (opts.dryRun) return { added, inserted, path: relPath };
+    const append = async (list: number[]) => {
+      const addition = list.map((i) => block(msgs[i], i)).join("");
+      if (!addition) return;
+      if (opts.onlyExisting && opts.backup) await opts.backup(relPath, noteText);
+      await io.append(relPath, addition);
+    };
+    if (inserted && io.write) {
+      let backedUp = !opts.backup;
+      if (opts.backup) {
+        try { await opts.backup(relPath, noteText); backedUp = true; } catch (e) { console.error("[Agent Manager] a transcript note's backup failed; its missing records wait:", relPath, e); }
+      }
+      if (!backedUp) {
+        await append(missing.filter((i) => i > lastSeen));
+        added -= early.length;
+        inserted = 0;
+      } else {
+        let base = noteText;
+        let wrote = false;
+        for (let tries = 0; tries < 3 && !wrote; tries++) {
+          const now = await io.read(relPath);
+          if (now !== base) {
+            if (opts.backup) await opts.backup(relPath, now);
+            base = now;
+            continue;
+          }
+          await io.write(relPath, mergeRecords(base, msgs, missing.filter((i) => { const k = msgs[i].uuid; return !noteSegments(base).some((s) => s.key === k); }), block));
+          wrote = true;
+        }
+        if (!wrote) { added = 0; inserted = 0; }
+      }
+    } else await append(missing);
+    if (!made && io.setProps && !opts.onlyExisting) {
       const props: Record<string, string | number> = { ...metaProps(meta), generated_by: GENERATED_BY };
       if (had.started) delete props.started;
       if (Object.entries(props).some(([k, v]) => had[k] !== String(v))) {
         try { await io.setProps(relPath, props); } catch { /* empty */ }
       }
     }
-    return { added, path: relPath };
+    return { added, inserted, path: relPath };
   });
+}
+
+function noteSegments(note: string): { key?: string; text: string }[] {
+  const out: { key?: string; text: string }[] = [];
+  const marker = /^<!--\s*pl-rec:([^\s>]+)\s*-->\r?$/;
+  const lines = note.split("\n");
+  let start = 0;
+  let pos = 0;
+  let key: string | undefined;
+  let fence = "";
+  let youNext = false;
+  for (let li = 0; li < lines.length; li++) {
+    const line = lines[li];
+    const lineStart = pos;
+    pos += line.length + 1;
+    if (fence) {
+      if (line.replace(/\r$/, "") === fence) fence = "";
+      continue;
+    }
+    const m = li > 0 ? marker.exec(line) : null;
+    if (m) {
+      out.push({ ...(key !== undefined ? { key } : {}), text: note.slice(start, lineStart - 1) });
+      start = lineStart - 1;
+      key = m[1];
+      youNext = true;
+      continue;
+    }
+    if (youNext && line.startsWith("**You:**")) {
+      for (let lj = li + 1; lj < lines.length && lj < li + 4; lj++) {
+        const f = /^(`{3,})\r?$/.exec(lines[lj]);
+        if (f) { fence = f[1]; for (let k = li + 1; k <= lj; k++) pos += lines[k].length + 1; li = lj; break; }
+      }
+    }
+    if (line.trim()) youNext = false;
+  }
+  out.push({ ...(key !== undefined ? { key } : {}), text: note.slice(start) });
+  return out;
+}
+
+function mergeRecords(note: string, msgs: TranscriptMessage[], missing: number[], block: (m: TranscriptMessage, i: number) => string): string {
+  const index = new Map<string | undefined, number>();
+  msgs.forEach((m, i) => { if (!index.has(m.uuid)) index.set(m.uuid, i); });
+  let out = "";
+  let next = 0;
+  for (const { key, text: part } of noteSegments(note)) {
+    const at = key !== undefined ? index.get(key) : undefined;
+    if (at !== undefined) while (next < missing.length && missing[next] < at) { out += block(msgs[missing[next]], missing[next]); next++; }
+    out += part;
+  }
+  while (next < missing.length) { out += block(msgs[missing[next]], missing[next]); next++; }
+  return out;
 }
 
 export {
@@ -634,4 +797,6 @@ export {
   stripContinuationSuffix,
   deriveTitle,
   writeDurableTranscript,
+  mergeRecords,
+  noteSegments,
 };

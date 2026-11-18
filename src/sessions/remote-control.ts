@@ -19,6 +19,7 @@ class RemoteControlMethods {
     this._rc = state;
     this._rcId = id;
     this._syncRcDot();
+    this._syncWelcome?.();
   }
   _buildRcDot(this: Session, strip: HTMLElement): void {
     this._rcEl = null;

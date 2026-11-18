@@ -1,10 +1,11 @@
 
-import { fs, import_obsidian, path } from "../externals.js";
+import { fs, import_obsidian, os, path } from "../externals.js";
 import { prettyModelName } from "../sessions/transcript-files.js";
 import { notice } from "../vault-terminal/notice";
 import { userSetting } from "../vault-terminal/claude";
 import { holdsImage } from "../vault-terminal/input-channel";
 import { CLI_BACKENDS, REAL_BACKENDS, STRIP_COMMANDS } from "../constants/backends.js";
+import { agentSlug } from "../context/agents.js";
 import { PLAN_MODES, TOKEN_VAR, allowBody, approvalHooks, cardKind, denyBody, describeTool, doneMatches, planAllowBody, planDenyBody, questionAnswer, questionsOf } from "./approvals-core.js";
 import type { PermissionAsk } from "./approvals-core.js";
 import type { ApprovalTab, HeldAsk } from "./approval-server.js";
@@ -51,14 +52,14 @@ class DesignedViewMethods {
   _buildStripSwitch(this: Session, strip: HTMLElement): void {
     const sw = strip.createSpan({ cls: "agent-manager-strip-switch", attr: { role: "group", "aria-label": "View" } });
     sw.createSpan({ cls: "agent-manager-strip-switch-thumb" });
-    for (const [view, icon, tip] of [["designed", "message-square", "Conversation view"], ["terminal", "terminal", "Terminal"]] as const) {
+    for (const [view, icon, tip] of [["terminal", "terminal", "Terminal"], ["designed", "message-square", "Conversation view"]] as const) {
       const b = sw.createSpan({ cls: "agent-manager-strip-switch-opt", attr: { role: "button", "data-view": view, "aria-label": tip } });
       import_obsidian.setIcon(b, icon);
       this._stripTip(b, view === "designed" ? "Conversation view" : "Terminal");
       b.addEventListener("click", () => {
         if (b.hasClass("is-active")) return;
         sw.addClass("is-sliding");
-        sw.setCssProps({ "--agent-manager-view-i": view === "designed" ? "0" : "1" });
+        sw.setCssProps({ "--agent-manager-view-i": view === "designed" ? "1" : "0" });
         for (const o of Array.from(sw.querySelectorAll(".agent-manager-strip-switch-opt"))) o.toggleClass("is-active", o === b);
         const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
         window.setTimeout(() => {
@@ -76,7 +77,7 @@ class DesignedViewMethods {
     const sw = this._designedSwitchEl;
     if (!sw?.isConnected) return;
     const designed = this._transcriptOpen || this._designedPending();
-    sw.setCssProps({ "--agent-manager-view-i": designed ? "0" : "1" });
+    sw.setCssProps({ "--agent-manager-view-i": designed ? "1" : "0" });
     for (const b of Array.from(sw.querySelectorAll<HTMLElement>(".agent-manager-strip-switch-opt"))) b.toggleClass("is-active", b.dataset.view === (designed ? "designed" : "terminal"));
   }
 
@@ -111,12 +112,19 @@ class DesignedViewMethods {
         el.createDiv({ cls: "agent-manager-designed-event", text: "Stopped" });
         return;
       }
-      const box = el.createDiv({ cls: "agent-manager-transcript-msg agent-manager-transcript-user" });
-      this._renderUserText(box, m.text);
-      if (m.images?.length) {
-        const row = box.createDiv({ cls: "agent-manager-designed-sent-files" });
-        for (const img of m.images) this._mediaThumb(row.createDiv({ cls: "agent-manager-designed-chip is-image" }), { image: img });
+      if (m.parent) this._dropDeadBranch(el, m.parent, m.uuid);
+      this._endTurn(el);
+      const above = el.createDiv({ cls: "agent-manager-designed-sent-images" });
+      const box = el.createDiv({ cls: "agent-manager-transcript-msg agent-manager-transcript-user" + (m.command ? " is-command" : "") });
+      for (const e of [above, box]) {
+        if (m.parent) e.dataset.parent = m.parent;
+        if (m.uuid) e.dataset.uuid = m.uuid;
       }
+      if (m.command) box.createDiv({ cls: "agent-manager-transcript-usertext", text: m.text });
+      else this._renderUserText(box, m.text, above);
+      for (const img of m.images ?? []) this._mediaThumb(above, { image: img });
+      if (!above.childElementCount) above.remove();
+      if (!box.childElementCount) { box.remove(); return; }
       this._copyButton(box, m.text.replace(/(?:^|\n\n)Attached:(?: [^\n]+|\n[\s\S]+)$/, ""), m.at);
       return;
     }
@@ -127,7 +135,7 @@ class DesignedViewMethods {
         const reply = el.createDiv({ cls: "agent-manager-transcript-msg agent-manager-transcript-assistant" });
         const handing = el === this._transcriptBodyEl ? this._streamLanded(p.text, m.at, reply) : null;
         const mdEl = reply.createDiv({ cls: "agent-manager-transcript-md" });
-        this._copyButton(reply, p.text, m.at);
+        this._turnRow(el, reply, p.text, m.at);
         try {
           await this._renderReply(p.text, mdEl, true);
         } catch {
@@ -138,6 +146,20 @@ class DesignedViewMethods {
         box = null;
         this._toolImages(el, p.images);
         if (p.agentId || p.error) this._agentResult(p.toolUseId || this._agentCardBySub(p.agentId ?? ""), { report: p.report ?? "", error: !!p.error, stopped: !!p.stopped, background: !!p.async, at: m.at, durationMs: p.durationMs });
+      } else if (p.kind === "peer") {
+        box = null;
+        this._endTurn(el);
+        await this._peerBubble(el, p, m.at);
+      } else if (p.kind === "event") {
+        box = null;
+        el.createDiv({ cls: "agent-manager-designed-event", text: p.text });
+      } else if (p.kind === "output") {
+        box = null;
+        const group = el.createEl("details", { cls: "agent-manager-designed-tools agent-manager-designed-output" });
+        const summary = group.createEl("summary");
+        summary.createSpan({ cls: "agent-manager-designed-tools-label", text: "Output" });
+        import_obsidian.setIcon(summary.createSpan({ cls: "agent-manager-designed-tools-chevron" }), "chevron-right");
+        group.createDiv({ cls: "agent-manager-designed-tools-list" }).createEl("pre", { text: p.text });
       } else if (p.agent && p.id) {
         box = null;
         this._agentCard(el, p.id, p.agent.description, p.agent.type, m.at);
@@ -155,6 +177,32 @@ class DesignedViewMethods {
     }
   }
 
+  _turnRow(this: Session, el: HTMLElement, reply: HTMLElement, text: string, at?: string): void {
+    let turn = TURNS.get(el);
+    if (!turn) TURNS.set(el, turn = { texts: [], reply: null });
+    turn.texts.push(text);
+    turn.reply?.querySelector(":scope > .agent-manager-designed-msg-actions")?.remove();
+    turn.reply = reply;
+    this._copyButton(reply, turn.texts.join("\n\n"), at);
+    if (!this._designedWorking) reply.addClass("is-turn-end");
+  }
+
+  _endTurn(this: Session, el: HTMLElement): void {
+    TURNS.get(el)?.reply?.addClass("is-turn-end");
+    TURNS.set(el, { texts: [], reply: null });
+  }
+
+  _mergeTurnRows(this: Session, body: HTMLElement): void {
+    let last: HTMLElement | null = null;
+    for (const e of Array.from(body.children)) {
+      if (e.matches(".agent-manager-transcript-user")) { last = null; continue; }
+      const row = e.matches(".agent-manager-transcript-assistant") ? e.querySelector<HTMLElement>(":scope > .agent-manager-designed-msg-actions") : null;
+      if (!row) continue;
+      last?.remove();
+      last = row;
+    }
+  }
+
   _copyButton(this: Session, box: HTMLElement, source: string, at?: string): void {
     const row = box.createDiv({ cls: "agent-manager-designed-msg-actions" });
     const copy = row.createEl("button", { cls: "clickable-icon agent-manager-designed-copy", attr: { "aria-label": "Copy" } });
@@ -164,7 +212,7 @@ class DesignedViewMethods {
     copy.addEventListener("click", () => { void navigator.clipboard.writeText(source).then(() => { import_obsidian.setIcon(copy, "check"); window.setTimeout(() => import_obsidian.setIcon(copy, "copy"), 1200); }, () => {}); });
   }
 
-  _renderUserText(this: Session, box: HTMLElement, text: string): void {
+  _renderUserText(this: Session, box: HTMLElement, text: string, above?: HTMLElement): void {
     const m = /(?:^|\n\n)Attached:(?: ([^\n]+)|\n([\s\S]+))$/.exec(text);
     const cwd = this.workingDir || this.plugin.getVaultPath();
     const paths = m ? (m[1] ?? m[2] ?? "").split("\n").map((p) => p.trim()).filter(Boolean) : [];
@@ -173,20 +221,116 @@ class DesignedViewMethods {
     const body = m && isFiles ? text.slice(0, m.index) : text;
     if (body.trim()) box.createDiv({ cls: "agent-manager-transcript-usertext", text: body });
     if (!m || !isFiles) return;
-    const chips = box.createDiv({ cls: "agent-manager-designed-sent-files" });
+    let chipRow: HTMLElement | null = null;
+    const chips = () => (chipRow ??= box.createDiv({ cls: "agent-manager-designed-sent-files" }));
     for (const p of paths) {
       const file = fileOf(p);
       if (file instanceof import_obsidian.TFile && /^(png|jpe?g|gif|webp|svg|bmp)$/i.test(file.extension)) {
-        this._mediaThumb(chips.createDiv({ cls: "agent-manager-designed-chip is-image", attr: { title: p } }), { file }, file.name);
+        this._mediaThumb(above ?? chips(), { file }, file.name);
         continue;
       }
-      const chip = chips.createDiv({ cls: "agent-manager-designed-chip", attr: { title: p } });
+      const chip = chips().createDiv({ cls: "agent-manager-designed-chip", attr: { title: p } });
       import_obsidian.setIcon(chip.createSpan({ cls: "agent-manager-designed-chip-icon" }), "file");
       chip.createSpan({ cls: "agent-manager-designed-chip-name", text: p.replace(/^.*[\\/]/, "") });
       if (file instanceof import_obsidian.TFile) {
         chip.addClass("is-link");
         chip.addEventListener("click", () => { void this.plugin.openInNotesArea(file); });
       }
+    }
+  }
+
+  _designedHasMessages(this: Session): boolean {
+    return !!this._transcriptBodyEl?.querySelector(".agent-manager-transcript-msg, .agent-manager-transcript-user, .agent-manager-designed-tools, .agent-manager-designed-subagent");
+  }
+
+  _syncWelcome(this: Session): void {
+    const host = this.transcriptHost;
+    const body = this._transcriptBodyEl;
+    if (!host || !body) return;
+    const show = this.designedOn();
+    let el = this._designedWelcomeEl;
+    if (!show) { el?.remove(); this._designedWelcomeEl = null; return; }
+    if (!el || !el.isConnected) {
+      el = createDiv({ cls: "agent-manager-designed-welcome" });
+      host.insertBefore(el, body);
+      this._designedWelcomeEl = el;
+    }
+    const cli = this.activeBackendKey || this.getBackendKey();
+    const model = this._designedModelEl?.querySelector(".agent-manager-designed-model-label")?.textContent?.trim();
+    const effort = this._designedModelEl?.querySelector(".agent-manager-designed-model-effort")?.textContent?.trim();
+    const version = this._welcomeVersion();
+    const plan = cli === "claude" ? claudePlan() : "";
+    const agent = this.plugin.agentById(this.agentId());
+    const home = os.homedir();
+    const dir = this.workingDir || this.plugin.getVaultPath();
+    const second = [model && model !== "Model" ? `${model}${effort ? ` with ${effort.toLowerCase()} effort` : ""}` : "", plan].filter(Boolean).join(" · ");
+    const third = [agent && cli === "claude" ? `@${agentSlug(agent)}` : "", dir.startsWith(home) ? "~" + dir.slice(home.length) : dir].filter(Boolean).join(" · ");
+    const rc = cli === "claude" && (this._rc === "on" || this._rc === "off") ? this._rc : "";
+    const key = [cli, version, second, third, rc].join("|");
+    if (el.dataset.key === key) return;
+    el.dataset.key = key;
+    el.empty();
+    el.dataset.backend = cli;
+    if (cli === "claude") el.createEl("pre", { cls: "agent-manager-designed-welcome-art", text: " \u2590\u259B\u2588\u2588\u2588\u259C\u258C\n\u259D\u259C\u2588\u2588\u2588\u2588\u2588\u259B\u2598\n  \u2598\u2598 \u259D\u259D" });
+    const text = el.createDiv({ cls: "agent-manager-designed-welcome-text" });
+    const title = text.createDiv({ cls: "agent-manager-designed-welcome-title", text: CLI_BACKENDS[cli].label });
+    if (version) title.createSpan({ cls: "agent-manager-designed-welcome-version", text: ` v${version}` });
+    if (second) text.createDiv({ cls: "agent-manager-designed-welcome-line", text: second });
+    const last = text.createDiv({ cls: "agent-manager-designed-welcome-line", text: third });
+    if (rc) {
+      if (third) last.appendText(" · ");
+      const link = last.createSpan({ cls: `agent-manager-designed-welcome-rc is-${rc}`, text: "/rc", attr: { role: "button", "aria-label": rc === "on" ? "Remote Control is on. Click for Claude's Remote Control panel" : "Remote Control is off. Click for Claude's Remote Control panel" } });
+      link.addEventListener("click", () => { void this.sendRemoteControl(); });
+    }
+  }
+
+  _welcomeVersion(this: Session): string {
+    const file = this._transcriptFilePath;
+    if (!file) return "";
+    if (this._welcomeVersionOf?.file === file && this._welcomeVersionOf.version) return this._welcomeVersionOf.version;
+    let version = "";
+    try {
+      const fd = fs.openSync(file, "r");
+      try { const buf = Buffer.alloc(65536); version = /"version":"(\d+\.\d+\.\d+)"/.exec(buf.subarray(0, fs.readSync(fd, buf, 0, buf.length, 0)).toString("utf8"))?.[1] ?? ""; } finally { fs.closeSync(fd); }
+    } catch { /* empty */ }
+    this._welcomeVersionOf = { file, version };
+    return version;
+  }
+
+  async _peerBubble(this: Session, el: HTMLElement, p: { name: string; text: string }, at?: string): Promise<void> {
+    const card = el.createEl("details", { cls: "agent-manager-designed-subagent agent-manager-designed-peer is-done" });
+    const summary = card.createEl("summary");
+    import_obsidian.setIcon(summary.createSpan({ cls: "agent-manager-designed-subagent-icon" }), "mail");
+    const head = summary.createDiv({ cls: "agent-manager-designed-subagent-head" });
+    head.createDiv({ cls: "agent-manager-designed-subagent-title", text: `Message from ${p.name}` });
+    head.createDiv({ cls: "agent-manager-designed-subagent-latest", text: p.text.split("\n").find((l) => l.trim())?.trim() ?? "" });
+    const when = at ? timeTip(at) : "";
+    if (when) summary.createSpan({ cls: "agent-manager-designed-subagent-status", text: when });
+    import_obsidian.setIcon(summary.createSpan({ cls: "agent-manager-designed-subagent-chevron" }), "chevron-down");
+    const md = card.createDiv({ cls: "agent-manager-designed-subagent-report" }).createDiv({ cls: "agent-manager-transcript-md" });
+    try { await this._renderReply(p.text, md, true); } catch { md.setText(p.text); }
+  }
+
+  _dropDeadBranch(this: Session, el: HTMLElement, parent: string, uuid: string | undefined): void {
+    if (!/^[\w-]+$/.test(parent)) return;
+    let n: Element | null = Array.from(el.querySelectorAll<HTMLElement>(`:scope > [data-parent="${parent}"]`)).find((b) => b.dataset.uuid !== uuid) ?? null;
+    while (n) {
+      const next: Element | null = n.nextElementSibling;
+      if (!n.matches(".is-pending")) n.remove();
+      n = next;
+    }
+  }
+
+  _dropDeadEarlier(this: Session, holder: HTMLElement, body: HTMLElement): void {
+    for (const e of Array.from(holder.querySelectorAll<HTMLElement>(":scope > [data-parent]"))) {
+      if (!e.isConnected || e.parentElement !== holder) continue;
+      const parent = e.dataset.parent ?? "";
+      if (!/^[\w-]+$/.test(parent)) continue;
+      const live = Array.from(body.querySelectorAll<HTMLElement>(`:scope > [data-parent="${parent}"]`)).some((b) => b.dataset.uuid !== e.dataset.uuid);
+      if (!live) continue;
+      let n: Element | null = e;
+      while (n) { const next: Element | null = n.nextElementSibling; n.remove(); n = next; }
+      return;
     }
   }
 
@@ -398,6 +542,7 @@ class DesignedViewMethods {
   _fitBox(this: Session): void {
     const box = this._designedBoxEl;
     if (!box) return;
+    this._syncAction();
     box.setCssStyles({ height: "auto" });
     const line = parseFloat(getComputedStyle(box).lineHeight) || 20;
     const pad = box.offsetHeight - box.clientHeight + parseFloat(getComputedStyle(box).paddingTop) + parseFloat(getComputedStyle(box).paddingBottom);
@@ -417,7 +562,8 @@ class DesignedViewMethods {
     const cards = this._cards?.size ?? 0;
     const readOnly = this.designedReadOnly();
     const hooked = this._approvalHooked === true;
-    const working = (hooked || readOnly) && state === "working" && !cards;
+    const starting = !cards && !this._designedHasMessages() && (!!this._opening || this._openingSent === true) && state !== "waiting" && state !== "finished" && state !== "idle";
+    const working = ((hooked || readOnly) && state === "working" && !cards) || starting;
     this._designedFooterEl.toggleClass("is-unhooked", !hooked && !readOnly);
     this._designedUnhookedEl?.toggleClass("is-shown", !hooked && !readOnly);
     const blocked = hooked ? this._hooksBlockedBy : null;
@@ -430,13 +576,20 @@ class DesignedViewMethods {
     this._designedBannerEl?.toggleClass("is-shown", prompt);
     const who = CLI_BACKENDS[this.activeBackendKey || this.getBackendKey()]?.label ?? "Claude";
     this._designedBannerEl?.querySelector(".agent-manager-designed-banner-text")?.setText(state === "waiting" ? `${who} is asking something in the terminal.` : "The terminal is showing something for you.");
+    this._designedWorking = working;
+    this._syncAction();
+  }
+
+  _syncAction(this: Session): void {
     const action = this._designedStopEl;
-    if (action && action.hasClass("is-stop") !== working) {
-      action.toggleClass("is-stop", working);
+    if (!action) return;
+    const stop = !!this._designedWorking && !this._designedBoxEl?.value.trim() && !this._attachments?.length;
+    if (action.hasClass("is-stop") !== stop) {
+      action.toggleClass("is-stop", stop);
       action.disabled = false;
-      action.setAttribute("aria-label", working ? "Stop" : "Send");
-      import_obsidian.setIcon(action, working ? "square" : "arrow-up");
-    } else if (action && !action.querySelector("svg")) import_obsidian.setIcon(action, "arrow-up");
+      action.setAttribute("aria-label", stop ? "Stop" : "Send");
+      import_obsidian.setIcon(action, stop ? "square" : "arrow-up");
+    } else if (!action.querySelector("svg")) import_obsidian.setIcon(action, "arrow-up");
   }
 
   _checkTerminalPrompt(this: Session): void {
@@ -473,6 +626,7 @@ class DesignedViewMethods {
     if (state === "exited") this._clearCards();
     else if (state === "finished" || state === "error") {
       this._clearCards(true);
+      if (this._transcriptBodyEl) this._endTurn(this._transcriptBodyEl);
       const since = this._turnStartedAt ?? 0;
       this._pending = (this._pending ?? []).filter((el) => {
         if (Number(el.dataset.at ?? 0) < since) { el.remove(); return false; }
@@ -618,6 +772,7 @@ class DesignedViewMethods {
   _renderChips(this: Session): void {
     const el = this._designedChipsEl;
     if (!el) return;
+    this._syncAction();
     for (const u of this._chipUrls?.splice(0) ?? []) URL.revokeObjectURL(u);
     el.empty();
     const list = this._attachments ?? [];
@@ -1135,6 +1290,8 @@ function timeTip(at: string): string {
   return t.isSame(window.moment(), "day") ? t.format("LT") : t.format("ll, LT");
 }
 
+const TURNS = new WeakMap<HTMLElement, { texts: string[]; reply: HTMLElement | null }>();
+
 const TOOL_COUNTS = new WeakMap<HTMLElement, Map<string, { n: number; hint: string }>>();
 
 function toolKind(tool: string): string {
@@ -1168,3 +1325,16 @@ function toolSentence(counts: Map<string, { n: number; hint: string }>): string 
 }
 
 export { DesignedViewMethods };
+
+let planCache: string | null = null;
+function claudePlan(): string {
+  if (planCache !== null) return planCache;
+  planCache = "";
+  try {
+    const j = JSON.parse(fs.readFileSync(path.join(os.homedir(), ".claude.json"), "utf8")) as { oauthAccount?: { organizationType?: unknown } };
+    const t = j.oauthAccount?.organizationType;
+    const names: Record<string, string> = { claude_max: "Claude Max", claude_pro: "Claude Pro", claude_team: "Claude Team", claude_enterprise: "Claude Enterprise" };
+    if (typeof t === "string" && names[t]) planCache = names[t];
+  } catch { /* empty */ }
+  return planCache;
+}

@@ -4,6 +4,34 @@ All notable changes to Agent Manager are recorded here, in [Keep a Changelog](ht
 
 ## [Unreleased]
 
+## [1.6.1] - 2026-11-18
+
+### Added
+
+- **Claude Code's header at the top of the conversation view**, as its terminal draws it: the mascot, version, model and effort, your plan, the agent profile, and the folder, ending in `/rc`, green while Remote Control is on and gray while it's off, which opens Claude's Remote Control panel when clicked. A session that has just started shows it with a Working row while its opening is on the way, instead of saying there's no transcript yet.
+- **Messages from other sessions show in the conversation view**, each as a card like a sub-agent's: an envelope, "Message from" and the session's name, its first line and time, and the whole message when opened. A message that came while the session was idle shows too, and is now in the transcript note. A message this session sends stays a tool line, as in the terminal.
+- **File paths in Claude's replies are links in the conversation view**, as they are in the terminal: a file that exists, or a note in the vault by its path or name, opens on a click or Cmd+click, as "Open links with" is set. Paths in code blocks stay text.
+- **Check and repair older transcript notes.** Notes written before this release can be missing messages sent while Claude was working. "Check transcript notes for missing messages" changes nothing and writes a report of which Claude Code notes are missing them; "Repair transcript notes (put missing messages in place)" puts each back where it belongs and reports what changed. A copy of every note it changes is kept first, in a hidden `.backup` folder inside the transcripts folder.
+
+### Changed
+
+- **No agent profile is now a switch of its own**, off by default, on the Agent profiles page. Off, every session starts with a profile (the first one, unless you pick another default), sessions with no profile are listed under that default, and the sidebar's switch and Change agent profile… offer only your profiles. On, it works as in 1.6.0: the default can be No agent profile, and the sidebar's switch offers it while it is. **If you used No agent profile in 1.6.0, turn this on to get it back.**
+- **The strip's ticket icon is back** before the session's name: a click opens the session's ticket (or the note or folder it started from; a menu when it has several tickets), and a right-click lists the same places to open as the name's menu: the ticket, note, or folder, then its overviews and reads.
+- **The strip's view switch has the terminal on the left** and the conversation on the right; in 1.6.0 it was the other way around.
+- **Renaming a ticket renames the sessions started from it** that are open in a tab and still carry its old name: in the tab, the sidebar, and, for a running Claude session, Claude's own name for it. A name you gave a session yourself stays.
+- **While Claude works, the send button is Stop only while the box is empty**: type, and it's the send arrow again (the message is queued, as in Claude Code); clear the box, and it's Stop.
+- **The folded tool line sits evenly between paragraphs, in a fainter gray**, as in the Claude app.
+- **One copy button and time per response**, under Claude's last paragraph of text, as in the Claude app, not one under each part; it copies the whole response's text and shows on hover once the response has ended.
+- **Images in the conversation view sit where the Claude app puts them.** Images you send or paste stand above your message rather than inside it, and an image Claude reads is a small thumbnail at the end of the tool line, which stays one line.
+
+### Fixed
+
+- **Slash and `!` commands in the conversation view show as you typed them** (`/wrap`, `/model claude-sonnet-4-6`, `! ls`), not as Claude's tags; a built-in command's output ("Set model to …") is a quiet line, and a `!` command's output folds like a tool line. Transcript notes get the same from now on.
+- **A message you cancel as it sends, or rewind past, leaves the conversation view** when the next one replaces it, as it leaves the terminal.
+- **A file path longer than the terminal's width is a link.** Claude cuts a path too long for its row in the middle, at the last column, and the terminal now reads it whole, as it already did web addresses.
+- **A long message no longer shows Claude's pasted-content tags** in the conversation view or its transcript note, and no longer stays grayed out as unsent.
+- **A message you send while Claude is working** is in its transcript note, and the conversation view shows it where Claude took it rather than leaving it grayed out at the bottom as unsent. Transcript notes also keep messages from sub-agents and other sessions, labeled with who sent them, and a message that was only an image. A background sub-agent that finishes while Claude is working ends its card. From now on, a note missing a message gets it in its place when it's next written, not at the end, with a copy of the note kept in the same `.backup` folder first.
+
 ## [1.6.0] - 2026-11-17
 
 The conversation view and pop-out mode release. The conversation view shows a Claude Code session as a chat interface rather than a terminal window: the terminal still runs underneath, but the conversation view makes it easier to interact with Claude. Pop-out mode puts Agent Manager's sidebar and tabs in a window of its own, so the main window is left for your Obsidian notes. Also a color for each agent profile, searchable settings on pages of their own, richer transcript notes, clearer notices, and one kind of scheduled run.

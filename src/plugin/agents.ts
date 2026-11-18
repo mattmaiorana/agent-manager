@@ -51,7 +51,11 @@ class AgentMethods {
   }
   defaultAgent(this: AgentManagerPlugin): AgentDef | null {
     const v = this.pluginData.defaultAgent;
-    return typeof v === "string" ? (this.agentList().find((a) => a.id === v) || null) : null;
+    const set = typeof v === "string" ? (this.agentList().find((a) => a.id === v) || null) : null;
+    return set ?? (this.noAgentOn() ? null : this.agentList()[0] ?? null);
+  }
+  noAgentOn(this: AgentManagerPlugin): boolean {
+    return this.pluginData.noAgentProfile === true;
   }
   agentHomes(this: AgentManagerPlugin): { id: string; home: string }[] {
     return this.agentList().filter((a) => a.home !== null).map((a) => ({ id: a.id, home: a.home as string }));

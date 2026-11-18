@@ -185,11 +185,17 @@ class VaultTerminalPlugin extends import_obsidian.Plugin {
         return to ? `${to}/` : null;
       };
       let changed = false;
+      const oldName = oldPath.replace(/^.*\//, "").replace(/\.md$/, "");
+      const newName = file.path.replace(/^.*\//, "").replace(/\.md$/, "");
+      const renamesTicket = file instanceof import_obsidian.TFile && file.extension === "md" && oldName !== newName && this.isTicketNote(file.path);
       for (const leaf of this.sessionLeaves()) {
         const v = this.sessionOf(leaf);
         if (v) {
           const note = moved(v._notePath), folder = moved(v._folderPath);
           if (note) { v._notePath = note; changed = true; }
+          if (note && renamesTicket && v.sessionTitle === oldName) {
+            void v._liveSessionId().then((sessionId) => sessionId ? v.applyRename({ sessionId, title: oldName, backend: v.getBackendKey(), displayName: oldName }, newName) : false).then((ok) => { if (ok) this.refreshBrowsers(); }).catch(() => {});
+          }
           if (folder) { v._folderPath = folder; changed = true; }
           const ctxFrom = movedSource(v._contextSource?.from);
           if (ctxFrom && v._contextSource) { v._contextSource = { ...v._contextSource, from: ctxFrom }; changed = true; }
@@ -202,6 +208,10 @@ class VaultTerminalPlugin extends import_obsidian.Plugin {
         this.updateSavedSession(leaf, (fields: SavedSessionState) => {
           const note = moved(fields.notePath), folder = moved(fields.folderPath);
           if (note) fields.notePath = note;
+          if (note && renamesTicket && fields.sessionTitle === oldName) {
+            fields.sessionTitle = newName;
+            if (fields.sessionId) { (this.pluginData.sessionNames ??= {})[fields.sessionId] = newName; void this.savePluginData().then(() => { this.invalidateSessionIndex(); this.refreshBrowsers(); }); }
+          }
           if (folder) fields.folderPath = folder;
           const ctxFrom = movedSource(fields.contextSource?.from);
           if (ctxFrom && fields.contextSource) fields.contextSource = { ...fields.contextSource, from: ctxFrom };
@@ -351,6 +361,16 @@ class VaultTerminalPlugin extends import_obsidian.Plugin {
       id: "import-session-transcript",
       name: "Import a session's transcript",
       callback: () => this.importSessionFlow()
+    });
+    this.addCommand({
+      id: "check-transcript-notes",
+      name: "Check transcript notes for missing messages",
+      callback: () => { void this.repairTranscriptNotes(true); }
+    });
+    this.addCommand({
+      id: "repair-transcript-notes",
+      name: "Repair transcript notes (put missing messages in place)",
+      callback: () => { void this.repairTranscriptNotes(false); }
     });
     this.addCommand({
       id: "close-session-tab",

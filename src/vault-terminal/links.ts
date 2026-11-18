@@ -115,6 +115,7 @@ export interface FoundPath {
 const WORD_RE = /(?:[^\s"'`‘’“”<>[\]{}|]|(?<=[\p{L}\p{N}])['’](?=[\p{L}\p{N}]))+/gu;
 const NO_JOIN = /["`‘“”<>[\]{}|\t]|(?<![\p{L}\p{N}])['’]|['’](?![\p{L}\p{N}])/u;
 const MAX_SPACES = 24;
+const MAX_EDGES = 4;
 
 function trimPath(word: string): { path: string; lead: number } {
   let path = word;
@@ -180,7 +181,7 @@ export function pathsEnding(paths: Iterable<string>, partial: string): string[] 
   return found;
 }
 
-export function findPaths(text: string, exists: (path: string) => boolean): FoundPath[] {
+export function findPaths(text: string, exists: (path: string) => boolean, edges: ReadonlySet<number> = new Set()): FoundPath[] {
   const found: FoundPath[] = [];
   const checked = new Map<string, boolean>();
   const has = (path: string): boolean => {
@@ -196,11 +197,27 @@ export function findPaths(text: string, exists: (path: string) => boolean): Foun
     for (let j = Math.min(words.length - 1, i + MAX_SPACES); j >= i && !best; j--) {
       const run = text.slice(w.start, words[j].end);
       if (NO_JOIN.test(run)) continue;
-      const { path, lead } = trimPath(run);
-      for (const p of /['’]s$/i.test(path) ? [path, path.slice(0, -2)] : [path]) {
-        if (p && p !== "/" && looksLikePath(p) && has(p)) {
-          best = { start: w.start + lead, end: w.start + lead + p.length, path: p };
-          break;
+      const cut = [...edges].filter((e) => e > w.start && e < words[j].end).slice(0, MAX_EDGES);
+      const readings: { run: string; at: number[] }[] = [];
+      for (let mask = (1 << cut.length) - 1; mask >= 0; mask--) {
+        let glued = "";
+        const at: number[] = [];
+        for (let k = w.start; k < words[j].end; k++) {
+          const e = cut.indexOf(k);
+          if (e >= 0 && mask & (1 << e)) continue;
+          glued += text[k];
+          at.push(k);
+        }
+        readings.push({ run: glued, at });
+      }
+      for (const reading of readings) {
+        if (best) break;
+        const { path, lead } = trimPath(reading.run);
+        for (const p of /['’]s$/i.test(path) ? [path, path.slice(0, -2)] : [path]) {
+          if (p && p !== "/" && looksLikePath(p) && has(p)) {
+            best = { start: reading.at[lead], end: reading.at[lead + p.length - 1] + 1, path: p };
+            break;
+          }
         }
       }
     }

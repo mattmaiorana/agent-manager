@@ -24,7 +24,7 @@ class SessionActionMethods {
     menu.addItem((item) => item.setTitle("Change agent profile…").setIcon("folder-input").onClick(() => {
       const cur = this.plugin.recordedAgentId(sessionId) ?? "";
       const choices = agents.filter((a) => a.id !== cur).map((a) => ({ id: a.id, name: a.name }));
-      if (this.plugin.agentById(cur)) choices.push({ id: "", name: "No agent profile" });
+      if (this.plugin.agentById(cur) && this.plugin.noAgentOn()) choices.push({ id: "", name: "No agent profile" });
       if (!choices.length) { notice("No other agent profile to change to"); return; }
       const effect = "Filed under it, its transcript note moved to the profile's folder. The conversation keeps the instructions it started with.";
       new ChoicePickerModal(this.app, choices, {

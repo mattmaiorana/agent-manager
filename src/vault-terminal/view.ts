@@ -2250,11 +2250,11 @@ export class TerminalView extends ItemView {
       ),
     );
     const now = Date.now();
-    const key = `${this.folder}\0${text}`;
+    const key = `${this.folder}\0${[...edges].join(",")}\0${text}`;
     const kept = this.pathsKept.get(key);
     let found = kept && now - kept.at < PATHS_KEPT_MS ? kept.found : null;
     if (!found) {
-      found = findPaths(text, (p) => exists(this.resolve(p)) || this.core.vaultNotes(p).length > 0);
+      found = findPaths(text, (p) => this.pathExists(p), edges);
       if (this.pathsKept.size >= PATHS_KEPT_MAX) this.pathsKept.clear();
       this.pathsKept.set(key, { at: now, found });
     }
@@ -2264,25 +2264,54 @@ export class TerminalView extends ItemView {
           text: l.path,
           range,
           hover: (event) => {
-            const abs = this.resolve(l.path);
-            if (exists(abs)) return this.showLinkTip(event, abs, true);
-            const notes = this.core.vaultNotes(l.path);
-            if (notes.length > 1) this.showLinkTip(event, `${notes.length} files named ${notes[0].name}`, true, true);
-            else this.showLinkTip(event, notes[0]?.path ?? l.path, true);
+            const tip = this.pathTip(l.path);
+            this.showLinkTip(event, tip.text, true, tip.choose);
           },
           leave: () => this.hideLinkTip(),
           activate: (event) => {
             if (!this.core.opensLink(event)) return;
-            const line = Number(text.slice(l.end).match(/^:(\d+)/)?.[1] ?? 0) || undefined;
-            const abs = this.resolve(l.path);
-            if (exists(abs)) this.core.openPath(abs, line);
-            else this.core.openNotes(this.core.vaultNotes(l.path), line);
+            this.openFoundPath(l.path, Number(text.slice(l.end).match(/^:(\d+)/)?.[1] ?? 0) || undefined);
           },
         }),
       ),
     );
     const links = whole ? [...urls, ...paths] : [...urls, ...paths].filter((l) => l.range.start.y <= y && l.range.end.y >= y);
     return links.length ? links : undefined;
+  }
+
+  pathExists(p: string): boolean {
+    const now = Date.now();
+    if (now - this.existsKeptAt > PATHS_KEPT_MS || this.existsKept.size > 5000) {
+      this.existsKept.clear();
+      this.existsKeptAt = now;
+    }
+    let yes = this.existsKept.get(p);
+    if (yes === undefined) {
+      const abs = this.resolve(p);
+      yes = (!/^\/(?:net|Network)\//.test(abs) && exists(abs)) || this.core.vaultNotes(p).length > 0;
+      this.existsKept.set(p, yes);
+    }
+    return yes;
+  }
+  private existsKept = new Map<string, boolean>();
+  private existsKeptAt = 0;
+
+  openFoundPath(p: string, line?: number): void {
+    const abs = this.resolve(p);
+    if (exists(abs)) this.core.openPath(abs, line);
+    else this.core.openNotes(this.core.vaultNotes(p), line);
+  }
+
+  pathTip(p: string): { text: string; choose: boolean } {
+    const abs = this.resolve(p);
+    if (exists(abs)) return { text: abs, choose: false };
+    const notes = this.core.vaultNotes(p);
+    if (notes.length > 1) return { text: `${notes.length} files named ${notes[0].name}`, choose: true };
+    return { text: notes[0]?.path ?? p, choose: false };
+  }
+
+  opensLink(event: MouseEvent): boolean {
+    return this.core.opensLink(event);
   }
 
   private resolve(p: string): string {

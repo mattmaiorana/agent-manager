@@ -190,6 +190,8 @@ class SessionController implements TerminalController {
   declare _designedBannerEl: HTMLElement | null | undefined;
   declare _designedWorkingEl: HTMLElement | null | undefined;
   declare _designedSayEl: HTMLElement | null | undefined;
+  declare _designedWelcomeEl: HTMLElement | null | undefined;
+  declare _welcomeVersionOf: { file: string; version: string } | undefined;
   declare _designedAgentsEl: HTMLElement | null | undefined;
   declare _designedBoxEl: HTMLTextAreaElement | null | undefined;
   declare _pending: HTMLElement[] | undefined;
@@ -200,6 +202,7 @@ class SessionController implements TerminalController {
   declare _sentInputCount: number | undefined;
   declare _designedUnhookedEl: HTMLElement | null | undefined;
   declare _designedStopEl: HTMLButtonElement | null | undefined;
+  declare _designedWorking: boolean | undefined;
   declare _designedSwitchEl: HTMLElement | null | undefined;
   declare _pickOnce: { model?: string; effort?: string } | undefined;
   declare _restartForPick: boolean | undefined;

@@ -30,6 +30,7 @@ class TranscriptMethods {
       read: (rel) => a.read(rel),
       create: (rel, content) => a.write(rel, content),
       append: (rel, content) => a.append(rel, content),
+      write: (rel, content) => a.write(rel, content),
       ensureDir: async (rel) => { try { if (!(await a.exists(rel))) await a.mkdir(rel); } catch { /* empty */ } },
       list: async (rel) => { try { const r = await a.list(rel); return (r.files || []).map((f) => f.split("/").pop() as string  ); } catch { return []; } },
       setProps: async (rel, props) => {
@@ -38,6 +39,67 @@ class TranscriptMethods {
         await this.app.fileManager.processFrontMatter(file, (fm: Record<string, unknown>) => { Object.assign(fm, props); });
       },
     };
+  }
+  async _transcriptBackup(this: AgentManagerPlugin, rel: string, text: string, stamp = ""): Promise<void> {
+    const root = this.folderOf("transcriptsFolder");
+    const day = stamp || new Date().toISOString().slice(0, 10);
+    const time = new Date().toISOString().slice(11, 23).replace(/[:.]/g, "");
+    const dest = `${root}/.backup/${day}/${rel.replace(/\.md$/, "")} ${time}.md`;
+    const a = this.app.vault.adapter;
+    const dir = dest.slice(0, dest.lastIndexOf("/"));
+    if (!(await a.exists(dir))) await a.mkdir(dir);
+    const tmp = dest + ".part";
+    await a.write(tmp, text);
+    if ((await a.read(tmp)) !== text) throw new Error("the backup didn't read back whole");
+    await a.rename(tmp, dest);
+  }
+  async repairTranscriptNotes(this: AgentManagerPlugin, dryRun: boolean): Promise<void> {
+    const root = path.join(os.homedir(), ".claude", "projects");
+    const rd = (d: string) => { try { return fs.readdirSync(d); } catch { return []; } };
+    const files: string[] = [];
+    for (const slug of rd(root)) for (const f of rd(path.join(root, slug))) if (f.endsWith(".jsonl")) files.push(path.join(root, slug, f));
+    const tc = this._tc();
+    const io = this._vaultTranscriptIO();
+    const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-");
+    const rows: { note: string; inserted: number; appended: number }[] = [];
+    let failed = 0;
+    notice({ head: dryRun ? "Checking transcript notes…" : "Repairing transcript notes…", detail: `${files.length} Claude sessions to look at.` });
+    let n = 0;
+    for (const file of files) {
+      if (++n % 10 === 0) await new Promise((r) => window.setTimeout(r, 0));
+      const sessionId = tc.deriveSessionId(file, "claude");
+      const note = this.findTranscriptNoteBySessionId(sessionId);
+      if (!note) continue;
+      const agentId = this.recordedAgentId(sessionId) ?? null;
+      try {
+        const res = await tc.writeDurableTranscript(io, {
+          ...this.transcriptTarget(agentId), backend: "claude", sessionId, transcriptFile: file,
+          agent: this.agentById(agentId)?.name || null, findExisting: () => note.path, onlyExisting: true, dryRun,
+          backup: (rel, text) => this._transcriptBackup(rel, text, `repair-${stamp}`),
+        });
+        if (res && res.added) rows.push({ note: res.path, inserted: res.inserted ?? 0, appended: res.added - (res.inserted ?? 0) });
+      } catch (e) { failed++; console.error("[Agent Manager] transcript repair failed for", note.path, e); }
+    }
+    rows.sort((x, y) => y.inserted - x.inserted || x.note.localeCompare(y.note));
+    const ins = rows.reduce((n, r) => n + r.inserted, 0);
+    const app = rows.reduce((n, r) => n + r.appended, 0);
+    const base = this.folderOf("transcriptsFolder");
+    const report = `${base}/Transcript repair ${dryRun ? "check" : "report"} ${stamp}.md`;
+    const lines = [
+      `# Transcript repair ${dryRun ? "check (nothing changed)" : "report"}, ${stamp}`, "",
+      `${rows.length} notes ${dryRun ? "would change" : "changed"}: ${ins} records ${dryRun ? "would go" : "went"} in their places, and ${app} new ones at the end.${failed ? ` ${failed} failed (the console says why).` : ""}`,
+      dryRun ? "" : `Each changed note's earlier text is in \`${base}/.backup/repair-${stamp}/\`.`, "",
+      "| Note | In place | At the end |", "|---|---|---|",
+      ...rows.map((r) => `| [[${r.note.replace(/\.md$/, "")}]] | ${r.inserted} | ${r.appended} |`),
+    ];
+    try { await this.app.vault.adapter.write(report, lines.join("\n") + "\n"); } catch (e) {
+      console.error("[Agent Manager] the transcript repair's report couldn't be written:", e);
+      notice({ head: "Transcript repair report not written", detail: e instanceof Error ? e.message : String(e) });
+      return;
+    }
+    notice({ head: dryRun ? "Transcript notes checked" : "Transcript notes repaired", detail: `${rows.length} notes, ${ins} records in their places. The report is in ${base}.` });
+    const f = this.app.vault.getFileByPath(report);
+    if (f) await this.openInNotesArea(f);
   }
   listImportableSessions(this: AgentManagerPlugin, backend: BackendKey): ImportableSession[] {
     const files: string[] = [];
@@ -85,6 +147,7 @@ class TranscriptMethods {
       ...this.transcriptTarget(agentId), backend, sessionId, transcriptFile: file,
       agent: this.agentById(agentId)?.name || null,
       findExisting: () => this.findTranscriptNoteBySessionId(sessionId)?.path || null,
+      backup: (rel, text) => this._transcriptBackup(rel, text),
     });
     if (res && (backend === "claude" || backend === "codex")) await this.writeSubagentTranscripts(file, res.path, sessionId, this.agentById(agentId)?.name || null, backend);
     if (res && backend === "antigravity") await this.rememberAntigravitySession(sessionId);
@@ -235,6 +298,7 @@ class TranscriptMethods {
           const res = await tc.writeDurableTranscript(io, {
             transcriptDir: dir, lockDir: dir, backend, sessionId: id, transcriptFile: file,
             sessionTitle: title, source, agent, sidechain: sub.sidechain, commands: this.pluginData.transcriptCommands === true,
+            backup: (rel, text) => this._transcriptBackup(rel, text),
           });
           if (!res) return false;
           const marker = `<!-- pl-sub:${id} -->`;

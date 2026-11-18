@@ -106,8 +106,18 @@ class MediaMethods {
 
   _toolImages(this: Session, el: HTMLElement, images: TranscriptImage[]): void {
     if (!images.length) return;
-    const row = el.createDiv({ cls: "agent-manager-designed-tool-images" });
-    for (const img of images) this._mediaThumb(row, { image: img });
+    let last = el.lastElementChild;
+    while (last?.matches(".is-pending")) last = last.previousElementSibling;
+    const summary = last?.matches(".agent-manager-designed-tools") ? last.querySelector(":scope > summary") : null;
+    let holder: HTMLElement;
+    if (summary) {
+      holder = summary.querySelector<HTMLElement>(".agent-manager-designed-tools-thumbs") ?? (summary as HTMLElement).createSpan({ cls: "agent-manager-designed-tools-thumbs" });
+      if (!holder.dataset.bound) {
+        holder.dataset.bound = "1";
+        holder.addEventListener("click", (e) => { e.preventDefault(); });
+      }
+    } else holder = el.createDiv({ cls: "agent-manager-designed-tool-images" });
+    for (const img of images) this._mediaThumb(holder, { image: img });
   }
 
   _openImageViewer(this: Session, url: string, file: InstanceType<typeof import_obsidian.TFile> | null, label: string): void {
