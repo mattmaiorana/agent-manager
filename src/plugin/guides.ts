@@ -68,7 +68,7 @@ class GuideMethods {
   }
   async _openVaultSetup(this: AgentManagerPlugin, sourceView: LaunchSource): Promise<void> {
     if (!this.guidesDir()) {
-      this.notify("Agent Manager", "The setup guide couldn't be written into the plugin's folder, so setup can't start. Try reloading the plugin.");
+      this.notify({ head: "Setup can't start", detail: "The setup guide couldn't be written into the plugin's folder. Try reloading the plugin." });
       return;
     }
     const leaf = this.setupLeaf();

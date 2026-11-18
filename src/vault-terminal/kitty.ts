@@ -1,4 +1,5 @@
 
+import { createHash } from "crypto";
 import { closeSync, constants, fstatSync, openSync, readSync, realpathSync, statSync, unlinkSync } from "fs";
 import { tmpdir } from "os";
 import { basename, dirname, isAbsolute, join, normalize } from "path";
@@ -48,6 +49,7 @@ export const PICTURE_LIMIT = 64 * 1024 * 1024;
 export const PNG_SHRINK_FACTOR = 4;
 export const PNG_DECODED_SHARE = 4;
 export const STORE_CAP = 256 * 1024 * 1024;
+export const KEY_MOST = 16 * 1024 * 1024;
 export const IMAGE_COST = 4096;
 export const PLACEMENT_COST = 256;
 export const PLACEMENTS_KEPT = 1024;
@@ -436,6 +438,7 @@ export interface StoredImage {
   png: Uint8Array | null;
   decode?: { width: number; height: number };
   rgba: Uint8Array | null;
+  key?: string;
   bytes: number;
   serial: number;
   used: number;
@@ -452,6 +455,7 @@ export interface GraphicsHost {
   dropped?(img: StoredImage, replaced?: boolean): void;
   log?(event: string): void;
   opened?(path: string): void;
+  keys?(): boolean;
 }
 
 const ASSIGNED_BASE = 0xfff00000;
@@ -643,7 +647,8 @@ export class KittyGraphics {
     }
     const replyKeys = new Map([...keys].filter(([k]) => k === "i" || k === "I" || k === "p"));
     const shown = decode ?? { width, height };
-    const img: StoredImage = { reply: { keys: replyKeys, q }, id, number, width, height, png, decode, rgba, bytes: IMAGE_COST + (png ? png.length + shown.width * shown.height * 4 : width * height * 8), serial: ++this.serial, used: this.serial };
+    const key = png && id && png.length <= KEY_MOST && this.host.keys?.() !== false ? createHash("sha1").update(png).digest("hex") : undefined;
+    const img: StoredImage = { reply: { keys: replyKeys, q }, id, number, width, height, png, decode, rgba, key, bytes: IMAGE_COST + (png ? png.length + shown.width * shown.height * 4 : width * height * 8), serial: ++this.serial, used: this.serial };
     if (id) {
       this.images.set(id, img);
       this.stored += img.bytes;

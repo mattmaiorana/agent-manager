@@ -1,12 +1,15 @@
 
-import { StringDecoder, fs, import_obsidian, path } from "../externals.js";
+import { StringDecoder, fs, import_obsidian, os, path } from "../externals.js";
 import { sentFileMarker, sentFilesIn } from "./sent-files.js";
+import { escapeRiskyHtml, imagesToLinks, markImageLinks, neutralizeFences, sanitizeRendered } from "./render-safe.js";
 import type { Session } from "../sessions/controller.js";
 import type { TranscriptMessage, TranscriptWrite } from "../types.js";
 import { notice } from "../vault-terminal/notice";
 
 const FIRST_CHUNK = 512 * 1024;
 const EARLIER_CHUNK = 256 * 1024;
+const RENDER_LIMIT_MS = 4000;
+const MISS_RETRY_MS = 3000;
 const EARLIER_AT = 300;
 class ViewTranscriptMethods {
   toggleTranscript(this: Session): void {
@@ -14,40 +17,62 @@ class ViewTranscriptMethods {
     else void this.openTranscript();
   }
   async openTranscript(this: Session): Promise<void> {
-    if (!this.termHost) return;
+    if (!this.termHost || this._closed) return;
     if (!this.transcriptHost) {
-      this.transcriptHost = this.termHost.createDiv({ cls: "agent-manager-transcript-overlay" });
+      this.transcriptHost = this.termHost.createDiv({ cls: "agent-manager-transcript-overlay", attr: { tabindex: "-1" } });
       this._transcriptBodyEl = this.transcriptHost.createDiv({ cls: "agent-manager-transcript-body markdown-rendered" });
       const host = this.transcriptHost;
+      this.view.registerDomEvent(host, "keydown", (e) => {
+        if (!e.metaKey || e.ctrlKey || e.altKey) return;
+        const k = e.key.toLowerCase();
+        if (k === "f") { e.preventDefault(); e.stopPropagation(); this.openFind(); }
+        else if (k === "g" && this._findBarEl?.isShown()) { e.preventDefault(); e.stopPropagation(); this.findStep(!e.shiftKey); }
+      });
       this.view.registerDomEvent(host, "scroll", () => {
         if (host.scrollTop < EARLIER_AT) void this._loadEarlierTranscript();
       });
     }
     this.transcriptHost.addClass("is-open");
+    if (this.designedOn()) this._buildDesignedFooter();
+    this.transcriptHost.toggleClass("is-designed", !!this._designedFooterEl && this.designedOn());
     this._transcriptOpen = true;
+    if (this.designedOn()) { this.rebuildStrip(); this.app.workspace.requestSaveLayout(); }
     this.transcriptBtnEl?.addClass("is-active");
     this._syncTranscriptIcon();
-    await this._refreshTranscript();
+    await this._refreshOnce();
     if (!this._transcriptOpen) return;
     this.transcriptHost.scrollTop = this.transcriptHost.scrollHeight;
+    if (this.designedOn()) { this._syncDesigned(); if (this.app.workspace.getMostRecentLeaf() === this.leaf) this._designedBoxEl?.focus(); void this._carryFromTerminal(); }
     if (this.transcriptHost.scrollTop < EARLIER_AT) void this._loadEarlierTranscript();
     if (!this._transcriptTimer) {
       this._transcriptTimer = window.setInterval(() => {
-        this._refreshTranscript().catch(() => {});
+        void this._refreshOnce();
+        if (this._designedFooterEl) this._checkTerminalPrompt();
       }, 1000);
     }
   }
-  closeTranscript(this: Session): void {
+  closeTranscript(this: Session, carry = true): void {
     if (this._transcriptTimer) {
       window.clearInterval(this._transcriptTimer);
       this._transcriptTimer = null;
     }
     if (!this._transcriptOpen) return;
+    if (carry && this.designedOn()) this._carryToTerminal();
+    this.closeFind();
+    this._clearStreams();
     this._transcriptOpen = false;
+    if (this._designedFooterEl) this._syncProgress(false);
+    if (this.designedOn()) { this.rebuildStrip(); this.app.workspace.requestSaveLayout(); }
     this._syncTranscriptIcon();
     this.transcriptHost?.removeClass("is-open");
     this.transcriptBtnEl?.removeClass("is-active");
     this.focusTerminal();
+  }
+  async _refreshOnce(this: Session): Promise<void> {
+    if (this._transcriptRefreshing) return;
+    this._transcriptRefreshing = true;
+    try { await this._refreshTranscript(); } catch { /* empty */ } finally { this._transcriptRefreshing = false; }
+    if (this._transcriptOpen) this._refreshAgentCards();
   }
   async _refreshTranscript(this: Session): Promise<void> {
     if (!this._transcriptOpen || !this._transcriptBodyEl) return;
@@ -67,6 +92,11 @@ class ViewTranscriptMethods {
       this._transcriptDecoder = new StringDecoder("utf8");
       this._transcriptCarry = "";
       body.empty();
+      this._clearStreams();
+      this._clearMedia();
+      this._mdOwner?.unload();
+      this._mdOwner = null;
+      this._pending = [];
       this._transcriptGen = (this._transcriptGen || 0) + 1;
       this._transcriptStart = 0;
       this._transcriptEarlierEl = null;
@@ -98,18 +128,51 @@ class ViewTranscriptMethods {
     const paneBackend = this.getBackendKey();
     const msgs: TranscriptMessage[] = [];
     for (const line of lines) {
-      const m = this.plugin._tc().parseTranscriptRecord(line, paneBackend);
+      const m = this.plugin._tc().parseTranscriptRecord(line, paneBackend, false, this.designedOn());
       if (m) msgs.push(m);
     }
     if (!msgs.length) return;
     const scroller = this.transcriptHost as HTMLElement;
     const nearBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 60;
-    for (const m of msgs) await this._appendTranscriptMessage(m);
+    const gen = this._transcriptGen;
+    for (const m of msgs) {
+      if (this._transcriptGen !== gen) return;
+      await this._appendTranscriptMessage(m);
+    }
+    this._settlePending(msgs.flatMap((m) => (m.role === "user" ? [m.text] : [])));
+    this._streamsToEnd();
+    this._findRefresh();
+    if (this._designedModelEl) {
+      const last = [...msgs].reverse().find((m) => m.role === "assistant" && m.model);
+      if (last && last.role === "assistant" && last.model) {
+        this._modelInfo = { model: last.model, ...(last.effort ? { effort: last.effort } : this._modelInfo?.effort ? { effort: this._modelInfo.effort } : {}) };
+        void this._syncModelPill();
+      }
+    }
     if (nearBottom) scroller.scrollTop = scroller.scrollHeight;
+  }
+  _renderOwner(this: Session): InstanceType<typeof import_obsidian.Component> {
+    if (!this._mdOwner || this._closed) {
+      if (this._closed) return new import_obsidian.Component();
+      this._mdOwner = new import_obsidian.Component();
+      this._mdOwner.load();
+    }
+    return this._mdOwner;
+  }
+  async _renderReply(this: Session, text: string, el: HTMLElement, images = false): Promise<void> {
+    const inert = el.doc.implementation.createHTMLDocument("");
+    const holder = inert.body.createDiv();
+    const done = import_obsidian.MarkdownRenderer.render(this.app, neutralizeFences(escapeRiskyHtml(images ? markImageLinks(text) : imagesToLinks(text))), holder, "", this._renderOwner()).then(() => true, () => false);
+    const ok = await Promise.race([done, new Promise<false>((r) => window.setTimeout(() => r(false), RENDER_LIMIT_MS))]);
+    if (!ok) { el.createDiv({ cls: "agent-manager-transcript-usertext", text }); return; }
+    sanitizeRendered(holder);
+    el.append(...Array.from(holder.childNodes));
+    if (images) this._vaultImagesIn(el);
   }
   async _appendTranscriptMessage(this: Session, m: TranscriptMessage, target: HTMLElement | null | undefined = this._transcriptBodyEl): Promise<void> {
     const el = target;
-    if (!el) return;
+    if (!el || this._closed) return;
+    if (this.designedOn()) { await this._appendDesignedMessage(m, el); return; }
     if (m.role === "boundary") {
       el.createDiv({ cls: "agent-manager-transcript-boundary", text: "context compacted" });
       return;
@@ -121,11 +184,11 @@ class ViewTranscriptMethods {
       return;
     }
     for (const p of m.parts) {
+      if (p.kind === "result") continue;
       if (p.kind === "md") {
         const mdEl = box.createDiv({ cls: "agent-manager-transcript-md" });
         try {
-          const owner = this instanceof import_obsidian.Component ? this : this.view;
-          await import_obsidian.MarkdownRenderer.render(this.app, p.text, mdEl, "", owner);
+          await this._renderReply(p.text, mdEl);
         } catch {
           mdEl.setText(p.text);
         }
@@ -158,7 +221,7 @@ class ViewTranscriptMethods {
       const backend = this.getBackendKey();
       const holder = createDiv();
       for (const line of buf.subarray(0, read).toString("utf8").split("\n")) {
-        const m = this.plugin._tc().parseTranscriptRecord(line, backend);
+        const m = this.plugin._tc().parseTranscriptRecord(line, backend, false, this.designedOn());
         if (m) await this._appendTranscriptMessage(m, holder);
       }
       if (this._transcriptGen !== gen || this._transcriptBodyEl !== body) return;
@@ -208,10 +271,21 @@ class ViewTranscriptMethods {
   }
   async _transcriptFile(this: Session): Promise<string | null> {
     let file = this._modelFile;
-    if (!file || !fs.existsSync(file)) {
-      file = await this._resolveModelFile();
-      this._modelFile = file;
+    if (file && fs.existsSync(file)) return file;
+    const own = this._ownSessionId();
+    if (!file && own && this.getBackendKey() === "claude" && /^[0-9a-f-]{36}$/.test(own)) {
+      const root = path.join(os.homedir(), ".claude", "projects");
+      let dirs: string[] = [];
+      try { dirs = fs.readdirSync(root); } catch { /* empty */ }
+      for (const d of dirs) {
+        const f = path.join(root, d, `${own}.jsonl`);
+        if (fs.existsSync(f)) { this._modelFile = f; return f; }
+      }
     }
+    if (!file && this._modelFileMissAt && Date.now() - this._modelFileMissAt < MISS_RETRY_MS) return null;
+    file = await this._resolveModelFile();
+    this._modelFile = file;
+    this._modelFileMissAt = file ? undefined : Date.now();
     return file;
   }
   async updateDurableTranscript(this: Session): Promise<TranscriptWrite | null> {
@@ -305,12 +379,12 @@ class ViewTranscriptMethods {
   }
   async openDurableTranscriptNote(this: Session): Promise<void> {
     const file = await this._transcriptFile();
-    if (!file) { notice("No transcript yet."); return; }
+    if (!file) { notice("No transcript yet"); return; }
     let res: TranscriptWrite | null = null;
     try { res = await this.updateDurableTranscript(); } catch { /* empty */ }
     const id = this._ownSessionId() || this.plugin._tc().deriveSessionId(file, this.getBackendKey());
     const af = (res && res.path && this.app.vault.getAbstractFileByPath(res.path)) || this.plugin.findTranscriptNoteBySessionId(id);
-    if (!(af instanceof import_obsidian.TFile)) { notice("Transcript note not written yet."); return; }
+    if (!(af instanceof import_obsidian.TFile)) { notice("Transcript note not written yet"); return; }
     await this.plugin.openInNotesArea(af);
   }
 }

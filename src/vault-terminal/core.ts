@@ -4,20 +4,7 @@ import { homedir } from "os";
 import { delimiter, isAbsolute, join, relative } from "path";
 import { execFile } from "child_process";
 import { statSync } from "fs";
-import {
-  NotFoundError,
-  fallbackPath,
-  findProgram,
-  findPython,
-  loginShell,
-  mergePath,
-  pathForScript,
-  probeLoginEnv,
-  programEnv,
-  agentEnv,
-  parseNames,
-  splitCommand,
-} from "./finder";
+import { NotFoundError, fallbackPath, findProgram, findPython, loginShell, mergePath, pathForScript, probeLoginEnv, programEnv, agentEnv, parseNames, splitCommand, parseVariables } from "./finder";
 import type { HelperSession } from "./session";
 import type { TerminalSettings } from "./settings";
 import type { HostLaunch, VaultTerminalHost, VaultTerminalState } from "./host";
@@ -25,8 +12,9 @@ import { closeText, type CloseReason } from "./close";
 import { TerminalView, makeTerminalView, noteAutomounts, type TerminalKind } from "./view";
 import { zshIntegrationEnv } from "./zsh";
 import { AGENTS, agentById, prepareAgent } from "./agents";
+import { channelAllowed, ensureEditScript, newChannel, sweepChannel } from "./input-channel";
 import { linksObsidian, parseObsidianLink, pathsEnding } from "./links";
-import { notice, setNoticeConfig, setNoticeShow, showNotice } from "./notice";
+import { closeAfter, drawSaid, notice, saidBelow, setNoticeConfig, setNoticeShow, showNotice, type Said } from "./notice";
 import { toDesktop, toObsidian, type NotifyWhere } from "./settings";
 
 export type { CloseReason } from "./close";
@@ -63,10 +51,29 @@ export interface NotificationHandle {
   shown(): boolean;
 }
 
+export interface RecentNotice {
+  at: number;
+  said: Said;
+  onClick?: () => void;
+  live?: () => boolean;
+}
+
+const RECENT_KEPT = 50;
+
+function storedSaid(x: unknown): Said | null {
+  if (!x || typeof x !== "object") return null;
+  const s = x as Record<string, unknown>;
+  const str = (v: unknown) => (typeof v === "string" ? v : undefined);
+  const head = str(s.head);
+  if (!head) return null;
+  const lines = Array.isArray(s.lines) ? s.lines.filter((l): l is string => typeof l === "string") : undefined;
+  return { head, ...(str(s.name) ? { name: str(s.name) } : {}), ...(str(s.detail) ? { detail: str(s.detail) } : {}), ...(lines?.length ? { lines } : {}) };
+}
+
 export class VaultTerminal {
   constructor(readonly host: VaultTerminalHost) {
     setNoticeConfig(() => ({ on: this.settings?.infoNotices ?? true, ms: (this.settings?.infoSeconds ?? 5) * 1000 }));
-    setNoticeShow((message) => this.infoNotice(message));
+    setNoticeShow((said, onClick) => this.infoNotice(said, onClick));
     this.loginPath = host.state?.loginPath ?? "";
   }
 
@@ -93,6 +100,12 @@ export class VaultTerminal {
   readonly closing = new Set<HelperSession>();
   private loginPath: string;
   private loginEnv: Record<string, string> | null = null;
+  agentVariable(name: string): string | undefined {
+    if (parseNames(this.settings.strippedVariables ?? "").includes(name)) return undefined;
+    const extra = parseVariables(this.settings.agentVariables ?? "").find(([k]) => k === name)?.[1];
+    const word = splitCommand(this.settings.agents.claude?.command ?? "").find((w) => w.startsWith(`${name}=`));
+    return (word ? word.slice(name.length + 1) : undefined) ?? extra ?? this.loginEnv?.[name];
+  }
   loginEnvStatus = "not asked";
   private pathProbe: Promise<void> | null = null;
 
@@ -106,6 +119,7 @@ export class VaultTerminal {
   load(): void {
     this.unloading = new AbortController();
     this.closingAllowed = false;
+    this.loadRecent();
     const plugin = this.host.plugin;
     plugin.registerView(this.viewType, (leaf) => makeTerminalView(leaf, this));
     const plainType = this.plainViewType;
@@ -123,6 +137,12 @@ export class VaultTerminal {
       if (e.key === BADGE_KEY) this.showBadge();
     });
     this.app.workspace.onLayoutReady(() => this.updateBadge());
+    const keepChannel = () => {
+      ensureEditScript();
+      sweepChannel();
+    };
+    keepChannel();
+    plugin.registerInterval(window.setInterval(keepChannel, CHANNEL_CARE_MS));
     plugin.registerInterval(
       window.setInterval(() => {
         if (this.views().some((v) => v.programState === "waiting")) this.updateBadge();
@@ -181,6 +201,8 @@ export class VaultTerminal {
 
   unload(): void {
     setNoticeShow(null);
+    for (const n of [...this.stacked]) n.hide();
+    this.stacked.clear();
     this.unloading.abort();
     this.closingAllowed = true;
     const counts = readCounts();
@@ -226,7 +248,7 @@ export class VaultTerminal {
 
   private heldBy(win: Window): { inWin: TerminalView[] | null; reasons: { v: TerminalView; why: CloseReason }[] } {
     if (this.closingAllowed || this.confirmedWindows.has(win)) return { inWin: null, reasons: [] };
-    const inWin = [...this.liveViews].filter((v) => v.containerEl.win === win);
+    const inWin = [...this.liveViews].filter((v) => win === window || v.containerEl.win === win);
     const reasons = inWin.map((v) => ({ v, why: v.closeReason() })).filter((x): x is { v: TerminalView; why: CloseReason } => x.why !== null);
     return { inWin, reasons };
   }
@@ -293,7 +315,7 @@ export class VaultTerminal {
       const file = await this.app.vault.create(path, `${fence}text\n${text}\n${fence}\n`);
       await this.app.workspace.getLeaf("tab").openFile(file);
     } catch (e) {
-      notice(`${this.name}: couldn't save the output: ${(e as Error).message}`);
+      notice({ head: "Couldn't save the output", detail: (e as Error).message });
     }
   }
 
@@ -336,19 +358,19 @@ export class VaultTerminal {
 
   openObsidianUri(uri: string): void {
     if (!linksObsidian(uri)) {
-      notice(`${this.name}: only obsidian:// links that open a note or are ${this.name}'s open from a terminal.`);
+      notice({ head: "That obsidian:// link wasn't opened", detail: `Only links that open a note, or are ${this.name}'s, open from a terminal.` });
       return;
     }
     const link = parseObsidianLink(uri);
     if (!link) {
-      notice(`${this.name}: that obsidian:// link won't decode (it may be cut short), so it wasn't opened.`);
+      notice({ head: "That obsidian:// link wasn't opened", detail: "It won't decode (it may be cut short)." });
       return;
     }
     const vault = link.params.vault?.toLowerCase();
     const appId = (this.app as unknown as { appId?: string }).appId;
     const here = !vault || vault === this.app.vault.getName().toLowerCase() || (!!appId && vault === appId.toLowerCase());
     if (link.action !== "open") {
-      if (!here || !this.host.openObsidianLink?.(link)) notice(`${this.name}: ${link.action} links open from a terminal only for this vault.`);
+      if (!here || !this.host.openObsidianLink?.(link)) notice({ head: "That obsidian:// link wasn't opened", detail: `${link.action} links open from a terminal only for this vault.` });
       return;
     }
     const { path, file: name } = link.params;
@@ -364,7 +386,7 @@ export class VaultTerminal {
     const bare = name.split("#")[0];
     const file = bare ? this.linkedNote(bare) : null;
     if (file) void this.openNote(file);
-    else notice(`${this.name}: there's no note “${name.slice(0, 200)}” in this vault.`);
+    else notice({ head: "No note by that name", detail: `There's no “${name.slice(0, 200)}” in this vault.` });
   }
 
   obsidianTarget(uri: string): { text: string; found: boolean | null } | null {
@@ -426,7 +448,7 @@ export class VaultTerminal {
     try {
       (window as unknown as { require(m: string): { shell: { showItemInFolder(p: string): void } } }).require("electron").shell.showItemInFolder(abs);
     } catch {
-      notice(`${this.name}: couldn't show ${abs} in Finder.`);
+      notice({ head: "Couldn't show it in Finder", detail: abs });
     }
   }
 
@@ -488,7 +510,7 @@ export class VaultTerminal {
     await workspace.getLeaf("tab").openFile(file, eState ? { eState } : undefined);
   }
 
-  notify(title: string, body: string, onClick?: () => void, key = title, kind: NotifyRoute = "needs"): NotificationHandle {
+  notify(said: Said, onClick?: () => void, key = said.head, kind: NotifyRoute = "needs"): NotificationHandle {
     const s = this.settings;
     const to: NotifyWhere = typeof kind === "object" ? kind.to : kind === "needs" ? s.needsYouTo : kind === "finished" ? s.finishedTo : s.infoNotices ? "obsidian" : "none";
     const parts: NotificationHandle[] = [];
@@ -498,55 +520,111 @@ export class VaultTerminal {
       },
       shown: () => parts.some((p) => p.shown()),
     };
+    if (to !== "none") this.remember(said, onClick, key);
     if (toDesktop(to)) {
-      const n = this.desktopNotify(title, body, onClick);
+      const n = this.desktopNotify(said, onClick);
       if (n) parts.push({ hide: () => n.close(), shown: () => false });
     }
     if (!toObsidian(to)) return handle;
     const ms = (typeof kind === "object" ? kind.seconds : kind === "needs" ? s.needsYouSeconds : kind === "finished" ? s.finishedSeconds : s.infoSeconds) * 1000;
-    const active = this.app.workspace.getActiveViewOfType(TerminalView);
-    const there = active?.looking() ? active : this.views().find((v) => v.looking());
+    const there = this.onScreenView();
     if (there) {
-      const box = there.showToast(title, body, ms, onClick, key);
+      const box = there.showToast(said, { ms, onClick, key, recorded: true });
       if (box.shown()) {
         parts.push(box);
         return handle;
       }
     }
-    parts.push(this.stackNotice(title, body, ms, onClick));
+    parts.push(this.stackNotice(said, ms, onClick));
     return handle;
   }
 
-  infoNotice(message: string): void {
-    if (!this.settings.infoNotices) return;
-    const ms = this.settings.infoSeconds * 1000;
-    const prefix = `${this.name}: `;
-    const text = message.startsWith(prefix) ? message.charAt(prefix.length).toUpperCase() + message.slice(prefix.length + 1) : message;
+  private onScreenView(): TerminalView | null {
+    const ok = activeDocument.hasFocus() ? (v: TerminalView) => v.looking() : (v: TerminalView) => v.onScreen();
     const active = this.app.workspace.getActiveViewOfType(TerminalView);
-    const shown = this.views().filter((v) => v.looking());
-    const there = active?.looking() ? active : shown.length === 1 ? shown[0] : null;
-    if (there && !there.containerEl.ownerDocument.querySelector(".modal-container") && there.showToast(this.name, text, ms, undefined, undefined, true).shown()) return;
-    this.stackNotice(this.name, text, ms, undefined, true);
+    if (active && ok(active)) return active;
+    const shown = this.views().filter(ok);
+    return shown.length === 1 ? shown[0] : null;
   }
 
-  private stackNotice(title: string, body: string, ms: number, onClick?: () => void, info = false): NotificationHandle {
-    const content = createFragment((f) => {
-      f.createDiv({ cls: "vault-terminal-toast-title", text: title });
-      f.createDiv({ cls: "vault-terminal-toast-text", text: body });
-    });
-    const shown = showNotice(content, ms);
+  private readonly stacked = new Set<NotificationHandle>();
+
+  readonly recent: RecentNotice[] = [];
+
+  private get recentKey(): string {
+    return `${this.viewType}-recent-notices`;
+  }
+
+  private loadRecent(): void {
+    this.recent.length = 0;
+    if (this.settings?.keepRecent === false) return;
+    let raw: unknown;
+    try { raw = this.app.loadLocalStorage(this.recentKey); } catch { /* empty */ }
+    if (!Array.isArray(raw)) return;
+    for (const r of raw.slice(0, RECENT_KEPT)) {
+      const said = storedSaid((r as { said?: unknown })?.said);
+      const at = (r as { at?: unknown })?.at;
+      if (said && typeof at === "number") this.recent.push({ at, said });
+    }
+  }
+
+  private saveRecent(): void {
+    try { this.app.saveLocalStorage(this.recentKey, this.recent.length ? this.recent.map(({ at, said }) => ({ at, said })) : null); } catch { /* empty */ }
+  }
+
+  clearRecent(): void {
+    this.recent.length = 0;
+    this.saveRecent();
+  }
+
+  remember(said: Said, onClick?: () => void, key?: string): void {
+    if (this.settings?.keepRecent === false) return;
+    const live = onClick && key && this.views().some((v) => v.noticeKey === key) ? () => this.views().some((v) => v.noticeKey === key) : undefined;
+    this.recent.unshift({ at: Date.now(), said, onClick, live });
+    this.recent.length = Math.min(this.recent.length, RECENT_KEPT);
+    this.saveRecent();
+  }
+
+  infoNotice(said: Said, onClick?: () => void): void {
+    if (!this.settings.infoNotices) return;
+    const ms = this.settings.infoSeconds * 1000;
+    this.remember(said, onClick);
+    const there = this.onScreenView();
+    const modal = [there?.containerEl.ownerDocument, activeDocument].some((d) => d?.querySelector(".modal-container"));
+    if (there && !modal && there.showToast(said, { ms, onClick, info: true, recorded: true }).shown()) return;
+    this.stackNotice(said, ms, onClick, true);
+  }
+
+  private stackNotice(said: Said, ms: number, onClick?: () => void, info = false): NotificationHandle {
+    const shown = showNotice(createFragment((f) => drawSaid(f, said)), 0, () => handle.hide());
     const box = shown.messageEl.closest<HTMLElement>(".notice") ?? shown.messageEl;
     box.addClass("vault-terminal-notice");
     if (info) box.addClass("is-info");
     if (this.settings.fontFamily.trim()) box.style.fontFamily = this.settings.fontFamily.trim();
     box.style.fontSize = `${this.settings.fontSize}px`;
-    if (onClick) box.addEventListener("click", () => onClick());
-    return { hide: () => shown.hide(), shown: () => box.isConnected };
+    let closed = false;
+    const handle: NotificationHandle = {
+      hide: () => {
+        if (closed) return;
+        closed = true;
+        cancel();
+        this.stacked.delete(handle);
+        shown.hide();
+      },
+      shown: () => box.isConnected,
+    };
+    const cancel = closeAfter(box, ms, () => handle.hide());
+    box.addEventListener("click", () => {
+      handle.hide();
+      onClick?.();
+    });
+    this.stacked.add(handle);
+    return handle;
   }
 
-  private desktopNotify(title: string, body: string, onClick?: () => void): Notification | null {
+  private desktopNotify(said: Said, onClick?: () => void): Notification | null {
     try {
-      const n = new Notification(title, { body: body.slice(0, 240), silent: false });
+      const n = new Notification(said.head, { body: saidBelow(said).slice(0, 240), silent: false });
       n.onclick = () => {
         this.activateApp();
         window.focus();
@@ -620,7 +698,7 @@ export class VaultTerminal {
         this.probeNoticeShown = true;
         this.probeNoticeAt = Date.now();
         const instead = this.loginPath ? "the PATH saved from an earlier start" : "a default PATH";
-        this.notify(`${this.name} couldn't read your login shell's environment`, `${(e as Error).message}. Terminals use ${instead}, so agents miss what your startup files export. The console says more.`);
+        this.notify({ head: "Couldn't read your login shell's environment", detail: `${(e as Error).message}. Terminals use ${instead}, so agents miss what your startup files export. The console says more.` });
       }
     }
   }
@@ -665,7 +743,7 @@ export class VaultTerminal {
       return { program, env };
     } catch (e) {
       const tried = e instanceof NotFoundError ? e.tried : [];
-      return { error: `Couldn't find ${first}${tried.length ? ` (looked in ${tried.join(", ")})` : ""}. Set its location in ${this.host.settingsPath} → ${agent.name} → Location of ${splitCommand(agent.command)[0]}.` };
+      return { error: `Couldn't find ${first}${tried.length ? ` (looked in ${tried.join(", ")})` : ""}. Set its location in ${this.host.settingsPath(agent)}.` };
     }
   }
 
@@ -682,14 +760,14 @@ export class VaultTerminal {
         return {
           error:
             `The Python 3 set in ${this.name}'s settings isn't usable (Python 3.8 or later is needed).${tried}` +
-            `\nFix or clear ${this.host.settingsPath} → Location of Python 3; cleared, ${this.name} finds Python on its own.`,
+            `\nFix or clear ${this.host.settingsPath("python")}; cleared, ${this.name} finds Python on its own.`,
         };
       }
       return {
         error:
           `${this.name} needs Python 3 and couldn't find it.` +
           tried +
-          `\nInstall it from python.org or with Homebrew (brew install python), or set its location in ${this.host.settingsPath}.`,
+          `\nInstall it from python.org or with Homebrew (brew install python), or set its location in ${this.host.settingsPath("python")}.`,
       };
     }
 
@@ -726,16 +804,19 @@ export class VaultTerminal {
       const env = agentEnv(await pathForScript(program, this.loginEnv?.PATH?.trim() || path), this.loginEnv, this.settings.agentVariables, cwd, parseNames(this.settings.strippedVariables ?? ""));
       if (opts.host?.env) Object.assign(env, opts.host.env);
       const count = words.length;
-      const added = prepareAgent(kind, program, words, { env, cwd, pictures: this.settings.showPictures }, plain);
+      const script = agent.id === "claude" && !plain && channelAllowed(env) ? ensureEditScript() : null;
+      const prefix = script ? newChannel() : null;
+      const input = script && prefix ? { script, prefix } : undefined;
+      const added = prepareAgent(kind, program, words, { env, cwd, pictures: this.settings.showPictures, hooks: opts.host?.claudeHooks, input }, plain);
       if (!plain && this.test.badAdditions && words.length > count) words.push("--settings", "{not json");
       return { python, program: [program, ...words.slice(1)], cwd, env, added, integration: false };
     } catch (e) {
       const tried = e instanceof NotFoundError ? e.tried : [];
-      this.notify(this.name, `${words[0]} not found. Set its location in ${this.host.settingsPath}.`);
+      this.notify({ head: `${words[0]} not found`, detail: `Set its location in ${this.host.settingsPath(agent)}.` });
       return {
         error:
           `Couldn't find ${words[0]}. Looked in:\n  ${tried.join("\n  ")}\n` +
-          `Set its location in ${this.host.settingsPath} → ${agent.name} → Location of ${splitCommand(agent.command)[0]}.`,
+          `Set its location in ${this.host.settingsPath(agent)}.`,
       };
     }
   }
@@ -743,6 +824,7 @@ export class VaultTerminal {
 
 const BADGE_KEY = "vault-terminal-waiting";
 const BADGE_REFRESH_MS = 60_000;
+const CHANNEL_CARE_MS = 60 * 60_000;
 const BADGE_FRESH_MS = 3 * BADGE_REFRESH_MS;
 
 interface WaitingCount {

@@ -21,19 +21,19 @@ class SessionActionMethods {
   addMoveToAgent(this: SessionActionHost, menu: Menu, sessionId: string | null, backend: string, done?: () => void): void {
     const agents = this.plugin.agentList();
     if (!sessionId || !agents.length) return;
-    menu.addItem((item) => item.setTitle("Move to agent profile…").setIcon("folder-input").onClick(() => {
+    menu.addItem((item) => item.setTitle("Change agent profile…").setIcon("folder-input").onClick(() => {
       const cur = this.plugin.recordedAgentId(sessionId) ?? "";
       const choices = agents.filter((a) => a.id !== cur).map((a) => ({ id: a.id, name: a.name }));
       if (this.plugin.agentById(cur)) choices.push({ id: "", name: "No agent profile" });
-      if (!choices.length) { notice("There's no other agent profile to move this session to."); return; }
-      const effect = "Filed under it. The conversation itself keeps the profile it started with.";
+      if (!choices.length) { notice("No other agent profile to change to"); return; }
+      const effect = "Filed under it, its transcript note moved to the profile's folder. The conversation keeps the instructions it started with.";
       new ChoicePickerModal(this.app, choices, {
-        placeholder: "Move this session to which agent profile?",
+        placeholder: "Change this session to which agent profile?",
         label: (c) => c.name,
         sub: () => effect,
         onPick: async (c) => {
           await this.plugin.moveSessionToAgent(sessionId, c.id);
-          notice(`Moved to ${c.name}. ${effect}`);
+          notice({ head: `Profile changed to ${c.name}`, detail: effect });
           done?.();
         },
       }).open();
@@ -75,9 +75,9 @@ class SessionActionMethods {
       this.app.workspace.requestSaveLayout();
       if (view.running && view.getBackendKey() === "claude") {
         if (view.hasPendingInput()) {
-          view._notifyNeedsYou("Renamed here, but not in Claude: you have unsent text in that session's prompt.");
+          view._notifyNeedsYou("Renamed here, not in Claude", "Unsent text in its prompt.");
         } else if (view.programState === "waiting" || view._dialogShowing?.()) {
-          view._notifyNeedsYou("Renamed here, but not in Claude: the session is asking you something. Answer it, then rename again to update Claude.");
+          view._notifyNeedsYou("Renamed here, not in Claude", "It's asking you something. Answer it, then rename again.");
         } else {
           void view.submitLine(`/rename ${newTitle}`);
         }

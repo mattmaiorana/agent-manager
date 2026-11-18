@@ -126,10 +126,10 @@ class ConfigMethods {
       },
     };
   }
-  launchContext(this: AgentManagerPlugin, from: LaunchFrom): LaunchContext {
+  launchContext(this: AgentManagerPlugin, from: LaunchFrom, overviews?: boolean): LaunchContext {
     return launchContext(from, this.contextVault(), {
       startFolder: this.startFolder(),
-      useOverviews: this.overviewsOn(),
+      useOverviews: overviews ?? this.overviewsOn(),
       useTickets: this.ticketsOn(),
       overviewName: this.overviewName(),
       templatePath: this.ticketTemplatePath(),
@@ -142,7 +142,7 @@ class ConfigMethods {
     const vault = this.getVaultPath();
     const from = notePath || folderPath;
     const ctx: LaunchContext = from ? this.launchContext({ notePath, folderPath }) : emptyContext();
-    if (ctx.missingReads.length) notice(`Agent Manager: this ${ctx.task ? "scheduled task" : "ticket"}'s reads name ${ctx.missingReads.length === 1 ? "something" : "things"} that isn't in the vault, so the session isn't told ${ctx.missingReads.length === 1 ? "it" : "them"}: ${ctx.missingReads.join(", ")}.`);
+    if (ctx.missingReads.length) notice({ head: `${ctx.missingReads.length === 1 ? "A read is" : "Reads are"} missing from the ${ctx.task ? "scheduled task" : "ticket"}`, detail: `The session isn't told ${ctx.missingReads.length === 1 ? "it" : "them"}, since ${ctx.missingReads.length === 1 ? "it isn't" : "they aren't"} in the vault: ${ctx.missingReads.join(", ")}.` });
     const vars: Record<string, string> = { path: from ? path.join(vault, from) : "", vault, date: this.todayString() };
     const task = ctx.ticket ? this.followUpTaskOf(ctx.ticket) : null;
     if (task) vars.task = path.join(vault, task);
@@ -203,8 +203,8 @@ class ConfigMethods {
     this.pluginData.sessionSources = { ...(this.pluginData.sessionSources || {}), [sessionId]: { from: src.from, pinned: src.pinned, ...(src.run ? { run: true } : {}) } };
     await this.savePluginData();
   }
-  transcriptTarget(this: AgentManagerPlugin, agentId: string | null = null): { transcriptDir: string; lockDir: string } {
-    return { transcriptDir: this.agentTranscriptDir(agentId), lockDir: this.folderOf("transcriptsFolder") };
+  transcriptTarget(this: AgentManagerPlugin, agentId: string | null = null): { transcriptDir: string; lockDir: string; commands: boolean } {
+    return { transcriptDir: this.agentTranscriptDir(agentId), lockDir: this.folderOf("transcriptsFolder"), commands: this.pluginData.transcriptCommands === true };
   }
 }
 export { ConfigMethods };

@@ -10,7 +10,7 @@ class LinkMethods {
   async handleProtocolLink(this: AgentManagerPlugin, params: ObsidianProtocolData, origin?: "terminal"): Promise<void> {
     await this.whenLayoutReady();
     const op = String(params.op || "resume").toLowerCase();
-    const say = (text: string) => notice(`Agent Manager: ${text}`);
+    const say = (text: string) => notice({ head: "That link wasn't opened", detail: text.charAt(0).toUpperCase() + text.slice(1) });
     if (op === "daily") {
       await this.revealBrowser();
       const named = String(params.agent || "").trim();
@@ -27,7 +27,7 @@ class LinkMethods {
     }
     if (op === "task") {
       const notePath = String(params.task || "").trim();
-      if (!this.scheduledTasksOn()) { say("scheduled tasks are off (Settings → Agent Manager)."); return; }
+      if (!this.scheduledTasksOn()) { say("scheduled tasks are off (Settings → Agent Manager → Scheduled tasks)."); return; }
       if (!this.isTaskNote(notePath)) { say(`there's no scheduled task at “${notePath.slice(0, 200)}”.`); return; }
       await this.openTaskPage(notePath);
       return;
@@ -76,7 +76,7 @@ class LinkMethods {
     }
     const note = this.findTranscriptNoteBySessionId(sessionId);
     if (note) {
-      say("that session isn't resumable here. Opening its transcript.");
+      notice({ head: "Opening its transcript", detail: "That session isn't resumable here." });
       await this.openInNotesArea(note);
       return;
     }

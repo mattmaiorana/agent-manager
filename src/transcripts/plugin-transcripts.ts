@@ -32,6 +32,11 @@ class TranscriptMethods {
       append: (rel, content) => a.append(rel, content),
       ensureDir: async (rel) => { try { if (!(await a.exists(rel))) await a.mkdir(rel); } catch { /* empty */ } },
       list: async (rel) => { try { const r = await a.list(rel); return (r.files || []).map((f) => f.split("/").pop() as string  ); } catch { return []; } },
+      setProps: async (rel, props) => {
+        const file = this.app.vault.getFileByPath(rel);
+        if (!file) return;
+        await this.app.fileManager.processFrontMatter(file, (fm: Record<string, unknown>) => { Object.assign(fm, props); });
+      },
     };
   }
   listImportableSessions(this: AgentManagerPlugin, backend: BackendKey): ImportableSession[] {
@@ -92,7 +97,7 @@ class TranscriptMethods {
       label: (b: BackendKey) => CLI_BACKENDS[b].label,
       onPick: (backend: BackendKey) => {
         const sessions = this.listImportableSessions(backend);
-        if (!sessions.length) { notice(`No ${CLI_BACKENDS[backend].label} sessions found.`); return; }
+        if (!sessions.length) { notice(`No ${CLI_BACKENDS[backend].label} sessions found`); return; }
         new ChoicePickerModal(this.app, sessions, {
           placeholder: "Pick the session to import",
           label: (s: ImportableSession) => s.label,
@@ -100,9 +105,9 @@ class TranscriptMethods {
           onPick: async (s: ImportableSession) => {
             try {
               const res = await this.importSession({ backend, sessionId: s.sessionId, file: s.file });
-              if (res && res.path) notice(`Imported ${res.added} turn(s) to ${res.path}`);
-              else notice("Nothing to import (no turns it could read).");
-            } catch (e) { notice("Import failed: " + stringOf(errorMessage(e))); }
+              if (res && res.path) notice({ head: `Imported ${res.added} turn(s)`, detail: res.path });
+              else notice({ head: "Nothing to import", detail: "No turns it could read." });
+            } catch (e) { notice({ head: "Import failed", detail: stringOf(errorMessage(e)) }); }
           },
         }).open();
       },
@@ -229,7 +234,7 @@ class TranscriptMethods {
           const source = parentFile instanceof import_obsidian.TFile ? `[[${this.app.metadataCache.fileToLinktext(parentFile, `${dir}/x.md`, true)}]]` : null;
           const res = await tc.writeDurableTranscript(io, {
             transcriptDir: dir, lockDir: dir, backend, sessionId: id, transcriptFile: file,
-            sessionTitle: title, source, agent, sidechain: sub.sidechain,
+            sessionTitle: title, source, agent, sidechain: sub.sidechain, commands: this.pluginData.transcriptCommands === true,
           });
           if (!res) return false;
           const marker = `<!-- pl-sub:${id} -->`;

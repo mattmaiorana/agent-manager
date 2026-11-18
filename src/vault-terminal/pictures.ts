@@ -1,6 +1,7 @@
 
 import type { IBufferCell, IBufferLine, IDisposable, ITheme, Terminal } from "@xterm/xterm";
 import { GraphicsFilter, KittyGraphics, PLACEHOLDER, PLACEHOLDER_TEXT, diacriticValue, readPlaceholder, type PlaceholderCell, type StoredImage, type CellColors } from "./kitty";
+import { KeptPictures } from "./picture-cache";
 import { blankPlaceholders, cellSize, unblankPlaceholders, underlineColor } from "./xterm-internals";
 
 type Decoded = ImageBitmap | "pending" | "failed";
@@ -22,6 +23,8 @@ export class PictureLayer {
   readonly graphics: KittyGraphics;
   private decoded = new Map<StoredImage, Decoded>();
   private previous = new Map<number, { bmp: ImageBitmap; width: number; height: number }>();
+  private kept = new KeptPictures<ImageBitmap>();
+  private keeping = true;
   private disposed = false;
   private changedSinceSweep = true;
 
@@ -40,7 +43,8 @@ export class PictureLayer {
   lastPaint: FoundCell[] = [];
   paints = 0;
 
-  constructor(private term: Terminal, reply: (text: string) => void, filter?: GraphicsFilter) {
+  constructor(private term: Terminal, reply: (text: string) => void, filter?: GraphicsFilter, keeping = true) {
+    this.keeping = keeping;
     this.filter = filter ?? new GraphicsFilter();
     this.graphics = new KittyGraphics({
       reply,
@@ -55,10 +59,11 @@ export class PictureLayer {
             this.previous.set(img.id, { bmp: ready, width: img.width, height: img.height });
           }
         } else {
-          ready?.close();
+          if (ready) this.keep(img, ready);
           this.forgetPrevious(img.id);
         }
       },
+      keys: () => this.keeping,
       log: (e) => this.note(e),
       opened: (p) => {
         this.opened.push(p);
@@ -116,6 +121,7 @@ export class PictureLayer {
     if (this.sweepTimer) window.clearTimeout(this.sweepTimer);
     if (this.decodeTimer) window.clearTimeout(this.decodeTimer);
     this.graphics.clear();
+    this.kept.clear();
     for (const id of [...this.previous.keys()]) this.forgetPrevious(id);
     this.canvas?.remove();
     this.canvas = null;
@@ -133,6 +139,7 @@ export class PictureLayer {
     this.frameWin = win;
     this.frame = win.requestAnimationFrame(() => {
       this.frame = 0;
+      if (this.term.modes.synchronizedOutputMode) return;
       this.paint();
     });
   }
@@ -181,6 +188,20 @@ export class PictureLayer {
     return shown;
   }
 
+  setKeeping(on: boolean): void {
+    this.keeping = on;
+    if (!on) this.kept.clear();
+  }
+
+  private keep(img: StoredImage, bmp: ImageBitmap): void {
+    if (this.disposed || !this.keeping || !img.key) {
+      bmp.close();
+      return;
+    }
+    this.kept.put(img.key, bmp, bmp.width * bmp.height * 4);
+    this.schedule();
+  }
+
   private forgetPrevious(id: number): void {
     this.previous.get(id)?.bmp.close();
     this.previous.delete(id);
@@ -188,7 +209,15 @@ export class PictureLayer {
 
   private bitmap(img: StoredImage): ImageBitmap | null {
     const have = this.decoded.get(img);
-    if (have !== undefined) return typeof have === "object" ? have : null;
+    if (typeof have === "object") return have;
+    const kept = have !== "failed" && img.key ? this.kept.take(img.key) : null;
+    if (kept) {
+      this.decoded.set(img, kept);
+      this.forgetPrevious(img.id);
+      this.note(`reused ${img.id}`);
+      return kept;
+    }
+    if (have !== undefined) return null;
     if (this.previous.has(img.id) && this.decoding < DECODES_AT_ONCE) {
       this.decode(img);
       return null;
@@ -209,6 +238,10 @@ export class PictureLayer {
       if (this.decoding >= DECODES_AT_ONCE) break;
       this.wanted.delete(img);
       if (this.graphics.images.get(img.id) !== img || !onScreen.has(img.id) || this.decoded.has(img)) continue;
+      if (img.key && this.kept.has(img.key)) {
+        this.schedule();
+        continue;
+      }
       this.decode(img);
     }
     this.wanted.clear();
@@ -231,8 +264,14 @@ export class PictureLayer {
     made.then(
       (bmp) => {
         this.decoding--;
-        if (this.graphics.images.get(img.id) !== img) {
-          bmp.close();
+        const now = this.graphics.images.get(img.id);
+        if (now !== img) {
+          if (now) bmp.close();
+          else this.keep(img, bmp);
+          return;
+        }
+        if (this.decoded.get(img) !== "pending") {
+          this.keep(img, bmp);
           return;
         }
         this.decoded.set(img, bmp);
@@ -242,7 +281,7 @@ export class PictureLayer {
       },
       (e) => {
         this.decoding--;
-        if (this.graphics.images.get(img.id) !== img) return;
+        if (this.graphics.images.get(img.id) !== img || this.decoded.get(img) !== "pending") return;
         this.forgetPrevious(img.id);
         this.decoded.set(img, "failed");
         this.graphics.failedToLoad(img);

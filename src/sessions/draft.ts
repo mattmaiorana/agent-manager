@@ -21,6 +21,15 @@ class DraftTracker {
   edited(): void {
     if (this._text || this._unknown) this._unknown = true;
   }
+  moved(): void {
+    if (this._text || this._unknown) this._moved = true;
+  }
+  read(text: string, atEnd: boolean): void {
+    if (atEnd || !text) this._moved = false;
+    else if (this._unknown) this._moved = true;
+    this._text = text;
+    this._unknown = false;
+  }
   text(): string {
     return this._text;
   }

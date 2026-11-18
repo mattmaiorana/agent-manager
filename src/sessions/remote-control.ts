@@ -32,8 +32,8 @@ class RemoteControlMethods {
       const menu = new import_obsidian.Menu();
       menu.addItem((i) => i.setTitle(url ? "Copy claude.ai link" : "Copy claude.ai link (Remote Control isn't on)").setIcon("link").setDisabled(!url).onClick(() => {
         void navigator.clipboard.writeText(url).then(
-          () => { notice("Copied the session's claude.ai link."); },
-          () => { notice("Couldn't copy the link."); },
+          () => { notice("claude.ai link copied"); },
+          () => { notice({ head: "Couldn't copy", detail: "The claude.ai link." }); },
         );
       }));
       menu.showAtMouseEvent(evt);
@@ -58,9 +58,9 @@ class RemoteControlMethods {
         : `Remote Control: not known yet. Claude reports it at its next turn.\n\nClick to connect it, or if it's connected, to see Claude's panel (types ${RC_COMMAND}).`);
   }
   async sendRemoteControl(this: Session): Promise<void> {
-    if (!this.running) { notice("This session isn't running."); return; }
-    if (this.hasPendingInput()) { this._notifyNeedsYou(`Not sent: you have unsent text in the prompt. Clear it, then click the Remote Control dot again.`); return; }
-    if (this._dialogShowing()) { this._notifyNeedsYou("Not sent: the session is asking you something. Answer it, then click the Remote Control dot again."); return; }
+    if (!this.running) { notice("This session isn't running"); return; }
+    if (this.hasPendingInput()) { this._notifyNeedsYou("Remote Control not sent", "Unsent text in the prompt. Clear it, then try again.", false); return; }
+    if (this._dialogShowing()) { this._notifyNeedsYou("Remote Control not sent", "The session is asking you something. Answer it, then try again.", false); return; }
     if (this._rcSending) return;
     this._rcSending = true;
     let sent = false;
@@ -68,6 +68,7 @@ class RemoteControlMethods {
     if (!sent) return;
     if (this._rc !== "on") void this._rcAfterReconnect();
     void this._rcWatchPanel();
+    if (this._transcriptOpen && this.designedOn()) this.closeTranscript(false);
   }
   _rcTyped(this: Session, data: string): void {
     if (this.getBackendKey() !== "claude" || !/\r/.test(data)) return;

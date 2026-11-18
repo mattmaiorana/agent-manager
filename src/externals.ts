@@ -5,6 +5,7 @@ import * as path from "path";
 import * as fs from "fs";
 import * as os from "os";
 import * as crypto from "crypto";
+import * as http from "http";
 import * as string_decoder from "string_decoder";
 const { StringDecoder } = string_decoder;
-export { import_obsidian, import_cm_view, import_child_process, path, fs, os, crypto, StringDecoder };
+export { import_obsidian, import_cm_view, import_child_process, path, fs, os, crypto, http, StringDecoder };

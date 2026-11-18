@@ -12,6 +12,7 @@ import { fileURLToPath } from "url";
 import { confirmClose, type NotificationHandle, type VaultTerminal } from "./core";
 import type { CloseReason } from "./close";
 import type { TerminalController } from "./host";
+import { INPUT_VAR, afterReadBack, cancelWaiting, channelAllowed, editorContextOn, ensureEditScript, inputText, newRequestId, readHandoff, withdrawRequest, writeRequest, writeVerdict, type Verdict } from "./input-channel";
 import { afterExitKey, ctrlCCopies, dragSelection, gestureFocus, gestureReports, KeyQueue, movesTo, replayPlan, rowBreaks, SELECT_MOVE_KEYS, selectMove, selectsInBox, startSelection, textMove, typesCharacter, unwrapCopy, dedentCopy, type Cell, type InputRow, type Gesture, type QueueHold, type QueueItem, type SelectMove, type TextArea } from "./keys";
 import { HelperSession, validSize, type ExitInfo, type Foreground, type StartError } from "./session";
 import { cliWrapped, findPaths, findUrlsAcross, type FoundPath, type RowCells } from "./links";
@@ -20,10 +21,10 @@ import { StatusTracker, type Attention, type ProgramState } from "./status";
 import { agentById, agentFor, agentForProgram, type AgentProfile } from "./agents";
 import { readLook } from "./theme";
 import { ReportQueue, WheelCounter, scrollSpeed } from "./wheel";
-import { cellSize, resyncViewport, scrollBuffer, sendButtonReport, sendWheelReport, stopUnderliningLinks, underlineLinks } from "./xterm-internals";
+import { adoptDocument, cellSize, resyncViewport, scrollBuffer, sendButtonReport, sendWheelReport, stopUnderliningLinks, underlineLinks } from "./xterm-internals";
 import { PictureLayer } from "./pictures";
 import { GraphicsFilter, PICTURE_LINK, findPattern, withoutPlaceholders } from "./kitty";
-import { addCloseX, noticeMs, noticesOn } from "./notice";
+import { addCloseX, closeAfter, drawSaid, noticeMs, noticesOn, type Said } from "./notice";
 import { toDesktop, toObsidian } from "./settings";
 
 
@@ -45,6 +46,7 @@ interface StartOptions {
 const SHELLS = /^(zsh|bash|fish|sh|dash|ksh|mksh|tcsh|csh|nu|elvish|xonsh)(-[\d.]+)?$/;
 const WORD_SEPARATORS = " ()[]{}',\"`─│┌┐└┘├┤┬┴┼╭╮╯╰‘’“”|";
 const RESIZE_SPACING_MS = 125;
+const FIT_SPACING_MAX_MS = 125;
 const SLOW_START_MS = 5000;
 const RETRY_WITHIN_MS = 5000;
 
@@ -72,7 +74,14 @@ const COPY_UNWRAP_MS = 2000;
 const COPY_KEEP_MS = 2500;
 const COPY_CHECK_MS = 25;
 const CLEAR_KEY_GAP_MS = 15;
-const COPIED_SHOWN = 80;
+const INPUT_WAIT_MS = 3000;
+const INPUT_LATE_MS = 10000;
+const INPUT_SETTLE_MS = 2000;
+const INPUT_POLL_MS = 15;
+const INPUT_QUIET_MS = 500;
+const INPUT_HOLD_MS = 200;
+const COPIED_LINES = 2;
+const COPIED_SHOWN = 200;
 const TOAST_STACK = 3;
 const INFO_STACK = 3;
 let noticeKeys = 0;
@@ -140,7 +149,8 @@ export class TerminalView extends ItemView {
   private linksChangedWin: Window | null = null;
   private hoverCheck = 0;
   private hoverCheckWin: Window | null = null;
-  private promptSelection: { text: string; indent: number; col: number; row: number; length: number } | null = null;
+  private dragScrolled = false;
+  private promptSelection: { text: string; indent: number; col: number; row: number; length: number; long?: boolean } | null = null;
   private pendingSends = new Set<number>();
   private keyQueue = new KeyQueue(
     (data) => {
@@ -152,6 +162,12 @@ export class TerminalView extends ItemView {
     CLEAR_KEY_GAP_MS,
   );
   private queueSession: HelperSession | null = null;
+  private inputPrefix: string | null = null;
+  private inputBusy = false;
+  private inputBacklog: string[] = [];
+  private inputThen: string[] = [];
+  private inputEnv: NodeJS.ProcessEnv = {};
+  private outputCount = 0;
   private queueWriting = false;
   private selectionKnown: Gesture | null = null;
   private get claudeSelection(): Gesture | null {
@@ -176,7 +192,7 @@ export class TerminalView extends ItemView {
   private pressedAt: Cell | null = null;
   private copyBreaks: { breaks: { breaks: string[]; indent: number } | null; at: number; copied?: () => void }[] = [];
   private toasts: HTMLElement | null = null;
-  private toastTimers = new Map<HTMLElement, { win: Window; id: number }>();
+  private toastTimers = new Map<HTMLElement, () => void>();
   private cutTimers = new Set<{ win: Window; id: number }>();
   readonly noticeKey = `session-${++noticeKeys}`;
   private unguardClose: (() => void) | null = null;
@@ -198,8 +214,12 @@ export class TerminalView extends ItemView {
   private reset: { rows: string[]; from: number; until: number; timer: number; lastLook: number; trailing: number } | null = null;
   private anchor: TopAnchor | null = null;
   private lastFitAt = 0;
+  private lastFitCost = 0;
   private fitTimer = 0;
   private fitTimerWin: Window | null = null;
+  private lastToldAt = 0;
+  private sizeTimer = 0;
+  private sizeTimerWin: Window | null = null;
   private picturesLayer: PictureLayer | null = null;
   private picturesDrain: GraphicsFilter | null = null;
   private foreground: Foreground | null = null;
@@ -429,7 +449,10 @@ export class TerminalView extends ItemView {
       const text = breaks ? unwrapCopy(raw, breaks.breaks, breaks.indent) : this.isClaude() ? dedentCopy(raw) : raw;
       copyText(text);
       if (text !== raw) this.keepCopy(raw, text);
-      this.saidCopied(text, true);
+      if (sent && !breaks && this.isClaude() && this.dragScrolled) {
+        this.dragScrolled = false;
+        this.showToast({ head: "Copied, but check it", detail: "Claude drops some text from a copy whose drag scrolled the conversation. For a reply whole, use /copy or the conversation view's copy button." });
+      } else this.saidCopied(text);
       sent?.copied?.();
       return true;
     }));
@@ -453,6 +476,10 @@ export class TerminalView extends ItemView {
         this.claudeSelection = null;
         this.pressedAt = e.button === 0 && !e.altKey && term.modes.mouseTrackingMode !== "none" && this.isClaude() ? this.cellAt(e) : null;
         if (this.pressedAt) this.lastPress = { ...this.pressedAt, at: performance.now() };
+        this.dragScrolled = false;
+        const at = this.isClaude() ? this.cellAt(e) : null;
+        const box = at && this.promptBox();
+        if (at && box && at.row > box.top && at.row < box.bottom) this.controller?.inputMoved?.();
         return;
       }
       rightHeld = !e.shiftKey && term.modes.mouseTrackingMode !== "none";
@@ -501,6 +528,14 @@ export class TerminalView extends ItemView {
     term.onBell(this.guarded(undefined, () => this.onBell()));
     term.onScroll(() => this.hideLinkTip());
     term.onRender(this.guarded(undefined, (e: { start: number; end: number }) => this.afterRender(e.start, e.end)));
+    this.registerDomEvent(this.pane.doc, "mousemove", (e) => {
+      if (!this.pressedAt || !(e.buttons & 1)) return;
+      const screen = term.element?.querySelector(".xterm-screen");
+      const size = cellSize(term);
+      if (!screen || !size) return;
+      const r = screen.getBoundingClientRect();
+      if (e.clientY < r.top + size.height || e.clientY >= r.bottom - size.height) this.dragScrolled = true;
+    }, { passive: true });
     this.registerDomEvent(this.pane, "mousemove", (e) => {
       if (e.isTrusted) this.pointer = { x: e.clientX, y: e.clientY, alt: e.altKey };
     }, { passive: true });
@@ -553,7 +588,9 @@ export class TerminalView extends ItemView {
     this.cancelReset();
     this.cancelReports();
     if (this.fitTimer) this.fitTimerWin?.clearTimeout(this.fitTimer);
-    for (const t of this.toastTimers.values()) t.win.clearTimeout(t.id);
+    if (this.sizeTimer) this.sizeTimerWin?.clearTimeout(this.sizeTimer);
+    this.sizeTimer = 0;
+    for (const cancel of this.toastTimers.values()) cancel();
     this.toastTimers.clear();
     for (const t of this.cutTimers) t.win.clearTimeout(t.id);
     this.cutTimers.clear();
@@ -588,23 +625,28 @@ export class TerminalView extends ItemView {
     const start = area.x1;
     term.clearSelection();
     if (area.empty) return true;
+    const long = box.hidden > 0;
+    if (long && !this.inputPrefix) {
+      this.showToast({ head: "Not selected", detail: "Claude shows only part of this long input, so Cmd+A can't select all of it. Esc twice clears it." });
+      return true;
+    }
     const last = area.last;
     const end = area.limits[last - area.first] ?? start;
     const length = (last - top - 1) * term.cols + end + 1 - start;
-    if (term.modes.mouseTrackingMode !== "none" && this.dragInClaude(start, top + 1, end, last, bottom)) return true;
+    if (!long && term.modes.mouseTrackingMode !== "none" && this.dragInClaude(start, top + 1, end, last, bottom)) return true;
     term.select(start, top + 1, length);
-    this.promptSelection = { text: term.getSelection(), indent: start, col: start, row: top + 1, length };
+    this.promptSelection = { text: term.getSelection(), indent: start, col: start, row: top + 1, length, long };
     return true;
   }
 
-  private promptBox(): { top: number; bottom: number; mark: number } | null {
+  private promptBox(): { top: number; bottom: number; mark: number; hidden: number } | null {
     const term = this.term;
     if (!term) return null;
     const buf = term.buffer.active;
     const text = (y: number) => buf.getLine(y)?.translateToString(true) ?? "";
     const border = (y: number) => {
       const row = text(y);
-      return /^\s*─{8,}/.test(row) && row.length >= term.cols - 2;
+      return /^\s*(?:─{8,}|─{3} [↑↓] \d+ more ─)/.test(row) && row.length >= term.cols - 2;
     };
     if (this.controller?.dialogShowing?.()) return null;
     const cursor = buf.baseY + buf.cursorY;
@@ -615,17 +657,21 @@ export class TerminalView extends ItemView {
     if (top < 0 || bottom <= top + 1) return null;
     const first = buf.getLine(top + 1);
     if (!first) return null;
+    const more = (y: number, arrow: string) => Number(new RegExp(`${arrow} (\\d+) more`).exec(text(y))?.[1] ?? 0);
+    const above = more(top, "↑");
+    const hidden = above + more(bottom, "↓");
     const cell = buf.getNullCell();
     let mark = -1;
     for (let x = 0; x < term.cols && x < 4; x++) {
       if (first.getCell(x, cell)?.getChars() === "❯") { mark = x; break; }
     }
+    if (mark < 0 && above > 0) mark = 0;
     if (mark < 0) return null;
     if (/^\s*❯\s*\d+\./.test(text(top + 1))) return null;
-    return { top, bottom, mark };
+    return { top, bottom, mark, hidden };
   }
 
-  private textArea(box: { top: number; bottom: number; mark: number }): TextArea | null {
+  private textArea(box: { top: number; bottom: number; mark: number; hidden?: number }): TextArea | null {
     const term = this.term;
     if (!term) return null;
     const buf = term.buffer.active;
@@ -668,13 +714,157 @@ export class TerminalView extends ItemView {
   private inputSelected(): boolean {
     const term = this.term;
     if (!term || !this.isClaude() || this.controller?.dialogShowing?.()) return false;
+    if (this.longSelected()) return true;
     if (term.modes.mouseTrackingMode !== "none") return !!this.claudeSelection && !term.hasSelection();
     return !!this.promptSelection && term.hasSelection() && term.getSelection() === this.promptSelection.text;
+  }
+
+  private longSelected(): boolean {
+    const term = this.term;
+    const p = this.promptSelection;
+    return !!term && !!this.inputPrefix && !!p?.long && term.hasSelection() && term.getSelection() === p.text;
+  }
+
+  private dropLongSelection(): void {
+    if (!this.promptSelection?.long) return;
+    this.promptSelection = null;
+    this.term?.clearSelection();
+  }
+
+  private longEdit(verdict: Verdict, copy: boolean, after: string | null = null): void {
+    this.dropLongSelection();
+    this.claudeSelection = null;
+    void this.editInput(() => verdict, (text) => {
+      if (!copy) return;
+      copyText(text);
+      const back = clipboardText();
+      if (back && back !== text) throw new Error("the clipboard didn't take the text");
+    }, after === null ? [] : [after]).then((got) => {
+      if (!this.term) return;
+      if (!got) this.showToast({ head: copy ? "Not copied" : "Not deleted", detail: copy ? "Claude's whole input couldn't be reached." : "Claude's whole input couldn't be reached, so none of it was deleted; anything typed after went in as usual." }, { key: `${this.noticeKey}-long` });
+      else if (verdict === "clear" && !got.cleared) this.showToast({ head: copy ? "Copied" : "Not changed", detail: "Claude's input may not have been cleared. Check it before you go on." }, { key: `${this.noticeKey}-long` });
+    });
+  }
+
+  canReadInput(): boolean {
+    return !!this.inputPrefix && !!this.session && this.isClaude() && !this.inputBusy && !this.controller?.dialogShowing?.() && !!this.promptBox();
+  }
+
+  editInput(decide: (text: string) => Verdict, onText?: (text: string) => void, then: QueueItem[] = []): Promise<{ text: string; cleared: boolean } | null> {
+    return new Promise((resolve) => {
+      if (!this.session) {
+        resolve(null);
+        return;
+      }
+      let started = false;
+      let settled = false;
+      const settle = (got: { text: string; cleared: boolean } | null) => {
+        if (settled) return;
+        settled = true;
+        resolve(got);
+      };
+      void this.inputSleep(INPUT_WAIT_MS + INPUT_LATE_MS + INPUT_SETTLE_MS).then(() => { if (!started) settle(null); });
+      this.queue([{
+        hold: (done) => {
+          if (settled) {
+            done(false);
+            return;
+          }
+          started = true;
+          this.inputThen = then.filter((i): i is string => typeof i === "string");
+          void this.inputRequest(decide, onText).then((got) => {
+            this.inputThen = [];
+            settle(got);
+            done(!!got && (got.cleared || !then.length));
+          });
+        },
+        then,
+      }]);
+    });
+  }
+
+  private inputSleep(ms: number): Promise<void> {
+    return new Promise((r) => {
+      this.pane.win.setTimeout(r, ms);
+      if (this.pane.win !== window) window.setTimeout(r, ms);
+    });
+  }
+
+  private async inputRequest(decide: (text: string) => Verdict, onText?: (text: string) => void): Promise<{ text: string; cleared: boolean } | null> {
+    const prefix = this.inputPrefix;
+    const session = this.session;
+    if (!prefix || !session || this.inputBusy) return null;
+    for (let waited = 0; this.unparsed > 0 || this.heldOutput.length; waited += INPUT_POLL_MS) {
+      if (waited >= INPUT_QUIET_MS) return null;
+      await this.inputSleep(INPUT_POLL_MS);
+    }
+    if (this.session !== session || !this.canReadInput()) return null;
+    if (!channelAllowed(this.inputEnv) || cancelWaiting(prefix)) return null;
+    if (!ensureEditScript()) return null;
+    const id = newRequestId();
+    try {
+      writeRequest(prefix, id);
+    } catch {
+      return null;
+    }
+    this.inputBusy = true;
+    try {
+      this.holdOutput(performance.now() + INPUT_HOLD_MS);
+      session.write("\x07");
+      let file: string | null = null;
+      let limit = INPUT_WAIT_MS;
+      for (let waited = 0; file === null; waited += INPUT_POLL_MS) {
+        if (this.session !== session) return null;
+        if (waited >= limit) {
+          if (limit > INPUT_WAIT_MS || withdrawRequest(prefix)) return null;
+          limit = INPUT_WAIT_MS + INPUT_LATE_MS;
+        }
+        await this.inputSleep(INPUT_POLL_MS);
+        file = readHandoff(prefix, id);
+      }
+      const text = inputText(file, editorContextOn(this.inputEnv));
+      let verdict: Verdict = "leave";
+      try {
+        onText?.(text);
+        verdict = decide(text);
+      } catch (e) {
+        console.error(`${this.core.name}: a handler for claude's input failed`, e);
+      }
+      const before = this.outputCount;
+      try {
+        writeVerdict(prefix, id, verdict);
+      } catch {
+        return { text, cleared: false };
+      }
+      let cleared = false;
+      for (let waited = 0; waited < INPUT_SETTLE_MS; waited += INPUT_POLL_MS) {
+        await this.inputSleep(INPUT_POLL_MS);
+        if (this.session !== session) return { text, cleared: false };
+        if (this.outputCount === before || this.unparsed > 0 || this.heldOutput.length || !this.promptBox()) continue;
+        if (verdict === "leave") break;
+        if (this.boxLooksEmpty() === true) {
+          cleared = true;
+          break;
+        }
+      }
+      if (verdict === "leave") this.controller?.inputRead?.(afterReadBack(text), false);
+      else if (cleared) this.controller?.inputRead?.("", true);
+      else this.controller?.inputEdited?.();
+      return { text, cleared };
+    } finally {
+      this.inputBusy = false;
+      const backlog = this.inputBacklog.splice(0);
+      for (const data of backlog) this.onInput(data);
+    }
   }
 
   private replaceSelection(after: string | null, gesture: Gesture | null): void {
     const term = this.term;
     if (!term || !this.session) return;
+    if (this.longSelected()) {
+      this.longEdit("clear", false, after);
+      return;
+    }
     const items: QueueItem[] = [];
     if (term.modes.mouseTrackingMode !== "none") {
       items.push("\x7f");
@@ -697,6 +887,10 @@ export class TerminalView extends ItemView {
   }
 
   private cutSelection(gesture: Gesture | null): void {
+    if (this.longSelected()) {
+      this.longEdit("clear", true);
+      return;
+    }
     const term = this.term;
     const hold = this.core.settings.programClipboard ? this.cutHold() : null;
     const waits = this.copy(gesture, hold?.copied);
@@ -760,7 +954,7 @@ export class TerminalView extends ItemView {
             this.cutTimers.delete(timer);
             if (answer !== done) return;
             answer = null;
-            if (done(false) && this.term) this.showToast("Cut failed", `${this.getDisplayText()}'s copy didn't come, so the text was left in place.`, undefined, undefined, `${this.noticeKey}-cut`);
+            if (done(false) && this.term) this.showToast({ head: "Cut failed", detail: "The copy didn't come, so the text was left in place." }, { key: `${this.noticeKey}-cut` });
           }, COPY_UNWRAP_MS),
         };
         this.cutTimers.add(timer);
@@ -893,18 +1087,19 @@ export class TerminalView extends ItemView {
     if (prompt && prompt.text === text) text = text.replace(new RegExp(`\n {1,${prompt.indent}}`, "g"), "\n");
     const copied = withoutPlaceholders(text);
     copyText(copied);
-    this.saidCopied(copied, false);
+    this.saidCopied(copied);
   }
 
-  private saidCopied(text: string, byProgram: boolean): void {
-    const flat = text.replace(/\s+/g, " ").trim();
-    const shown = flat.length > COPIED_SHOWN ? `${flat.slice(0, COPIED_SHOWN)}…` : flat;
-    this.showToast(byProgram ? `${this.getDisplayText()} copied` : "Copied", shown || "(nothing)");
+  private saidCopied(text: string): void {
+    const lines = text.split("\n").map((l) => l.replace(/\s+/g, " ").trim()).filter(Boolean).slice(0, COPIED_LINES).map((l) => l.slice(0, COPIED_SHOWN));
+    this.showToast({ head: "Text copied", ...(lines.length ? { lines } : { detail: "(nothing)" }) }, { recorded: true });
   }
 
-  showToast(title: string, text: string, ms = noticeMs(), onClick?: () => void, key?: string, info = false): NotificationHandle {
+  showToast(said: Said, opts: { ms?: number; onClick?: () => void; key?: string; info?: boolean; recorded?: boolean } = {}): NotificationHandle {
+    const { ms = noticeMs(), onClick, key, info = false } = opts;
     const el = this.term?.element;
     if (!el || (!key && !noticesOn())) return { hide: () => {}, shown: () => false };
+    if (!opts.recorded) this.core.remember(said, onClick);
     if (!this.toasts?.isConnected) this.toasts = el.createDiv({ cls: "vault-terminal-toasts xterm-hover" });
     const stack = this.toasts;
     const toast = createDiv({ cls: "vault-terminal-toast" });
@@ -935,15 +1130,13 @@ export class TerminalView extends ItemView {
     addCloseX(toast, clear);
     toast.style.fontFamily = this.term?.options.fontFamily ?? "";
     toast.style.fontSize = `${this.term?.options.fontSize ?? 13}px`;
-    toast.createDiv({ cls: "vault-terminal-toast-title", text: title });
-    toast.createDiv({ cls: "vault-terminal-toast-text", text });
-    if (ms) this.toastTimers.set(toast, { win: this.pane.win, id: this.pane.win.setTimeout(clear, ms) });
+    drawSaid(toast, said);
+    this.toastTimers.set(toast, closeAfter(toast, ms, clear));
     return { hide: clear, shown: () => toast.isConnected };
   }
 
   private dropToast(toast: HTMLElement): void {
-    const t = this.toastTimers.get(toast);
-    if (t) t.win.clearTimeout(t.id);
+    this.toastTimers.get(toast)?.();
     this.toastTimers.delete(toast);
     toast.remove();
   }
@@ -972,8 +1165,9 @@ export class TerminalView extends ItemView {
       const drain = this.picturesDrain;
       this.picturesDrain = null;
       if (drain) drain.draining = false;
-      this.picturesLayer = new PictureLayer(term, (text) => this.session?.write(text), drain ?? undefined);
+      this.picturesLayer = new PictureLayer(term, (text) => this.session?.write(text), drain ?? undefined, this.core.settings.keepPictures);
     }
+    this.picturesLayer?.setKeeping(this.core.settings.keepPictures);
     if (!on && this.picturesLayer) {
       const layer = this.picturesLayer;
       this.picturesLayer = null;
@@ -1040,11 +1234,13 @@ export class TerminalView extends ItemView {
   private onMigrated(): void {
     this.cancelFrame();
     this.flushHeld();
+    if (this.inputBusy) this.inputBacklog.unshift(...this.inputThen.splice(0), ...this.keyQueue.pendingText());
     this.keyQueue.clear();
     this.observe();
     this.anchor ??= this.topAnchor();
     if (this.term && this.opened) {
       this.term.open(this.pane);
+      adoptDocument(this.term, this.pane.doc);
       this.refreshLook();
     }
     this.schedule();
@@ -1091,9 +1287,10 @@ export class TerminalView extends ItemView {
     }
     this.retries = 0;
     if (this.bellMarked) this.lookedAt();
-    if (this.session && (dims.rows !== term.rows || dims.cols !== term.cols)) {
+    const resized = dims.rows !== term.rows || dims.cols !== term.cols;
+    if (this.session && resized) {
       const now = performance.now();
-      const wait = this.lastFitAt + RESIZE_SPACING_MS - now;
+      const wait = this.lastFitAt + Math.min(this.lastFitCost * 2, FIT_SPACING_MAX_MS) - now;
       if (wait > 0) {
         if (!this.fitTimer) {
           const win = this.pane.win;
@@ -1105,19 +1302,40 @@ export class TerminalView extends ItemView {
         }
         return;
       }
-      this.lastFitAt = now;
     }
     const anchor = this.anchor;
     this.anchor = null;
-    if (dims.rows !== term.rows || dims.cols !== term.cols) {
+    if (resized) {
       const top = anchor ?? this.topAnchor();
-      this.fit.fit();
+      const started = performance.now();
+      term.resize(dims.cols, dims.rows);
       this.restoreTop(top);
+      this.lastFitAt = performance.now();
+      this.lastFitCost = this.lastFitAt - started;
     } else if (anchor) {
       this.restoreTop(anchor);
     }
-    if (this.session) this.session.resize(term.rows, term.cols, ...this.pixelSize());
+    if (this.session) this.tellSize();
     else if (!this.starting && !this.ended && !this.holdStart) void (this.pending ? this.start(this.pending.kind, this.pending.folder, this.pending.opts) : this.start());
+  }
+
+  private tellSize(): void {
+    const wait = this.lastToldAt + RESIZE_SPACING_MS - performance.now();
+    if (wait > 0) {
+      if (!this.sizeTimer && this.pane) {
+        const win = this.pane.win;
+        this.sizeTimerWin = win;
+        this.sizeTimer = win.setTimeout(() => {
+          this.sizeTimer = 0;
+          this.tellSize();
+        }, wait);
+      }
+      return;
+    }
+    const term = this.term;
+    if (!term || !this.session) return;
+    this.lastToldAt = performance.now();
+    this.session.resize(term.rows, term.cols, ...this.pixelSize());
   }
 
   private topAnchor(): TopAnchor | null {
@@ -1272,6 +1490,8 @@ export class TerminalView extends ItemView {
       this.paused = false;
       this.readsKittyKeys = false;
       this.runningAgent = kind === "shell" ? null : agentFor(kind, launch.program[0]);
+      this.inputPrefix = this.runningAgent?.id === "claude" ? launch.env[INPUT_VAR] ?? null : null;
+      this.inputEnv = launch.env.CLAUDE_CONFIG_DIR ? { CLAUDE_CONFIG_DIR: launch.env.CLAUDE_CONFIG_DIR } : {};
       this.ranProgram = kind !== "shell";
       this.startDir = launch.cwd;
       this.currentDir = null;
@@ -1346,6 +1566,10 @@ export class TerminalView extends ItemView {
     const selected = !MODIFIER_KEYS.has(e.key) && this.inputSelected();
     const gesture = this.claudeSelection;
     const move = selectMove(e);
+    if (move && this.longSelected()) {
+      e.preventDefault();
+      return false;
+    }
     if (move && this.extendSelection(move, gesture)) {
       e.preventDefault();
       return false;
@@ -1447,7 +1671,8 @@ export class TerminalView extends ItemView {
     if (e.metaKey) return false;
     if (ctrlCCopies(e, term.hasSelection(), !!this.core.settings.ctrlCInterrupts)) {
       e.preventDefault();
-      this.copySelection();
+      if (this.longSelected()) this.longEdit("leave", true);
+      else this.copySelection();
       return false;
     }
     if (e.key === "Tab" && e.ctrlKey && !e.altKey) return false;
@@ -1529,6 +1754,10 @@ export class TerminalView extends ItemView {
   private copy(gesture: Gesture | null = null, copied?: () => void): boolean {
     const term = this.term;
     if (!term) return false;
+    if (this.longSelected()) {
+      this.longEdit("leave", true);
+      return false;
+    }
     if (term.hasSelection()) this.copySelection();
     else if (this.programCopies()) {
       const breaks = gesture && this.selectionBreaks(gesture);
@@ -1887,7 +2116,7 @@ export class TerminalView extends ItemView {
       const buf = term.buffer.active;
       let first = row;
       while (first > 0 && buf.getLine(first)?.isWrapped) first--;
-      for (let r = first; r === first || buf.getLine(r)?.isWrapped; r++) this.linksThisRender.set(r, links);
+      for (let r = first; r < buf.length && (r === first || buf.getLine(r)?.isWrapped); r++) this.linksThisRender.set(r, links);
     }
     const out: Array<[number, number]> = [];
     for (const { range } of links) {
@@ -1945,7 +2174,7 @@ export class TerminalView extends ItemView {
       let first = row;
       while (first > 0 && buf.getLine(first)?.isWrapped) first--;
       let last = row;
-      while (buf.getLine(last + 1)?.isWrapped) last++;
+      while (last + 1 < buf.length && buf.getLine(last + 1)?.isWrapped) last++;
       return { first, last };
     };
     const rowCells = (row: number): RowCells => cellsOf(buf.getLine(row)!);
@@ -1959,7 +2188,7 @@ export class TerminalView extends ItemView {
     }
     for (let k = 0; k < JOINED_LINES; k++) {
       const bottom = lines[lines.length - 1];
-      if (!buf.getLine(bottom.last + 1)) break;
+      if (bottom.last + 1 >= buf.length) break;
       const below = lineAt(bottom.last + 1);
       if (!cliWrapped(rowCells(bottom.last), rowCells(below.first), term.cols)) break;
       lines.push(below);
@@ -2084,7 +2313,7 @@ export class TerminalView extends ItemView {
     for (let i = 0; i < buf.length; i++) {
       const line = buf.getLine(i);
       if (!line) continue;
-      const t = line.translateToString(!buf.getLine(i + 1)?.isWrapped);
+      const t = line.translateToString(!(i + 1 < buf.length && buf.getLine(i + 1)?.isWrapped));
       if (line.isWrapped && lines.length) lines[lines.length - 1] += t;
       else lines.push(t);
     }
@@ -2192,8 +2421,13 @@ export class TerminalView extends ItemView {
   }
 
   private onInput(data: string): void {
+    this.dropLongSelection();
     if (this.session && this.keyQueue.busy && !this.queueWriting) {
       this.keyQueue.push(data);
+      return;
+    }
+    if (this.session && this.inputBusy) {
+      this.inputBacklog.push(data);
       return;
     }
     this.sendNow(data);
@@ -2250,6 +2484,7 @@ export class TerminalView extends ItemView {
   private onOutput(chunk: Uint8Array): void {
     const term = this.term;
     if (!term) return;
+    this.outputCount++;
     if (this.outputHeldUntil > performance.now()) {
       this.heldOutput.push(chunk);
       if (!this.heldTimer) this.scheduleHeld();
@@ -2341,6 +2576,10 @@ export class TerminalView extends ItemView {
     return !!this.pane && this.pane.isShown() && this.pane.doc.hasFocus();
   }
 
+  onScreen(): boolean {
+    return !!this.pane && this.pane.isShown() && this.pane.doc.visibilityState === "visible";
+  }
+
   private lookedAt(): void {
     if (!this.bellMarked || !this.looking()) return;
     this.bellMarked = false;
@@ -2380,7 +2619,8 @@ export class TerminalView extends ItemView {
 
   private onAttention(a: Attention): void {
     if (a.quiet) {
-      this.showToast(this.getDisplayText(), a.body);
+      const why = a.body.length > 48 ? /^([^:]{1,60}): (.+)$/s.exec(a.body) : null;
+      this.showToast(why ? { head: why[1], detail: why[2] } : { head: a.body });
       return;
     }
     if (this.controller?.notifiesItself?.()) return;
@@ -2393,7 +2633,10 @@ export class TerminalView extends ItemView {
     const how = [toDesktop(to) && "notification", toObsidian(to) && (looking ? "toast" : "notice")].filter(Boolean).join("+");
     this.attentionLog.push({ how: how || "none", at: Date.now() });
     if (this.attentionLog.length > 200) this.attentionLog.splice(0, 100);
-    this.core.notify(a.title || name, a.title && a.title !== name ? `${name}: ${text}` : text, () => this.bringForward(), this.noticeKey, a.needs ? "needs" : "finished");
+    const perm = /^(.+ needs your permission) to use (.+)$/.exec(text);
+    const own = a.title && a.body && a.title !== name && !/^(claude( code)?|codex|antigravity|agy)$/i.test(a.title) ? a.title : "";
+    const detail = perm ? `To use ${perm[2]}` : own;
+    this.core.notify({ head: perm ? perm[1] : text, name, ...(detail ? { detail } : {}) }, () => this.bringForward(), this.noticeKey, a.needs ? "needs" : "finished");
   }
 
   private claudeKeys(): boolean {
@@ -2497,7 +2740,7 @@ export class TerminalView extends ItemView {
         if (this.lastRetry) this.lastRetry.line = true;
       } else {
         this.retryNotice?.hide();
-        this.retryNotice = this.core.notify(this.getDisplayText(), `${text} Its tab state, notifications and pictures are off in this session.`, () => this.bringForward(), this.noticeKey, "info");
+        this.retryNotice = this.core.notify({ head: "Restarted without its additions", name: this.getDisplayText(), detail: `The first start ended at once with ${added.join(", ")}. Tab state, notifications, and pictures are off in this session.` }, () => this.bringForward(), this.noticeKey, "info");
         if (this.lastRetry) this.lastRetry.notice = true;
       }
     }, RETRY_WITHIN_MS);
@@ -2522,6 +2765,10 @@ export class TerminalView extends ItemView {
 
   get programPid(): number {
     return this.session?.programPid ?? 0;
+  }
+
+  answeredByHost(): void {
+    this.status?.answered();
   }
 
   write(data: string): boolean {
@@ -2553,6 +2800,12 @@ export class TerminalView extends ItemView {
   inputLooksEmpty(): boolean | null {
     const term = this.term;
     if (!term || !this.isClaude() || this.keyQueue.busy || this.unparsed > 0 || this.heldOutput.length) return null;
+    return this.boxLooksEmpty();
+  }
+
+  private boxLooksEmpty(): boolean | null {
+    const term = this.term;
+    if (!term) return null;
     const box = this.promptBox();
     if (!box) return null;
     const buf = term.buffer.active;

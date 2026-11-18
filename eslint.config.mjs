@@ -43,10 +43,6 @@ export default defineConfig(
     },
   },
   {
-    files: ["src/constants/scheduled.ts"],
-    rules: { "obsidianmd/hardcoded-config-path": "off" },
-  },
-  {
     files: ["src/**/*.ts"],
     rules: {
       "@typescript-eslint/no-unsafe-assignment": "error",

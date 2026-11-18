@@ -1,12 +1,18 @@
 
 import { fs, import_obsidian, path } from "../externals.js";
-import { DEFAULT_AGENT_DAILY_NAME, agentArgs, listedAgent, readAgents, shownUnder } from "../context/agents.js";
+import { DEFAULT_AGENT_DAILY_NAME, agentArgs, agentRunIndex, arrangedOrder, listedAgent, readAgents, shownUnder, profileColor } from "../context/agents.js";
 import type { AgentDef } from "../context/agents.js";
 import { readFileTail } from "../sessions/transcript-files.js";
 import { plainSessionName } from "../constants/names.js";
-import type { TFile, WorkspaceLeaf } from "obsidian";
+import type { TFile, WorkspaceLeaf, WorkspaceParent } from "obsidian";
 import type { AgentManagerPlugin } from "./main.js";
 import { notice } from "../vault-terminal/notice";
+
+function tabMark(header: HTMLElement, cls: string, on: boolean): void {
+  const have = Array.from(header.children).find((c) => c.classList.contains(cls));
+  if (on && !have) header.createDiv({ cls, attr: { "aria-hidden": "true" } });
+  else if (!on && have) have.remove();
+}
 
 class AgentMethods {
   allAgents(this: AgentManagerPlugin): AgentDef[] {
@@ -98,6 +104,141 @@ class AgentMethods {
     if (!st) return undefined;
     return this.recordedAgentId(st.sessionId) ?? st.agent;
   }
+  agentColor(this: AgentManagerPlugin, agentId: string | null | undefined): string {
+    return this.shownColor(agentId)?.color ?? "";
+  }
+  agentBlackText(this: AgentManagerPlugin, agentId: string | null | undefined): boolean {
+    return this.shownColor(agentId)?.blackText ?? false;
+  }
+  pinnedShown(this: AgentManagerPlugin): boolean {
+    const profile = this.switchedAgent();
+    return profile ? profile.pinnedOn : this.pluginData.pinnedSection !== false;
+  }
+  colorsOn(this: AgentManagerPlugin): boolean {
+    return this.pluginData.agentColors === true;
+  }
+  shownColor(this: AgentManagerPlugin, agentId: string | null | undefined): { color: string; blackText: boolean } | null {
+    if (!agentId || !this.colorsOn()) return null;
+    const all = this.allAgents();
+    const i = all.findIndex((a) => a.id === agentId && a.enabled);
+    return i === -1 || !this.agentsOn() ? null : profileColor(all[i], i);
+  }
+  tabAgentOf(this: AgentManagerPlugin, leaf: WorkspaceLeaf): string {
+    return this.listedAgentOf(this.agentOfLeaf(leaf));
+  }
+  paintAgentTab(this: AgentManagerPlugin, leaf: WorkspaceLeaf): void {
+    const group = leaf.parent;
+    const tabs = group?.type === "tabs" ? (group.children as WorkspaceLeaf[]) : [leaf];
+    const sessions = new Set(this.sessionLeaves());
+    let prev: string | null = null;
+    let prevEl: HTMLElement | null = null;
+    let any = false;
+    for (const tab of tabs) {
+      const el = tab.tabHeaderEl;
+      const agent = sessions.has(tab) ? this.tabAgentOf(tab) : null;
+      const color = agent === null ? "" : this.agentColor(agent);
+      const starts = agent !== null && prev !== null && prev !== agent && !!(color || this.agentColor(prev));
+      if (el) {
+        el.setCssProps({ "--agent-manager-profile-color": color });
+        el.toggleClass("agent-manager-profile-tab", !!color);
+        tabMark(el, "agent-manager-profile-line", !!color);
+        tabMark(el, "agent-manager-profile-divider", starts);
+        el.toggleClass("agent-manager-profile-run-start", starts);
+        el.toggleClass("agent-manager-profile-run-end", false);
+      }
+      if (starts) prevEl?.addClass("agent-manager-profile-run-end");
+      if (color) any = true;
+      prev = agent;
+      prevEl = el ?? null;
+    }
+    tabs[0]?.tabHeaderEl?.parentElement?.toggleClass("agent-manager-profile-tabs", any);
+  }
+  paintAgentTabs(this: AgentManagerPlugin): void {
+    const now = { agents: this.agentsOn(), colors: this.agentsOn() && this.colorsOn() };
+    const was = this._arrangeSeen;
+    this._arrangeSeen = now;
+    if (was && ((now.agents && !was.agents) || (now.colors && !was.colors))) { this.arrangeAgentTabs(); return; }
+    const groups = new Set<unknown>();
+    this.app.workspace.iterateAllLeaves((leaf) => {
+      if (groups.has(leaf.parent)) return;
+      groups.add(leaf.parent);
+      this.paintAgentTab(leaf);
+    });
+  }
+  unpaintAgentTabs(this: AgentManagerPlugin): void {
+    this.app.workspace.iterateAllLeaves((leaf) => {
+      const el = leaf.tabHeaderEl;
+      if (!el) return;
+      tabMark(el, "agent-manager-profile-line", false);
+      tabMark(el, "agent-manager-profile-divider", false);
+      el.removeClasses(["agent-manager-profile-tab", "agent-manager-profile-run-start", "agent-manager-profile-run-end"]);
+      el.setCssProps({ "--agent-manager-profile-color": "" });
+      el.parentElement?.removeClass("agent-manager-profile-tabs");
+    });
+  }
+  refreshAgentColors(this: AgentManagerPlugin): void {
+    this.paintAgentTabs();
+    for (const session of this.sessionObjects()) session.refreshStripAgent();
+    this.refreshBrowsers();
+  }
+  placeInAgentRun(this: AgentManagerPlugin, leaf: WorkspaceLeaf): void {
+    if (!this.agentsOn()) return;
+    const group = leaf.parent;
+    if (group?.type !== "tabs" || typeof group.removeChild !== "function" || typeof group.insertChild !== "function") return;
+    const kids = group.children as WorkspaceLeaf[];
+    const sessions = new Set(this.sessionLeaves());
+    const to = agentRunIndex(kids.map((l) => (sessions.has(l) ? this.tabAgentOf(l) : undefined)), kids.indexOf(leaf));
+    if (to < 0) return;
+    const ws = this.app.workspace;
+    const focused = this.activeLeaf() === leaf;
+    const shown = focused || (typeof group.currentTab === "number" && group.currentTab === kids.indexOf(leaf));
+    group.removeChild(leaf);
+    try {
+      group.insertChild(to, leaf);
+    } catch (e) {
+      console.error("[Agent Manager] placing a tab with its agent's", e);
+      try { group.insertChild(kids.length, leaf); } catch { /* empty */ }
+      return;
+    }
+    if (shown) group.selectTabIndex?.(to);
+    if (focused) ws.setActiveLeaf(leaf, { focus: true });
+    ws.requestSaveLayout();
+  }
+  arrangeAgentTabs(this: AgentManagerPlugin): void {
+    if (!this.agentsOn()) return;
+    const ws = this.app.workspace;
+    const sessions = new Set(this.sessionLeaves());
+    const groups = new Set<WorkspaceParent>();
+    ws.iterateAllLeaves((l) => { if (l.parent?.type === "tabs") groups.add(l.parent); });
+    const focused = this.activeLeaf();
+    let moved = false;
+    for (const group of groups) {
+      const remove = group.removeChild?.bind(group);
+      const insert = group.insertChild?.bind(group);
+      if (!remove || !insert || !group.children) continue;
+      const live = group.children;
+      const kids = [...live];
+      const order = arrangedOrder(kids.map((l) => (sessions.has(l) ? this.tabAgentOf(l) : undefined)));
+      if (order.every((k, i) => k === i)) continue;
+      const shown = typeof group.currentTab === "number" ? kids[group.currentTab] : undefined;
+      try {
+        order.forEach((k, to) => {
+          const leaf = kids[k];
+          if (live[to] === leaf) return;
+          remove(leaf);
+          insert(to, leaf);
+        });
+      } catch (e) {
+        console.error("[Agent Manager] arranging tabs by agent", e);
+      }
+      if (shown) group.selectTabIndex?.(live.indexOf(shown));
+      moved = true;
+    }
+    if (!moved) { this.paintAgentTabs(); return; }
+    if (focused) ws.setActiveLeaf(focused, { focus: true });
+    ws.requestSaveLayout();
+    this.paintAgentTabs();
+  }
   agentShows(this: AgentManagerPlugin, agentId: string | null | undefined): boolean {
     return shownUnder(agentId, this.switchedAgentId(), new Set(this.agentList().map((a) => a.id)), this.defaultAgent()?.id || null);
   }
@@ -157,6 +298,9 @@ class AgentMethods {
     this.invalidateSessionIndex();
     this.refreshBrowsers();
     for (const session of this.sessionObjects()) session.refreshStripAgent();
+    const tab = this.sessionLeaves().find((l) => (this.sessionOf(l)?._ownSessionId() ?? this.savedSessionState(l)?.sessionId) === sessionId);
+    if (tab) this.placeInAgentRun(tab);
+    this.paintAgentTabs();
   }
   async moveTranscriptNote(this: AgentManagerPlugin, note: TFile, dir: string, agentName: string | null): Promise<void> {
     const tc = this._tc();
@@ -174,14 +318,14 @@ class AgentMethods {
         target = (0, import_obsidian.normalizePath)(`${dir}/${tc.transcriptBasename(id, title, true)}.md`);
       }
       if (this.app.vault.getAbstractFileByPath(target)) {
-        notice(`Agent Manager: “${target}” already exists, so the transcript note stayed where it was.`);
+        notice({ head: "The transcript note stayed where it was", detail: `“${target}” already exists.` });
         return;
       }
       const subs = this.app.vault.getAbstractFileByPath(note.path.replace(/\.md$/, ""));
       await this.app.fileManager.renameFile(note, target);
       const subsTo = target.replace(/\.md$/, "");
       if (subs instanceof import_obsidian.TFolder && subs.path !== subsTo && !this.app.vault.getAbstractFileByPath(subsTo)) {
-        await this.app.fileManager.renameFile(subs, subsTo).catch(() => { notice(`Agent Manager: couldn't move the sub-agents' transcripts in “${subs.path}” beside “${target}”.`); });
+        await this.app.fileManager.renameFile(subs, subsTo).catch(() => { notice({ head: "Couldn't move the sub-agents' transcripts", detail: `“${subs.path}” stayed where it was, not beside “${target}”.` }); });
       }
     });
   }
@@ -198,7 +342,7 @@ class AgentMethods {
     }
     const newPath = (0, import_obsidian.normalizePath)(`${root}/${newName}`);
     if (this.app.vault.getAbstractFileByPath(newPath)) {
-      notice(`Agent Manager: “${newPath}” already exists, so the old transcript folder kept its name.`);
+      notice({ head: "The transcript folder kept its name", detail: `“${newPath}” already exists.` });
       return;
     }
     await this.app.fileManager.renameFile(oldDir, newPath);

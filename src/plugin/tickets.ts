@@ -9,6 +9,8 @@ import { OVERVIEW_TEMPLATE, TICKET_TEMPLATE, TICKETS_BASE_NAME, ticketsBase } fr
 import { isTicket } from "../context/launch-context.js";
 import { FROM_TASK_PROPERTY, followUpName, linkTarget, wikilink, withRead } from "../scheduled/follow-up.js";
 import type { ScheduledTask } from "../scheduled/task-model.js";
+import { DEFAULT_DASHBOARD_ICON } from "../context/agents.js";
+import type { AgentDef } from "../context/agents.js";
 import { ticketFileName, withNotes } from "../tickets/new-ticket.js";
 import { errorMessage, stringOf, withinVault } from "../util/guards.js";
 import { isArchived } from "../util/paths.js";
@@ -72,13 +74,13 @@ class TicketMethods {
         await this.app.vault.create(p, text);
         written.push(p);
       } catch (e) {
-        notice(`Agent Manager: couldn't create ${p}: ${stringOf(errorMessage(e))}`);
+        notice({ head: `Couldn't create ${p}`, detail: stringOf(errorMessage(e)) });
       }
     };
     const template = this.ticketTemplatePath();
     await write(this.ticketsBasePath(), ticketsBase(this.app.vault.getName(), template));
     await write(template, TICKET_TEMPLATE);
-    if (written.length) notice(`Agent Manager: tickets are on. Created ${written.join(" and ")}.`);
+    if (written.length) notice({ head: "Tickets are on", detail: `Created ${written.join(" and ")}.` });
   }
   sentFilesOn(this: AgentManagerPlugin): boolean {
     return this.pluginData.sentFiles !== "off";
@@ -109,15 +111,17 @@ class TicketMethods {
   async openTicketsNote(this: AgentManagerPlugin): Promise<void> {
     const p = this.ticketsNotePath();
     const f = this.app.vault.getAbstractFileByPath(p);
-    if (!(f instanceof import_obsidian.TFile)) { notice(`Agent Manager: there's no “${p}” in this vault. Set the tickets note in Settings → Agent Manager.`); return; }
+    if (!(f instanceof import_obsidian.TFile)) { notice({ head: "No tickets note", detail: `There's no “${p}” in this vault. Set the tickets note in Settings → Agent Manager.` }); return; }
     await this.app.workspace.getLeaf(false).openFile(f);
   }
   customButtonTarget(this: AgentManagerPlugin): { url: string } | { path: string } | null {
-    const v = stringOf(this.pluginData.customButtonTarget ?? "").trim();
+    return this.buttonTarget(stringOf(this.pluginData.customButtonTarget ?? "")) ?? (this.ticketsOn() ? { path: this.ticketsNotePath() } : null);
+  }
+  buttonTarget(this: AgentManagerPlugin, raw: string): { url: string } | { path: string } | null {
+    const v = raw.trim();
     if (/^[a-z][a-z0-9+.-]*:/i.test(v)) return { url: v };
     const p = withinVault(v.replace(/^\/+/, ""));
-    if (p) return { path: (0, import_obsidian.normalizePath)(p) };
-    return this.ticketsOn() ? { path: this.ticketsNotePath() } : null;
+    return p ? { path: (0, import_obsidian.normalizePath)(p) } : null;
   }
   customButtonIcon(this: AgentManagerPlugin): string {
     const v = stringOf(this.pluginData.customButtonIcon ?? "").trim();
@@ -125,15 +129,27 @@ class TicketMethods {
     return stringOf(this.pluginData.customButtonTarget ?? "").trim() ? "link" : "ticket";
   }
   async openCustomButton(this: AgentManagerPlugin): Promise<void> {
-    const t = this.customButtonTarget();
+    await this.openButtonTarget(this.customButtonTarget(), "The custom button");
+  }
+  agentDashboard(this: AgentManagerPlugin, agent: AgentDef | null): { target: { url: string } | { path: string }; name: string; icon: string } | null {
+    const target = agent?.dashboardOn ? this.buttonTarget(agent.dashboardTarget) : null;
+    if (!agent || !target) return null;
+    const opens = "url" in target ? target.url : target.path;
+    return {
+      target,
+      name: agent.dashboardName || opens.replace(/^.*\//, "").replace(/\.(md|base)$/, ""),
+      icon: agent.dashboardIcon && import_obsidian.getIcon(agent.dashboardIcon) ? agent.dashboardIcon : DEFAULT_DASHBOARD_ICON,
+    };
+  }
+  async openButtonTarget(this: AgentManagerPlugin, t: { url: string } | { path: string } | null, what: string): Promise<void> {
     if (!t) return;
     if ("url" in t) {
-      try { new URL(t.url); } catch { notice(`Agent Manager: “${t.url}” isn't a link that can be opened. Set what the custom button opens in Settings → Agent Manager.`); return; }
+      try { new URL(t.url); } catch { notice({ head: `${what}'s link can't be opened`, detail: `“${t.url}” isn't a link. Set what it opens in Settings → Agent Manager.` }); return; }
       window.open(t.url);
       return;
     }
     const f = this.app.vault.getAbstractFileByPath(t.path);
-    if (!(f instanceof import_obsidian.TFile)) { notice(`Agent Manager: there's no “${t.path}” in this vault. Set what the custom button opens in Settings → Agent Manager.`); return; }
+    if (!(f instanceof import_obsidian.TFile)) { notice({ head: `${what}'s note isn't there`, detail: `There's no “${t.path}” in this vault. Set what it opens in Settings → Agent Manager.` }); return; }
     await this.app.workspace.getLeaf(false).openFile(f);
   }
   freeNotePath(this: AgentManagerPlugin, dir: string, base: string): string {
@@ -165,7 +181,7 @@ class TicketMethods {
       await this.app.workspace.getLeaf(false).openFile(file, name ? {} : { eState: { rename: "all" } });
       return file;
     } catch (e) {
-      notice(`Agent Manager: couldn't make the ticket: ${stringOf(errorMessage(e))}`);
+      notice({ head: "Couldn't make the ticket", detail: stringOf(errorMessage(e)) });
       return null;
     }
   }
@@ -209,7 +225,7 @@ class TicketMethods {
     return next;
   }
   async _fileFollowUp(this: AgentManagerPlugin, task: Pick<ScheduledTask, "name" | "notePath" | "projectFolder">, resultRel: string): Promise<string | null> {
-    const say = (m: string) => { this.notifyDesktop(`“${task.name}”'s result wasn't filed in a ticket`, m, task.notePath); return null; };
+    const say = (m: string) => { this.notifyDesktop({ head: "A run's result wasn't filed in a ticket", name: task.name, detail: m.charAt(0).toUpperCase() + m.slice(1) }, task.notePath); return null; };
     if (!this.ticketsOn()) return say("tickets are off.");
     const label = resultRel.slice(resultRel.lastIndexOf("/") + 1).replace(/\.md$/i, "");
     const link = wikilink(resultRel, label);
@@ -319,6 +335,7 @@ class TicketMethods {
     await this.revealBrowser();
     const view = this.findBrowserLeaf()?.view;
     if (!isBrowser(view)) return;
+    this.ticketCard.owner = view;
     view._focusCard = "ticket";
     (view._revealCard || (view._revealCard = {})).ticket = true;
     view.renderBrowser();
@@ -341,7 +358,7 @@ class TicketMethods {
       const file = await this.app.vault.create(p, text);
       await this.app.workspace.getLeaf(false).openFile(file);
     } catch (e) {
-      notice(`Agent Manager: couldn't make the project overview: ${stringOf(errorMessage(e))}`);
+      notice({ head: "Couldn't make the project overview", detail: stringOf(errorMessage(e)) });
     }
   }
   async offerToFileTicket(this: AgentManagerPlugin, file: TFile): Promise<void> {
@@ -364,9 +381,9 @@ class TicketMethods {
       await this.ensureFolder(dir);
       const dest = this.freeNotePath(dir, file.basename);
       await this.app.fileManager.renameFile(file, dest);
-      notice(`Filed in ${dir}.`);
+      notice({ head: "Ticket filed", detail: dir });
     } catch (e) {
-      notice(`Agent Manager: couldn't move the ticket: ${stringOf(errorMessage(e))}`);
+      notice({ head: "Couldn't move the ticket", detail: stringOf(errorMessage(e)) });
     }
   }
   async openTicketSession(this: AgentManagerPlugin, file: TFile): Promise<void> {

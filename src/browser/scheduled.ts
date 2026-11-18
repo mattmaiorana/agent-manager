@@ -2,9 +2,11 @@
 import { import_obsidian } from "../externals.js";
 import { CLI_BACKENDS, isBackendKey } from "../constants/backends.js";
 import { fillProjectSelect } from "./project-select.js";
-import { LATEST_OUTPUTS_LABEL, NEW_SCHEDULED_TASK_LABEL, SHARED_TASK_CHOICE, NEW_TASK_MODE_HINTS, NEW_TASK_MODELS, NEW_TASK_MODES, SCHEDULED_TASKS_LABEL, newTaskDraft } from "../constants/scheduled.js";
-import type { NewTaskDraft, NewTaskMode } from "../constants/scheduled.js";
+import { LATEST_OUTPUTS_LABEL, NEW_SCHEDULED_TASK_LABEL, SHARED_TASK_CHOICE, NEW_TASK_MODELS, SCHEDULED_TASKS_LABEL, newTaskDraft } from "../constants/scheduled.js";
+import type { NewTaskDraft } from "../constants/scheduled.js";
 import { reachFacts } from "../scheduled/reach-facts.js";
+import { VAULT_QUERIES } from "../scheduled/vault-queries.js";
+import { draftFromTask, mixedSiteList, taskDenyList } from "../scheduled/task-draft.js";
 import { runParseStarted, runResultPath } from "../scheduled/run-core.js";
 import type { RunRow } from "../scheduled/run-core.js";
 import { buildSchedulePicker } from "../scheduled/schedule-picker.js";
@@ -37,7 +39,8 @@ class ScheduledMethods {
     const row = wrap.createDiv({ cls: "agent-manager-tasks-row", attr: { role: "button", tabindex: "0" } });
     import_obsidian.setIcon(row.createSpan({ cls: "agent-manager-tasks-row-icon" }), "clock");
     const col = row.createDiv({ cls: "agent-manager-tasks-row-text" });
-    col.createDiv({ cls: "agent-manager-tasks-row-title", text: SCHEDULED_TASKS_LABEL });
+    const title = col.createDiv({ cls: "agent-manager-tasks-row-title" });
+    title.createSpan({ text: SCHEDULED_TASKS_LABEL });
     const line = col.createDiv({ cls: "agent-manager-tasks-row-line" });
     const next = views.find((v) => v.next);
     const running = views.filter((v) => v.running).length;
@@ -48,9 +51,13 @@ class ScheduledMethods {
     }
     else line.createSpan({ text: !views.length ? "None yet" : next?.next ? `Next: ${schedShortWhen(next.next, new Date())}` : "Nothing to run" });
     const unread = views.reduce((n, v) => n + v.unread, 0);
-    if (unread) line.createSpan({ cls: "agent-manager-task-tag is-new", text: unread === 1 ? "1 output" : `${unread} outputs` });
+    if (unread) {
+      const out = line.createSpan({ cls: "agent-manager-tasks-row-outputs" });
+      out.createSpan({ cls: "agent-manager-tasks-row-dot", text: "·" });
+      out.createSpan({ text: unread === 1 ? "1 new output" : `${unread} new outputs` });
+    }
     const pending = views.filter(isPending).length;
-    if (pending) line.createSpan({ cls: "agent-manager-task-tag is-fix", text: `${pending} pending` });
+    if (pending) title.createSpan({ cls: "agent-manager-task-tag is-fix", text: `${pending} pending` });
     import_obsidian.setIcon(row.createSpan({ cls: "agent-manager-tasks-row-go" }), "chevron-right");
     const go = () => { this.browserScope = { page: "tasks" }; this.renderBrowser(); };
     row.addEventListener("click", go);
@@ -102,18 +109,6 @@ class ScheduledMethods {
       count(views.filter((v) => v.state === "ok").length, "active", views.some((v) => v.state === "ok") ? "is-active" : "");
       count(views.filter(isPending).length, "pending", views.some(isPending) ? "is-pending" : "");
       count(views.filter((v) => v.state === "paused").length, "paused");
-    }
-    const safety = await this.plugin.safetyStatus();
-    if (safety) {
-      const line = wrap.createDiv({ cls: `agent-manager-tasks-safety is-${safety.tone}` });
-      line.createSpan({ cls: "agent-manager-tasks-safety-text", text: safety.text });
-      if (safety.action) {
-        const b = line.createEl("button", { text: safety.action });
-        b.addEventListener("click", () => {
-          b.disabled = true;
-          void this.plugin.safetyPhasesWanted().then((phases) => this.plugin.runSafetyCheck(phases, { manual: true }));
-        });
-      }
     }
     if (views.some((v) => v.runs.some((r) => runResultPath(r.Result)))) {
       const fresh = views.reduce((n, v) => n + v.unread, 0);
@@ -170,6 +165,13 @@ class ScheduledMethods {
     b.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); back(); } });
     return head;
   }
+  profilePill(this: Browser, parent: HTMLElement, agentName: string | null): void {
+    const pill = parent.createSpan({ cls: "agent-manager-task-profile", text: agentName || "No profile" });
+    const color = agentName ? this.plugin.agentColor(this.plugin.allAgents().find((a) => a.name === agentName)?.id) : "";
+    if (!color) return;
+    pill.addClass("has-color");
+    pill.setCssProps({ "--agent-manager-profile-color": color });
+  }
   renderTaskRow(this: Browser, list: HTMLElement, v: TaskView, now: Date): void {
     const row = list.createDiv({ cls: "agent-manager-row agent-manager-session-row agent-manager-task-row", attr: { role: "button", tabindex: "0" } });
     row.dataset.taskPath = v.task.notePath;
@@ -178,7 +180,7 @@ class ScheduledMethods {
     const col = body.createDiv({ cls: "agent-manager-row-col" });
     const name = col.createDiv({ cls: "agent-manager-task-name-line" });
     name.createSpan({ cls: "agent-manager-row-name" + (v.unread ? " is-unread" : ""), text: v.task.label });
-    if (this.plugin.agentsOn()) name.createSpan({ cls: "agent-manager-task-profile", text: v.reach.agent || "No profile" });
+    if (this.plugin.agentsOn()) this.profilePill(name, v.reach.agent);
     if (v.state === "paused") {
       const needs = v.task.problems.length ? "Needs fixing" : !v.approved ? "Needs approval" : "";
       if (needs) name.createSpan({ cls: "agent-manager-task-profile agent-manager-task-needs" + (v.task.problems.length ? "" : " is-approve"), text: needs });
@@ -220,7 +222,7 @@ class ScheduledMethods {
   startTaskSession(this: Browser, notePath: string): void {
     const f = this.app.vault.getAbstractFileByPath(notePath);
     if (f instanceof import_obsidian.TFile) this.plugin.startFromFile(f);
-    else notice("That scheduled task's note isn't there anymore.");
+    else notice("That scheduled task's note isn't there anymore");
   }
   taskCardState(this: Browser): NonNullable<Browser["plugin"]["taskCard"]> {
     const card = this.plugin.taskCard || (this.plugin.taskCard = { open: false, draft: newTaskDraft() });
@@ -232,7 +234,7 @@ class ScheduledMethods {
     const draft = card.draft;
     const form = wrap.createDiv({ cls: "agent-manager-newform agent-manager-newcard agent-manager-ticketcard agent-manager-taskcard" });
     if (!this.plugin.getBrowserBackends().includes("claude")) {
-      form.createDiv({ cls: "agent-manager-ticketcard-from", text: "Scheduled tasks run on Claude Code for now, and Claude Code isn't one of the CLIs offered (Settings → Agent Manager)." });
+      form.createDiv({ cls: "agent-manager-ticketcard-from", text: "Scheduled tasks run on Claude Code for now, and Claude Code isn't one of the CLIs offered (Settings → Agent Manager → CLIs)." });
       return;
     }
     const input = form.createEl("input", { type: "text", cls: "agent-manager-name-input", attr: { placeholder: "Name this scheduled task" } });
@@ -248,48 +250,7 @@ class ScheduledMethods {
     if (!listed || (hasHome && !draft.project)) draft.project = this.plugin.creationProjectDefault(groups, listed ? draft.project : "");
     fillProjectSelect(project, groups, draft.project);
     project.addEventListener("change", () => { draft.project = project.value; sayWhere(); });
-    const mode = form.createEl("select", { cls: "dropdown agent-manager-ticket-select", attr: { "aria-label": "How it runs" } });
-    for (const [value, text] of NEW_TASK_MODES) {
-      const opt = mode.createEl("option", { text, value });
-      if (value === draft.mode) opt.selected = true;
-    }
-    const hint = form.createDiv({ cls: "agent-manager-taskcard-hint", text: NEW_TASK_MODE_HINTS[draft.mode] });
-    const reach = form.createDiv({ cls: "agent-manager-taskcard-box" });
-    const fillReach = () => { reach.empty(); this.renderTaskCardReach(reach, draft); };
-    fillReach();
-    mode.addEventListener("change", () => {
-      draft.mode = mode.value as NewTaskMode;
-      if (draft.mode === "web" && draft.web === "off") draft.web = "search";
-      hint.setText(NEW_TASK_MODE_HINTS[draft.mode]);
-      fillReach();
-    });
-    buildSchedulePicker(form, draft.schedule, (line) => { draft.schedule = line; });
-    const prompt = form.createEl("textarea", { cls: "agent-manager-ticket-notes agent-manager-task-prompt", attr: { placeholder: "What each run should do", rows: "4" } });
-    prompt.value = draft.prompt;
-    prompt.addEventListener("input", () => { draft.prompt = prompt.value; });
-    const advBtn = form.createEl("button", { cls: "agent-manager-taskcard-more", attr: { "aria-expanded": String(draft.advanced) } });
-    const advText = advBtn.createDiv();
-    advText.createDiv({ text: "Advanced Options" });
-    const advSummary = advText.createDiv({ cls: "agent-manager-taskcard-more-summary" });
-    const chevron = advBtn.createSpan({ cls: "agent-manager-taskcard-more-chevron" });
-    const adv = form.createDiv({ cls: "agent-manager-taskcard-box" });
-    const sayAdv = () => {
-      const model = NEW_TASK_MODELS.find(([v]) => v === draft.model)?.[1] || draft.model;
-      advSummary.setText([draft.eachRun === "new" ? "New session each run" : "Continues its session", model, draft.followUp ? "Follow-up ticket" : "No follow-up ticket", ...(draft.onlyWhenNew ? ["Only when new"] : [])].join(" · "));
-      (0, import_obsidian.setIcon)(chevron, draft.advanced ? "chevron-down" : "chevron-right");
-      adv.toggleClass("agent-manager-hidden", !draft.advanced);
-      advBtn.setAttr("aria-expanded", String(draft.advanced));
-    };
-    advBtn.addEventListener("click", () => { draft.advanced = !draft.advanced; sayAdv(); });
-    taskCardRow(adv, "Each run", "", (r) => taskCardSeg(r, [["new", "New session"], ["continue", "Continue"]], draft.eachRun, (v) => { draft.eachRun = v as NewTaskDraft["eachRun"]; sayAdv(); }));
-    taskCardRow(adv, "Model", "", (r) => {
-      const sel = r.createEl("select", { cls: "dropdown", attr: { "aria-label": "Model" } });
-      for (const [v, t] of NEW_TASK_MODELS) { const o = sel.createEl("option", { text: t, value: v }); if (v === draft.model) o.selected = true; }
-      sel.addEventListener("change", () => { draft.model = sel.value; sayAdv(); });
-    });
-    taskCardCheck(adv, "File results in a follow-up ticket", draft.followUp, (v) => { draft.followUp = v; sayAdv(); });
-    taskCardCheck(adv, "Only report when something's new", draft.onlyWhenNew, (v) => { draft.onlyWhenNew = v; sayAdv(); });
-    sayAdv();
+    this.renderTaskFormBody(form, draft);
     const controls = form.createDiv({ cls: "agent-manager-newform-row agent-manager-newform-controls" });
     const where = controls.createDiv({ cls: "agent-manager-taskcard-where" });
     const whereLine = where.createDiv();
@@ -303,10 +264,11 @@ class ScheduledMethods {
     let done = false;
     create.addEventListener("click", () => {
       if (done) return;
-      if (!draft.name.trim()) { notice("Name the scheduled task."); input.focus(); return; }
-      if (!draft.schedule) { notice("Pick a schedule for the scheduled task."); return; }
-      if (!draft.prompt.trim()) { notice("Say what each run should do."); prompt.focus(); return; }
-      if (draft.mode !== "local" && draft.web === "sites" && !draft.sites.trim()) { notice("List the sites it may read, or pick another web setting."); return; }
+      if (!draft.name.trim()) { notice("Name the scheduled task"); input.focus(); return; }
+      if (!draft.schedule) { notice("Pick a schedule for the scheduled task"); return; }
+      if (!draft.prompt.trim()) { notice("Say what each run should do"); return; }
+      if (draft.web === "sites" && !draft.sites.trim()) { notice({ head: "List the sites it may read", detail: "Or pick another web setting." }); return; }
+      if (draft.web === "sites" && mixedSiteList(draft.sites)) { notice({ head: "A note listing sites goes alone", detail: "Put the other sites in the note, or list them all here." }); return; }
       done = true;
       const opts = { ...draft };
       void (async () => {
@@ -322,6 +284,59 @@ class ScheduledMethods {
     input.addEventListener("keydown", (e) => { if (e.key === "Escape") { e.preventDefault(); input.blur(); } });
     if (this._focusTaskCard) input.dataset.autofocus = "true";
   }
+  renderTaskFormBody(this: Browser, form: HTMLElement, draft: NewTaskDraft): void {
+    form.createDiv({ cls: "agent-manager-taskcard-hint", text: "A normal Claude Code session in a tab, with your skills, tools, and connectors." });
+    if (draft.toFull) form.createDiv({ cls: "agent-manager-taskcard-hint mod-warning", text: "This task was written for a headless run, which this version removed. Saving makes it a full session task, with connectors and a shell unless you turn them off, and removes file-access, tools, and writes from its note." });
+    this.renderTaskCardReach(form.createDiv({ cls: "agent-manager-taskcard-box" }), draft);
+    let built = false;
+    buildSchedulePicker(form, draft.schedule, (line) => { if (built) draft.schedule = line; });
+    built = true;
+    const prompt = form.createEl("textarea", { cls: "agent-manager-ticket-notes agent-manager-task-prompt", attr: { placeholder: "What each run should do", rows: "4" } });
+    prompt.value = draft.prompt;
+    prompt.addEventListener("input", () => { draft.prompt = prompt.value; });
+    const advBtn = form.createEl("button", { cls: "agent-manager-taskcard-more", attr: { "aria-expanded": String(draft.advanced) } });
+    const advText = advBtn.createDiv();
+    advText.createDiv({ text: "Advanced Options" });
+    const advSummary = advText.createDiv({ cls: "agent-manager-taskcard-more-summary" });
+    const chevron = advBtn.createSpan({ cls: "agent-manager-taskcard-more-chevron" });
+    const adv = form.createDiv({ cls: "agent-manager-taskcard-box" });
+    const sayAdv = () => {
+      const model = NEW_TASK_MODELS.find(([v]) => v === draft.model)?.[1] || draft.model;
+      const refused = taskDenyList(draft.deny);
+      advSummary.setText([
+        draft.eachRun === "new" ? "New session each run" : "Continues its session", model, draft.followUp ? "Follow-up ticket" : "No follow-up ticket",
+        ...(draft.onlyWhenNew ? ["Only when new"] : []),
+        ...(draft.reads.length ? [`Reads ${draft.reads.length} first`] : []),
+        ...(draft.obsidianCli.length ? [`${draft.obsidianCli.length} vault ${draft.obsidianCli.length === 1 ? "query" : "queries"}`] : []),
+        ...(refused.length ? [`Refuses ${refused.length} ${refused.length === 1 ? "tool" : "tools"}`] : []),
+      ].join(" · "));
+      (0, import_obsidian.setIcon)(chevron, draft.advanced ? "chevron-down" : "chevron-right");
+      adv.toggleClass("agent-manager-hidden", !draft.advanced);
+      advBtn.setAttr("aria-expanded", String(draft.advanced));
+    };
+    advBtn.addEventListener("click", (e) => { e.preventDefault(); draft.advanced = !draft.advanced; sayAdv(); });
+    const fillAdv = () => {
+      adv.empty();
+      taskCardRow(adv, "Each run", "", (r) => taskCardSeg(r, [["new", "New session"], ["continue", "Continue"]], draft.eachRun, (v) => { draft.eachRun = v as NewTaskDraft["eachRun"]; sayAdv(); }));
+      taskCardRow(adv, "Model", "", (r) => {
+        const sel = r.createEl("select", { cls: "dropdown", attr: { "aria-label": "Model" } });
+        const models = NEW_TASK_MODELS.some(([v]) => v === draft.model) ? NEW_TASK_MODELS : [...NEW_TASK_MODELS, [draft.model, draft.model] as [string, string]];
+        for (const [v, t] of models) { const o = sel.createEl("option", { text: t, value: v }); if (v === draft.model) o.selected = true; }
+        sel.addEventListener("change", () => { draft.model = sel.value; sayAdv(); });
+      });
+      taskCardCheck(adv, "File results in a follow-up ticket", draft.followUp, (v) => { draft.followUp = v; sayAdv(); });
+      taskCardCheck(adv, "Only report when something's new", draft.onlyWhenNew, (v) => { draft.onlyWhenNew = v; sayAdv(); });
+      taskCardRow(adv, "Vault queries", "Answered from Obsidian's link index before each run", () => {});
+      for (const [k, label] of VAULT_QUERIES) taskCardCheck(adv, label, draft.obsidianCli.includes(k), (on) => { draft.obsidianCli = on ? [...draft.obsidianCli.filter((x) => x !== k), k] : draft.obsidianCli.filter((x) => x !== k); sayAdv(); });
+      taskCardRow(adv, "Refuse these tools", "Any tool, a connector's included", () => {});
+      const deny = adv.createEl("input", { type: "text", cls: "agent-manager-name-input", attr: { placeholder: "Tool names, split by commas", "aria-label": "Refuse these tools" } });
+      deny.value = draft.deny;
+      deny.addEventListener("input", () => { draft.deny = deny.value; sayAdv(); });
+      this.renderTaskCardReads(adv, draft, sayAdv);
+    };
+    fillAdv();
+    sayAdv();
+  }
   renderTaskCardReach(this: Browser, box: HTMLElement, draft: NewTaskDraft): void {
     const sitesField = () => {
       const f = box.createEl("input", { type: "text", cls: "agent-manager-name-input", attr: { placeholder: "Sites it may read, or a [[note]] listing them", "aria-label": "Sites" } });
@@ -330,31 +345,25 @@ class ScheduledMethods {
       f.toggleClass("agent-manager-hidden", draft.web !== "sites");
       return f;
     };
-    if (draft.mode === "full") {
-      let sites: HTMLInputElement | null = null;
-      taskCardRow(box, "Web", "", (r) => taskCardSeg(r, [["off", "Off"], ["search", "Search"], ["sites", "Sites"]], draft.web, (v) => { draft.web = v as NewTaskDraft["web"]; sites?.toggleClass("agent-manager-hidden", v !== "sites"); }));
-      sites = sitesField();
-      taskCardRow(box, "Connectors", "Mail, Slack, calendar: reading and drafts, never sending", (r) => taskCardToggle(r, "Connectors", draft.connectors, (v) => { draft.connectors = v; }));
-      taskCardRow(box, "Close its tab after a clean run", "", (r) => taskCardToggle(r, "Close its tab after a clean run", draft.closeTab, (v) => { draft.closeTab = v; }));
-    } else if (draft.mode === "local") {
-      taskCardRow(box, "Web", "", (r) => r.createDiv({ cls: "agent-manager-taskcard-fixed", text: "Off" }));
-      taskCardRow(box, "Files it reads", "", (r) => {
-        const sel = r.createEl("select", { cls: "dropdown", attr: { "aria-label": "Files it reads" } });
-        for (const [v, t] of [["project", "Its project"], ["vault", "The whole vault"], ["none", "Only its own folder"]] as const) { const o = sel.createEl("option", { text: t, value: v }); if (v === draft.files) o.selected = true; }
-        sel.addEventListener("change", () => { draft.files = sel.value as NewTaskDraft["files"]; });
-      });
-      taskCardRow(box, "Shell", "Sandboxed: no network, writes nowhere", (r) => taskCardToggle(r, "Shell", draft.shell, (v) => { draft.shell = v; }));
-    } else {
-      let sites: HTMLInputElement | null = null;
-      taskCardRow(box, "Web", "", (r) => taskCardSeg(r, [["search", "Search"], ["sites", "Sites"]], draft.web === "sites" ? "sites" : "search", (v) => { draft.web = v as NewTaskDraft["web"]; sites?.toggleClass("agent-manager-hidden", v !== "sites"); }));
-      sites = sitesField();
-      taskCardRow(box, "Files it reads", "The web and your vault never meet, but for what it reads first", (r) => r.createDiv({ cls: "agent-manager-taskcard-fixed", text: "Its own folder" }));
-    }
-    this.renderTaskCardReads(box, draft);
+    let kind: HTMLElement | null = null, sites: HTMLInputElement | null = null, chrome: HTMLElement | null = null;
+    let lastOn: "search" | "sites" = draft.web === "sites" ? "sites" : "search";
+    const show = () => {
+      kind?.toggleClass("agent-manager-hidden", draft.web === "off");
+      sites?.toggleClass("agent-manager-hidden", draft.web !== "sites");
+      chrome?.toggleClass("agent-manager-hidden", draft.web !== "search");
+    };
+    taskCardRow(box, "Web", "Pages and search; off, its shell is sandboxed with no network", (r) => taskCardToggle(r, "Web", draft.web !== "off", (on) => { draft.web = on ? lastOn : "off"; show(); }));
+    kind = taskCardRow(box, "Web access", "", (r) => taskCardSeg(r, [["search", "Full access"], ["sites", "List of sites"]], lastOn, (v) => { lastOn = v as "search" | "sites"; draft.web = lastOn; show(); }));
+    sites = sitesField();
+    chrome = taskCardRow(box, "Claude in Chrome", "Acts in your signed-in browser, on any site", (r) => taskCardToggle(r, "Claude in Chrome", draft.chrome, (v) => { draft.chrome = v; }));
+    show();
+    taskCardRow(box, "Shell", "Sandboxed while the web is off or a list of sites", (r) => taskCardToggle(r, "Shell", draft.shell, (v) => { draft.shell = v; }));
+    taskCardRow(box, "Connectors", "Mail, Slack, calendar: as in any session", (r) => taskCardToggle(r, "Connectors", draft.connectors, (v) => { draft.connectors = v; }));
+    taskCardRow(box, "Write only in its own folder", "Needs the web off or a list of sites, or no shell; its shell then writes nowhere", (r) => taskCardToggle(r, "Write only in its own folder", draft.ownFolder, (v) => { draft.ownFolder = v; }));
+    taskCardRow(box, "Close its tab after a clean run", "", (r) => taskCardToggle(r, "Close its tab after a clean run", draft.closeTab, (v) => { draft.closeTab = v; }));
   }
-  renderTaskCardReads(this: Browser, box: HTMLElement, draft: NewTaskDraft): void {
-    const desc = draft.mode === "full" ? "Told to read these first, as a ticket's session is" : draft.mode === "local" ? "Read first, beside the files it reads" : "Read first: the only vault notes and folders it sees";
-    taskCardRow(box, "Reads first", desc, () => {});
+  renderTaskCardReads(this: Browser, box: HTMLElement, draft: NewTaskDraft, changed?: () => void): void {
+    taskCardRow(box, "Reads first", "Told to read these first, as a ticket's session is", () => {});
     const field = box.createEl("input", { type: "text", cls: "agent-manager-name-input", attr: { placeholder: "Add a note or folder…", "aria-label": "Reads first" } });
     const chips = box.createDiv({ cls: "agent-manager-taskcard-chips" });
     const draw = () => {
@@ -365,13 +374,42 @@ class ScheduledMethods {
         x.addEventListener("click", () => { draft.reads = draft.reads.filter((q) => q !== p); draw(); });
       }
       chips.toggleClass("agent-manager-hidden", !draft.reads.length);
+      changed?.();
     };
+    if (draft.readsKept.length) box.createDiv({ cls: "agent-manager-taskcard-hint", text: `Not found in the vault, kept as written: ${draft.readsKept.join(", ")}` });
     new ReadsSuggest(this.app, field, (f) => {
       const p = f instanceof import_obsidian.TFolder ? `${f.path}/` : f.path;
       if (!draft.reads.includes(p)) draft.reads = [...draft.reads, p];
       draw();
     });
     draw();
+  }
+  openTaskEditor(this: Browser, notePath: string): void {
+    void (async () => {
+      const v = await this.plugin.taskViewByPath(notePath).catch(() => null);
+      if (!v) { this.openTaskNote(notePath); return; }
+      const before = draftFromTask(v.task);
+      const draft: NewTaskDraft = { ...before, reads: [...before.reads], obsidianCli: [...before.obsidianCli] };
+      const modal = new import_obsidian.Modal(this.app);
+      modal.titleEl.setText(`Edit “${v.task.label}”`);
+      modal.modalEl.addClass("agent-manager-task-edit");
+      const form = modal.contentEl.createDiv({ cls: "agent-manager-newform agent-manager-newcard agent-manager-ticketcard agent-manager-taskcard" });
+      this.renderTaskFormBody(form, draft);
+      const controls = form.createDiv({ cls: "agent-manager-newform-row agent-manager-newform-controls" });
+      const where = controls.createDiv({ cls: "agent-manager-taskcard-where" });
+      where.createDiv({ text: "A change to what a run can reach asks for approval again." });
+      const open = controls.createEl("button", { text: "Open note" });
+      open.addEventListener("click", () => { modal.close(); this.openTaskNote(notePath); });
+      const save = controls.createEl("button", { text: "Save", cls: "agent-manager-start-btn mod-cta" });
+      save.addEventListener("click", () => {
+        if (!draft.schedule) { notice("Pick a schedule for the scheduled task"); return; }
+        if (!draft.prompt.trim()) { notice("Say what each run should do"); return; }
+        if (draft.web === "sites" && !draft.sites.trim()) { notice({ head: "List the sites it may read", detail: "Or pick another web setting." }); return; }
+        if (draft.web === "sites" && mixedSiteList(draft.sites)) { notice({ head: "A note listing sites goes alone", detail: "Put the other sites in the note, or list them all here." }); return; }
+        void this.plugin.updateTask(notePath, before, draft).then((ok) => { if (ok) modal.close(); });
+      });
+      modal.open();
+    })();
   }
   openTaskNote(this: Browser, notePath: string): void {
     const f = this.app.vault.getAbstractFileByPath(notePath);
@@ -406,7 +444,7 @@ class ScheduledMethods {
       const row = card.createDiv({ cls: "agent-manager-task-actions" });
       button(row, "Approve", true, () => { void this.plugin.approveTask(v); });
       button(row, "Start session", false, () => { this.startTaskSession(t.notePath); });
-      button(row, "Edit", false, () => { void this.plugin.openTaskNoteFile(t.notePath); });
+      button(row, "Edit", false, () => this.openTaskEditor(t.notePath));
       button(row, "Pause", false, () => { void this.plugin.setTaskPaused(t, true); });
     }
     if (!pendingApproval || v.running) {
@@ -430,7 +468,7 @@ class ScheduledMethods {
       if (v.running) button(actions, "Stop", true, () => { this.plugin.stopRun(v.task); });
       else if (!t.problems.length) button(actions, "Run now", !t.paused && v.approved, () => { void this.plugin.runNow(v); });
       button(actions, "Start session", false, () => { this.startTaskSession(t.notePath); });
-      button(actions, "Edit", false, () => this.openTaskNote(t.notePath));
+      button(actions, "Edit", false, () => this.openTaskEditor(t.notePath));
       if (!t.paused) button(actions, "Pause", false, () => { void this.plugin.setTaskPaused(t, true); });
     }
 
@@ -447,7 +485,6 @@ class ScheduledMethods {
     };
     const label = (k: string) => (isBackendKey(k) ? CLI_BACKENDS[k].label : k);
     facts("The task", [
-      ["Mode", t.mode === "full" ? "Full session" : t.web.mode === "off" ? "Headless (Local Only)" : "Headless (Web Access)"],
       ["Schedule", "error" in t.rules ? (t.scheduleText || "Not set") : schedDescribe(t.rules)],
       ["Project", t.projectFolder != null ? (t.projectFolder || this.app.vault.getName()) : "Its own folder"],
       ["Agent profile", v.reach.agent || "None"],
@@ -465,16 +502,6 @@ class ScheduledMethods {
     }
     const r = v.reach;
     facts("What a run can reach", reachFacts(t, r, label(r.backend)).filter(([k]) => k !== "Runs on" && k !== "Agent profile" && k !== "Each run" && k !== "Mode").map(([k, val]) => (k === "Prompt" || k === "Human Notes" ? [k, "Part of the approval: an edit asks again"] : [k, val])));
-    if (r.mode !== "full") {
-      const never = wrap.createEl("details", { cls: "agent-manager-task-never" });
-      never.createEl("summary", { text: "Every place no run reads" });
-      for (const p of r.neverRead) never.createDiv({ cls: "agent-manager-task-path", text: p });
-      if (r.otherResults.length) {
-        const others = wrap.createEl("details", { cls: "agent-manager-task-never" });
-        others.createEl("summary", { text: "Other scheduled tasks' results it doesn't read" });
-        for (const p of r.otherResults.filter((x) => !x.endsWith("/**"))) others.createDiv({ cls: "agent-manager-task-path", text: p });
-      }
-    }
     const approval = wrap.createDiv({ cls: "agent-manager-task-approval" });
     approval.createSpan({ text: v.approved ? "Approved on this computer." : "Not approved on this computer." });
     approval.createSpan({ cls: "agent-manager-task-hash", text: `Reach ${v.hash}` });
@@ -553,7 +580,7 @@ class ScheduledMethods {
       const col = body.createDiv({ cls: "agent-manager-row-col" });
       const name = col.createDiv({ cls: "agent-manager-task-name-line" });
       name.createSpan({ cls: "agent-manager-row-name" + (it.unread ? " is-unread" : ""), text: it.v.task.label });
-      if (this.plugin.agentsOn()) name.createSpan({ cls: "agent-manager-task-profile", text: it.v.reach.agent || "No profile" });
+      if (this.plugin.agentsOn()) this.profilePill(name, it.v.reach.agent);
       col.createDiv({ cls: "agent-manager-row-date", text: [when(it), it.r.Outcome, it.r.Took].filter(Boolean).join(" · ") });
       if (it.r.Note) col.createDiv({ cls: "agent-manager-outputs-note", text: it.r.Note });
       const go = () => this.openTaskNote(it.path);

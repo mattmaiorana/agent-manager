@@ -13,26 +13,32 @@ import { notice } from "../vault-terminal/notice";
 type StripItem = StripCommand & { action?: "rename" };
 class StripMethods {
   buildStatusStrip(this: Session, container: HTMLElement): void {
-    const strip = container.createDiv({ cls: "agent-manager-strip" });
+    const compact = this.designedOn();
+    const strip = container.createDiv({ cls: "agent-manager-strip" + (this.designedOn() ? " is-roomy" : "") });
     this._showNoteIcon(strip);
     const titleEl = strip.createSpan({
       cls: "agent-manager-strip-title" + (this.sessionTitle ? "" : " agent-manager-strip-muted"),
       text: this.sessionTitle || "Terminal"
     });
     if (this.sessionTitle) {
-      this._stripTip(titleEl, "Right-click to rename this session");
+      const tip = () => this._stripTip(titleEl, ["Right-click for options", this._contextSource?.from ? this._contextTip() : ""].filter(Boolean).join("\n\n"), ["agent-manager-context-tip"]);
+      tip();
+      titleEl.addEventListener("mouseenter", tip);
       titleEl.addEventListener("contextmenu", (evt) => {
         evt.preventDefault();
         const menu = new import_obsidian.Menu();
         menu.addItem((i) => i.setTitle("Rename session").setIcon("pencil").onClick(() => this._startStripRename(titleEl)));
         menu.addItem((i) => i.setTitle("Copy session name").setIcon("copy").onClick(async () => {
           const name = this.sessionTitle || "";
-          try { await navigator.clipboard.writeText(name); notice(`Copied “${name}”`); } catch { /* empty */ }
+          try { await navigator.clipboard.writeText(name); notice({ head: "Session name copied", detail: name }); } catch { /* empty */ }
         }));
         const id = this._stripSessionId();
         if (id) menu.addItem((i) => i.setTitle(`Copy session id (${id.slice(0, 8)})`).setIcon("copy").onClick(async () => {
-          try { await navigator.clipboard.writeText(id); notice(`Copied session id ${id}`); } catch { /* empty */ }
+          try { await navigator.clipboard.writeText(id); notice({ head: "Session id copied", detail: id }); } catch { /* empty */ }
         }));
+        menu.addSeparator();
+        this._addContextItems(menu);
+        if (REAL_BACKENDS.includes(this.getBackendKey())) menu.addItem((i) => i.setTitle("Open transcript note").setIcon("file-text").onClick(() => { void this.openDurableTranscriptNote(); }));
         this.addMoveToAgent(menu, id, this.getBackendKey());
         menu.showAtMouseEvent(evt);
       });
@@ -42,7 +48,7 @@ class StripMethods {
       const id = this._stripSessionId();
       if (!id) return;
       void (async () => {
-        try { await navigator.clipboard.writeText(id); notice(`Copied session id ${id}`); } catch { /* empty */ }
+        try { await navigator.clipboard.writeText(id); notice({ head: "Session id copied", detail: id }); } catch { /* empty */ }
       })();
     });
     this.agentPillEl = strip.createSpan({ cls: "agent-manager-strip-agent" });
@@ -50,6 +56,17 @@ class StripMethods {
     strip.createSpan({ cls: "agent-manager-strip-spacer" });
     this.stripEl = strip;
     if (this._rehostedFrom) this._showRehostPill();
+    if (compact) {
+      this.modelEl = undefined;
+      this.transcriptBtnEl = undefined;
+      const more = strip.createSpan({ cls: "agent-manager-strip-info agent-manager-strip-more", attr: { role: "button", "aria-label": "More" } });
+      import_obsidian.setIcon(more, "more-horizontal");
+      this._stripTip(more, this._transcriptOpen ? "Wrap, Continue Session, and the transcript note" : "Wrap, Continue Session, commands, and the transcript note");
+      more.addEventListener("click", (evt) => this._designedMoreMenu(evt));
+      this._buildStripSwitch(strip);
+      this._buildRcDot(strip);
+      return;
+    }
     const stripBackendKey = this.activeBackendKey || this.getBackendKey();
     if (STRIP_COMMANDS[stripBackendKey] && STRIP_COMMANDS[stripBackendKey].length) {
       const info = strip.createSpan({ cls: "agent-manager-strip-info", attr: { role: "button" } });
@@ -85,15 +102,8 @@ class StripMethods {
     }
     if (REAL_BACKENDS.includes(stripBackendKey)) {
       const tr = strip.createSpan({ cls: "agent-manager-strip-transcript" });
-      this._stripTip(tr, "Toggle rendered transcript. Right-click to open the transcript note");
+      this._stripTip(tr, "Toggle rendered transcript");
       tr.addEventListener("click", () => this.toggleTranscript());
-      tr.addEventListener("contextmenu", (evt) => {
-        evt.preventDefault();
-        evt.stopPropagation();
-        const menu = new import_obsidian.Menu();
-        menu.addItem((i) => i.setTitle("Open transcript note").setIcon("file-text").onClick(() => { void this.openDurableTranscriptNote(); }));
-        menu.showAtMouseEvent(evt);
-      });
       this.transcriptBtnEl = tr;
       if (this._transcriptOpen) tr.addClass("is-active");
       this._syncTranscriptIcon();
@@ -121,12 +131,16 @@ class StripMethods {
     this._stripTip(el, `Session id ${id}. Its transcript note ends with (${id.slice(0, 8)}). Click to copy the full id.`);
   }
   refreshStripAgent(this: Session): void {
+    this.plugin.paintAgentTab(this.leaf);
     const el = this.agentPillEl;
     if (!el || !el.isConnected) return;
     const launched = this.plugin.agentsOn() ? this.plugin.agentById(this.conversationAgentId()) : null;
     if (!launched) { el.setText(""); this._stripTip(el, ""); el.addClass("is-empty"); return; }
     el.removeClass("is-empty");
     el.setText(launched.name);
+    const color = this.plugin.agentColor(launched.id);
+    el.toggleClass("has-color", !!color);
+    el.setCssProps({ "--agent-manager-profile-color": color });
     const filedId = this.agentId();
     const filed = filedId === launched.id ? null : this.plugin.agentById(filedId);
     const where = filedId === launched.id ? "" : filed ? ` Filed under ${filed.name}.` : " Filed under no agent profile.";
@@ -147,15 +161,15 @@ class StripMethods {
   async sendWrap(this: Session): Promise<void> {
     const line = wrapLine(this.plugin.wrapMessage(), this.getBackendKey());
     if (!line) return;
-    if (!this.running) { notice("This session isn't running."); return; }
-    if (this.hasPendingInput()) { this._notifyNeedsYou("Not sent: you have unsent text in the prompt. Clear it, then press Wrap again."); return; }
-    if (this._dialogShowing()) { this._notifyNeedsYou("Not sent: the session is asking you something. Answer it, then press Wrap again."); return; }
+    if (!this.running) { notice("This session isn't running"); return; }
+    if (this.hasPendingInput()) { this._notifyNeedsYou("Wrap not sent", "Unsent text in the prompt. Clear it, then try again.", false); return; }
+    if (this._dialogShowing()) { this._notifyNeedsYou("Wrap not sent", "The session is asking you something. Answer it, then try again.", false); return; }
     await this.submitLine(line);
   }
   async sendQuiet(this: Session): Promise<void> {
-    if (!this.running) { notice("This session isn't running."); return; }
-    if (this.hasPendingInput()) { this._notifyNeedsYou("Not sent: you have unsent text in the prompt. Clear it, then press Quiet again."); return; }
-    if (this._dialogShowing()) { this._notifyNeedsYou("Not sent: the session is asking you something. Answer it, then press Quiet again."); return; }
+    if (!this.running) { notice("This session isn't running"); return; }
+    if (this.hasPendingInput()) { this._notifyNeedsYou("Quiet not sent", "Unsent text in the prompt. Clear it, then try again.", false); return; }
+    if (this._dialogShowing()) { this._notifyNeedsYou("Quiet not sent", "The session is asking you something. Answer it, then try again.", false); return; }
     if (this._quietSending) return;
     this._quietSending = true;
     try { await this.submitLine("/quiet"); } finally { this._quietSending = false; }
@@ -217,13 +231,15 @@ class StripMethods {
   }
   async _runStripCommand(this: Session, c: StripItem): Promise<void> {
     if (c.action === "rename") { this._startStripRename(this.stripEl?.querySelector<HTMLElement>(".agent-manager-strip-title")); return; }
-    if (!this.running) { notice("This session isn't running."); return; }
-    if (this.hasPendingInput()) { this._notifyNeedsYou(`Not sent: you have unsent text in the prompt. Clear it, then pick ${c.cmd} again.`); return; }
-    if (this._dialogShowing()) { this._notifyNeedsYou(`Not sent: the session is asking you something. Answer it, then pick ${c.cmd} again.`); return; }
-    if (c.args) { this.writeRaw(`${c.cmd} `); this.focusTerminal(); return; }
-    await this.submitLine(c.cmd);
+    if (!this.running) { notice("This session isn't running"); return; }
+    if (this.hasPendingInput()) { this._notifyNeedsYou(`${c.cmd} not sent`, "Unsent text in the prompt. Clear it, then try again.", false); return; }
+    if (this._dialogShowing()) { this._notifyNeedsYou(`${c.cmd} not sent`, "The session is asking you something. Answer it, then try again.", false); return; }
+    const flip = () => { if (this._transcriptOpen && this.designedOn()) this.closeTranscript(false); };
+    if (c.args) { flip(); this.writeRaw(`${c.cmd} `); this.focusTerminal(); return; }
+    if (await this.submitLine(c.cmd)) flip();
   }
   _syncTranscriptIcon(this: Session): void {
+    this._syncDesignedSwitch();
     const el = this.transcriptBtnEl;
     if (!el || !el.isConnected) return;
     import_obsidian.setIcon(el, this._transcriptOpen ? "book-open-text" : "book-text");
@@ -251,7 +267,7 @@ class StripMethods {
       restore();
       if (!value || value === subject) return;
       const sessionId = await this._liveSessionId();
-      if (!sessionId) { notice("Rename after this session's first turn completes; it has no id yet."); return; }
+      if (!sessionId) { notice({ head: "Can't rename yet", detail: "This session has no id until its first turn completes." }); return; }
       const ok = await this.applyRename({ sessionId, title: subject, backend: this.getBackendKey(), displayName: subject }, value);
       if (ok) this.plugin.refreshBrowsers();
     };
@@ -282,7 +298,7 @@ class StripMethods {
     const backend = this.getBackendKey();
     try { await this.updateDurableTranscript(); } catch { /* empty */ }
     const id = this._ownSessionId() || (await this._liveSessionId?.());
-    if (!id || (backend === "claude" && !this._modelFile)) { notice("A side chat needs this session's first turn to finish, so there's something to copy. Try again after it does."); return; }
+    if (!id || (backend === "claude" && !this._modelFile)) { notice({ head: "No side chat yet", detail: "It needs this session's first turn to finish, so there's something to copy." }); return; }
     await this.plugin.startSession(await this._sideChatName(), this, {
       sideSession: true,
       backendOverride: backend,
@@ -340,10 +356,10 @@ class StripMethods {
     let forkFrom: ForkFrom | null = null;
     if (fork) {
       const id = this._ownSessionId() || (await this._liveSessionId?.());
-      if (!id || (here === "claude" && !this._modelFile)) { notice("Keeping full context needs this session's first turn to finish, so there's something to copy. Try again after it does."); return; }
+      if (!id || (here === "claude" && !this._modelFile)) { notice({ head: "Can't keep full context yet", detail: "It needs this session's first turn to finish, so there's something to copy." }); return; }
       forkFrom = { id, backend, cwd: this.workingDir || null };
     } else if (!transcript) {
-      notice("Agent Manager: this session's transcript isn't written yet. Try again after its first turn finishes.");
+      notice({ head: "No transcript yet", detail: "Try again after this session's first turn finishes." });
       return;
     }
     const subject = (this.sessionTitle || "").replace(SIDE_SUFFIX_RE, "").trim() || "Untitled";
@@ -371,8 +387,8 @@ class StripMethods {
     const backend = this.getBackendKey();
     let notePath: string | null = null;
     try { const res = await this.updateDurableTranscript(); notePath = (res && res.path) || null; } catch { /* empty */ }
-    if (!notePath) { notice("Agent Manager: a side chat needs this session's transcript, which isn't written yet. Try again after the first turn completes."); return; }
-    if (afterFailedFork) notice(`Agent Manager: ${CLI_BACKENDS[backend].label} couldn't fork this conversation, so the side chat is a new session that reads its transcript instead.`);
+    if (!notePath) { notice({ head: "No side chat yet", detail: "It needs this session's transcript, which is written after the first turn completes." }); return; }
+    if (afterFailedFork) notice({ head: "The side chat reads the transcript instead", detail: `${CLI_BACKENDS[backend].label} couldn't fork this conversation, so it's a new session.` });
     await this.plugin.startSession(await this._sideChatName(), this, {
       sideSession: true,
       backendOverride: backend,

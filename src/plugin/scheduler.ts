@@ -1,18 +1,18 @@
 
 import type { TAbstractFile, TFile } from "obsidian";
-import { crypto, fs, import_obsidian, os, path } from "../externals.js";
-import { DEFAULT_SCHEDULED_FOLDER, DEFAULT_TASK_TEMPLATE, SHARED_TASK_CHOICE, NEVER_READ_HOME, PROMPT_HEADING, RUN_LOG_FILE, TASK_TEMPLATE } from "../constants/scheduled.js";
+import { fs, import_obsidian, path } from "../externals.js";
+import { DEFAULT_SCHEDULED_FOLDER, DEFAULT_TASK_TEMPLATE, SHARED_TASK_CHOICE, PROMPT_HEADING, RUN_LOG_FILE, TASK_TEMPLATE } from "../constants/scheduled.js";
 import type { NewTaskDraft } from "../constants/scheduled.js";
 import type { NotifyWhere } from "../vault-terminal/settings";
 import { ticketFileName } from "../tickets/new-ticket.js";
 import { ApprovalModal } from "../ui/approval.js";
+import { draftChanges, taskDenyList, withPrompt } from "../scheduled/task-draft.js";
 import { parseRunLog, runParseStarted, runResultPath, RUN_FINE_OUTCOMES } from "../scheduled/run-core.js";
 import type { RunRow } from "../scheduled/run-core.js";
 import { runFailuresInARow } from "../scheduled/clock-core.js";
 import { schedNext } from "../scheduled/schedule-core.js";
-import { gatherRelativeFiles, gatherVaultFiles, isTaskFrontmatter, neverReadPatterns, reachHash, reachKey, readTask, resolvePlaces, resolveReach, webListLink } from "../scheduled/task-model.js";
-import { gatherProblem } from "../scheduled/run-args.js";
-import type { PlaceStat, ResolvedReach, ScheduledTask } from "../scheduled/task-model.js";
+import { isTaskFrontmatter, reachHash, reachKey, readTask, resolveReach, webListLink } from "../scheduled/task-model.js";
+import type { ResolvedReach, ScheduledTask } from "../scheduled/task-model.js";
 import { errorMessage, isArray, stringOf, withinVault } from "../util/guards.js";
 import type { AgentManagerPlugin } from "./main.js";
 import { notice } from "../vault-terminal/notice";
@@ -37,17 +37,6 @@ const APPROVALS_KEY = "agent-manager-task-approvals";
 const SEEN_KEY = "agent-manager-results-seen";
 const TOUCHED_KEY = "agent-manager-task-touched";
 
-function placeStat(abs: string): PlaceStat {
-  try {
-    const real = fs.realpathSync(abs);
-    const st = fs.statSync(real);
-    return { real, kind: st.isFile() ? "file" : st.isDirectory() ? "folder" : "other" };
-  } catch (e) {
-    const code = (e as { code?: string }).code;
-    return code === "ENOENT" || code === "ENOTDIR" ? { error: "missing" } : code === "EACCES" || code === "EPERM" ? { error: "denied" } : { error: "failed", message: stringOf(errorMessage(e)) };
-  }
-}
-
 class SchedulerMethods {
   scheduledTasksOn(this: AgentManagerPlugin): boolean {
     return this.pluginData.useScheduledTasks === true;
@@ -70,14 +59,10 @@ class SchedulerMethods {
     const v = this.pluginData.neverRead;
     return isArray(v) ? v.filter((x): x is string => typeof x === "string").map((x) => x.trim()).filter(Boolean) : [];
   }
-  neverReadPaths(this: AgentManagerPlugin, builtIn = true): string[] {
+  neverReadPaths(this: AgentManagerPlugin): string[] {
     const out: string[] = [];
     const linked = (p: string) => { try { const real = fs.realpathSync(p); if (real !== p) out.push(real); } catch { /* empty */ } };
     for (const p of this.neverReadSetting().map((x) => this.resolveUserPath(x)).filter((x): x is string => !!x)) { out.push(p); linked(p); }
-    if (builtIn) for (const pat of NEVER_READ_HOME) {
-      const base = pat.replace(/\/\*\*$/, "");
-      if (!/[*?[]/.test(base)) linked(path.join(os.homedir(), base));
-    }
     return [...new Set(out)];
   }
   schedulerOn(this: AgentManagerPlugin): boolean {
@@ -88,13 +73,6 @@ class SchedulerMethods {
     try { this.app.saveLocalStorage(ON_KEY, on); } catch { /* empty */ }
     if (on) void this.schedulerTick();
     this.refreshBrowsers();
-  }
-  managedClaudeSettings(this: AgentManagerPlugin): string {
-    const dir = "/Library/Application Support/ClaudeCode";
-    for (const f of ["managed-settings.json", "managed-settings.d"]) {
-      try { if (fs.existsSync(path.join(dir, f))) return path.join(dir, f); } catch { /* empty */ }
-    }
-    return "";
   }
   taskApprovals(this: AgentManagerPlugin): Record<string, string> {
     let raw: unknown = null;
@@ -194,14 +172,6 @@ class SchedulerMethods {
       inOtherTask: (p: string, own: string) => folders.some((f) => f !== own && f !== "." && (p === f || p.startsWith(f + "/"))),
       resolve: (link: string, from: string, asLink?: boolean) => this.contextVault().resolve?.(link, from, asLink) ?? null,
     };
-    const tdir = this.folderOf("transcriptsFolder");
-    const isTranscript = (f: TFile) => typeof this.app.metadataCache.getFileCache(f)?.frontmatter?.session_id === "string";
-    const notes = this.app.vault.getMarkdownFiles().filter((f) => !(f.path === tdir || f.path.startsWith(tdir + "/")) && isTranscript(f));
-    const sessionNotes = new Set(notes.map((f) => f.path));
-    this._transcriptNotes = [...new Set(notes.map((f) => {
-      const parent = f.parent?.path || "";
-      return parent && sessionNotes.has(`${parent}.md`) ? `${parent}/**` : f.path;
-    }))];
     const out: { task: ScheduledTask; runs: RunRow[] }[] = [];
     for (const notePath of paths) {
       const file = this.app.vault.getAbstractFileByPath(notePath);
@@ -215,14 +185,6 @@ class SchedulerMethods {
       if (listFile instanceof import_obsidian.TFile) { try { listText = await this.app.vault.cachedRead(listFile); } catch { /* empty */ } }
       const siteListNote = () => (listFile instanceof import_obsidian.TFile && listText != null ? { path: listFile.path, text: listText } : null);
       const task = readTask({ notePath, frontmatter, text }, { ...vault, siteListNote }, { now: new Date(), configDir: this.app.vault.configDir, normalize: import_obsidian.normalizePath });
-      resolvePlaces(task, this._neverReadEnv(), placeStat);
-      const nenv = this._neverReadEnv();
-      const never = neverReadPatterns(nenv);
-      for (const cmd of task.gather) {
-        const problem = gatherProblem(cmd, never, { vault: nenv.vaultAbs, home: nenv.home, task: path.join(nenv.vaultAbs, task.folder) });
-        if (problem) task.problems.push(`Its ## Gather first: ${problem}`);
-      }
-      if (task.mode === "headless" && task.shell && this.managedClaudeSettings()) task.problems.push(`It has a shell, but this computer has Claude Code managed settings (${this.managedClaudeSettings()}), which could widen its sandbox, so shell tasks don't run here.`);
       if (task.followUp === "ticket") {
         if (!this.ticketsOn()) task.problems.push("Its follow-up is a ticket, but tickets are off: turn them on in settings, or leave follow-up empty.");
         else if (this.followUpFolderOf(task) == null) task.problems.push("Its follow-up is a ticket, but it has no project to put the ticket in: move it into a project's folder (one with an overview).");
@@ -266,7 +228,7 @@ class SchedulerMethods {
       await this.app.fileManager.trashFile(target);
     } catch (e) {
       console.error("[Agent Manager] task delete failed:", e);
-      notice(`Agent Manager: couldn't delete “${t.label}”.`);
+      notice({ head: "Couldn't delete the scheduled task", detail: t.label });
       return false;
     }
     const approvals = this.taskApprovals();
@@ -277,8 +239,8 @@ class SchedulerMethods {
     return true;
   }
   async approveTask(this: AgentManagerPlugin, v: TaskView): Promise<boolean> {
-    if (v.task.problems.length) { notice(`Agent Manager: “${v.task.label}” can't be approved until it's fixed: ${v.task.problems[0]}`); return false; }
-    const ok = await new Promise<boolean>((resolve) => new ApprovalModal(this.app, v, this.app.vault.getName(), resolve, () => { void this.openTaskNoteFile(v.task.notePath); }).open());
+    if (v.task.problems.length) { notice({ head: `“${v.task.label}” can't be approved yet`, detail: v.task.problems[0] }); return false; }
+    const ok = await new Promise<boolean>((resolve) => new ApprovalModal(this.app, v, this.app.vault.getName(), resolve, () => { this.openTaskEditor(v.task.notePath); }).open());
     if (!ok) return false;
     const approvals = this.taskApprovals();
     approvals[v.task.notePath] = v.key;
@@ -300,6 +262,26 @@ class SchedulerMethods {
     t[notePath] = Date.now();
     try { this.app.saveLocalStorage(TOUCHED_KEY, t); } catch { /* empty */ }
   }
+  async updateTask(this: AgentManagerPlugin, notePath: string, before: NewTaskDraft, after: NewTaskDraft): Promise<boolean> {
+    const f = this.app.vault.getAbstractFileByPath(notePath);
+    if (!(f instanceof import_obsidian.TFile)) { notice({ head: "The scheduled task's note is gone", detail: notePath }); return false; }
+    const { set, drop } = draftChanges(before, after);
+    try {
+      if (Object.keys(set).length || drop.length) {
+        await this.app.fileManager.processFrontMatter(f, (fm: Record<string, unknown>) => {
+          for (const [k, v] of Object.entries(set)) { if (v == null) delete fm[k]; else fm[k] = v; }
+          for (const k of drop) delete fm[k];
+        });
+      }
+      if (after.prompt.trim() !== before.prompt.trim()) await this.app.vault.process(f, (text) => withPrompt(text, after.prompt));
+    } catch (e) { notice({ head: "The scheduled task couldn't be saved", detail: stringOf(errorMessage(e)) }); return false; }
+    return true;
+  }
+  openTaskEditor(this: AgentManagerPlugin, notePath: string): void {
+    const view = this.findBrowserLeaf()?.view as { openTaskEditor?: (p: string) => void } | undefined;
+    if (view?.openTaskEditor) view.openTaskEditor(notePath);
+    else void this.openTaskNoteFile(notePath);
+  }
   async openTaskNoteFile(this: AgentManagerPlugin, notePath: string): Promise<void> {
     const f = this.app.vault.getAbstractFileByPath(notePath);
     if (f instanceof import_obsidian.TFile) await this.app.workspace.getLeaf(false).openFile(f);
@@ -317,11 +299,11 @@ class SchedulerMethods {
     const home = this.ticketHome();
     return home ? (0, import_obsidian.normalizePath)(`${home}/${DEFAULT_SCHEDULED_FOLDER}`) : this.scheduledFolder();
   }
-  async createTask(this: AgentManagerPlugin, opts: Pick<NewTaskDraft, "name" | "project" | "schedule" | "prompt" | "mode"> & Partial<NewTaskDraft>): Promise<TFile | null> {
+  async createTask(this: AgentManagerPlugin, opts: Pick<NewTaskDraft, "name" | "project" | "schedule" | "prompt"> & Partial<NewTaskDraft>): Promise<TFile | null> {
     const name = ticketFileName(opts.name);
-    if (!name) { notice("Name the scheduled task."); return null; }
+    if (!name) { notice("Name the scheduled task"); return null; }
     const dir = (0, import_obsidian.normalizePath)(`${this.newTaskFolder(opts.project)}/${name}`);
-    if (this.app.vault.getAbstractFileByPath(dir)) { notice(`There's already a “${name}” in ${path.posix.dirname(dir)}. Name the scheduled task something else.`); return null; }
+    if (this.app.vault.getAbstractFileByPath(dir)) { notice({ head: "Name the scheduled task something else", detail: `There's already a “${name}” in ${path.posix.dirname(dir)}.` }); return null; }
     try {
       await this.ensureFolder(dir);
       let text = await this.templateText(this.taskTemplatePath(), TASK_TEMPLATE);
@@ -335,32 +317,27 @@ class SchedulerMethods {
         fm.type = "scheduled task";
         if (opts.schedule) fm.schedule = opts.schedule;
         delete fm.project;
-        const drop = (...keys: string[]) => { for (const k of keys) delete fm[k]; };
-        const mode = opts.mode || "full";
+        const listLink = /^\[\[[^\]]+\]\]$/.test((opts.sites || "").trim()) ? (opts.sites || "").trim() : "";
         const sites = (opts.sites || "").split(/[\s,]+/).map((x) => x.trim()).filter(Boolean);
-        const webOf = (fallback: string) => opts.web === "sites" && sites.length ? sites : opts.web === "search" || opts.web === "off" ? opts.web : fallback;
-        if (mode === "full") {
-          fm.mode = "full";
-          fm.web = webOf(fm.web == null || fm.web === "" ? "off" : fm.web as string);
-          if (opts.connectors != null) fm.connectors = opts.connectors ? "on" : "none";
-          else if (fm.connectors == null || fm.connectors === "") fm.connectors = "none";
-          if (opts.closeTab != null) fm.tab = opts.closeTab ? "close" : "keep";
-          else if (fm.tab == null || fm.tab === "") fm.tab = "keep";
-          drop("file-access", "tools", "shell", "writes");
-        } else {
-          fm.mode = "headless";
-          fm.web = mode === "web" ? webOf("search") : "off";
-          if (fm.web === "off") fm.web = "search";
-          if (mode === "local") {
-            fm.web = "off";
-            if (opts.files) fm["file-access"] = opts.files;
-            else if (fm["file-access"] == null || fm["file-access"] === "") fm["file-access"] = "project";
-            if (opts.shell) fm.shell = true;
-            else if (opts.shell === false) drop("shell");
-          }
-          if (mode === "web") drop("file-access", "shell", "writes");
-          drop("connectors", "deny", "tab");
-        }
+        const webOf = (fallback: string): string | string[] => opts.web === "sites" && listLink ? listLink : opts.web === "sites" && sites.length ? sites : opts.web === "search" || opts.web === "off" ? opts.web : fallback;
+        fm.mode = "full";
+        fm.web = webOf(fm.web == null || fm.web === "" ? "off" : fm.web as string);
+        const sw = (key: string, v: boolean | undefined, on: string, off: string, fallback: string) => {
+          if (v != null) fm[key] = v ? on : off;
+          else if (fm[key] == null || fm[key] === "") fm[key] = fallback;
+        };
+        sw("connectors", opts.connectors, "on", "none", "on");
+        sw("shell", opts.shell, "true", "false", "true");
+        sw("chrome", opts.chrome == null ? undefined : opts.chrome && opts.web === "search", "on", "off", "off");
+        if (opts.obsidianCli?.length) fm["obsidian-cli"] = [...opts.obsidianCli];
+        const deny = taskDenyList(opts.deny || "");
+        if (deny.length) fm.deny = deny;
+        sw("own-folder-only", opts.ownFolder, "true", "false", "false");
+        if (fm.shell === "true" || fm.shell === "false") fm.shell = fm.shell === "true";
+        if (fm["own-folder-only"] === "true" || fm["own-folder-only"] === "false") fm["own-folder-only"] = fm["own-folder-only"] === "true";
+        if (opts.closeTab != null) fm.tab = opts.closeTab ? "close" : "keep";
+        else if (fm.tab == null || fm.tab === "") fm.tab = "keep";
+        for (const k of ["file-access", "tools", "writes"]) delete fm[k];
         if (opts.eachRun) fm["each-run"] = opts.eachRun;
         if (opts.followUp != null) fm["follow-up"] = opts.followUp ? "ticket" : null;
         if (opts.onlyWhenNew != null) fm["only-when-new"] = opts.onlyWhenNew;
@@ -369,7 +346,7 @@ class SchedulerMethods {
       });
       return file;
     } catch (e) {
-      notice(`Agent Manager: couldn't make the task: ${stringOf(errorMessage(e))}`);
+      notice({ head: "Couldn't make the scheduled task", detail: stringOf(errorMessage(e)) });
       return null;
     }
   }
@@ -436,9 +413,6 @@ class SchedulerMethods {
       });
     } catch { return []; }
   }
-  taskLaunchFrom(this: AgentManagerPlugin, t: ScheduledTask): { notePath?: string; folderPath?: string } {
-    return t.projectFolder != null ? { folderPath: t.projectFolder } : { notePath: t.notePath };
-  }
   taskAgentId(this: AgentManagerPlugin, t: ScheduledTask): string {
     if (!this.launchContext({ folderPath: t.folder }).agent && this.inScheduledFolder(t.folder)) return "";
     return this.launchAgentId({ folderPath: t.folder });
@@ -453,57 +427,13 @@ class SchedulerMethods {
     const root = this.scheduledFolder();
     return folder === root || folder.startsWith(`${root}/`);
   }
-  reachChangedNow(this: AgentManagerPlugin, t: ScheduledTask, key: string): boolean {
-    const again: ScheduledTask = { ...t, problems: [], places: [] };
-    resolvePlaces(again, this._neverReadEnv(), placeStat);
-    return again.problems.length > 0 || reachKey(this.taskReach(again)) !== key;
-  }
-  _neverReadEnv(this: AgentManagerPlugin) {
-    let vaultReal = path.resolve(this.getVaultPath());
-    try { vaultReal = fs.realpathSync(vaultReal); } catch { /* empty */ }
-    return {
-      pathDirs: [...String(process.env.PATH || "").split(":").filter((d) => d.startsWith("/")), path.join(os.homedir(), "bin")],
-      vaultAbs: path.resolve(this.getVaultPath()),
-      vaultReal,
-      home: os.homedir(),
-      configDir: this.app.vault.configDir,
-      transcriptsFolder: this.folderOf("transcriptsFolder"),
-      transcriptNotes: this._transcriptNotes || [],
-      neverRead: this.neverReadPaths(),
-    };
-  }
-  gatherFileKeys(this: AgentManagerPlugin, t: ScheduledTask): string[] {
-    const vault = path.resolve(this.getVaultPath());
-    const hash = (p: string) => crypto.createHash("sha256").update(fs.readFileSync(path.join(vault, p))).digest("hex").slice(0, 16);
-    const named = gatherVaultFiles(t.gather, t.folder);
-    const keys = named.map((p) => {
-      try { return `${p} ${hash(p)}`; } catch { return `${p} missing`; }
-    });
-    for (const p of gatherRelativeFiles(t.gather, t.folder)) {
-      if (named.includes(p)) continue;
-      try { if (fs.statSync(path.join(vault, p)).isFile()) keys.push(`${p} ${hash(p)}`); } catch { /* empty */ }
-    }
-    return keys;
-  }
   taskReach(this: AgentManagerPlugin, t: ScheduledTask): ResolvedReach {
-    const from = this.taskLaunchFrom(t);
-    const ctx = this.launchContext(from);
     const agent = this.agentById(this.taskAgentId(t));
-    const agentsFile = this.agentsFilePath();
     return resolveReach(t, {
       vaultAbs: path.resolve(this.getVaultPath()),
-      home: os.homedir(),
-      agent: agent ? { name: agent.name, instructions: agent.instructions ? (0, import_obsidian.normalizePath)(agent.instructions) : null } : null,
-      overviews: ctx.overviews,
-      agentsFile: this.app.vault.getAbstractFileByPath(agentsFile) instanceof import_obsidian.TFile ? agentsFile : null,
+      agent: agent ? { name: agent.name } : null,
       neverRead: this.neverReadPaths(),
-      userNeverRead: this.neverReadPaths(false),
-      transcriptsFolder: this.folderOf("transcriptsFolder"),
-      transcriptNotes: this._transcriptNotes || [],
-      configDir: this.app.vault.configDir,
-      gatherFiles: this.gatherFileKeys(t),
       startAbs: path.resolve(this.startDir()),
-      otherTasks: [...this.taskPaths()].map((p) => path.posix.dirname(p)).filter((f) => f !== "." && f !== t.folder),
     });
   }
   taskView(this: AgentManagerPlugin, task: ScheduledTask, runs: RunRow[], now = new Date()): TaskView {

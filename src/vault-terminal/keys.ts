@@ -238,6 +238,10 @@ export class KeyQueue {
     if (this.timer === null && !this.stepping && !this.holding) this.step();
   }
 
+  pendingText(): string[] {
+    return this.items.filter((i): i is string => typeof i === "string");
+  }
+
   clear(): void {
     if (this.timer !== null) this.cancel(this.timer);
     this.timer = null;

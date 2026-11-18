@@ -6,6 +6,7 @@ interface TranscriptLine {
   type?: unknown;
   timestamp?: unknown;
   message?: { model?: unknown } | null;
+  effort?: unknown;
   payload?: {
     model?: unknown;
     reasoning_effort?: unknown;
@@ -90,8 +91,8 @@ function modelFromTranscriptTail(tail: string, backendKey: string, loose = true)
     let o: TranscriptLine | null;
     try { o = JSON.parse(line) as TranscriptLine | null; } catch { continue; }
     if (backendKey === "claude") {
-      if (o && o.type === "assistant" && o.message && typeof o.message.model === "string") {
-        return { model: o.message.model };
+      if (o && o.type === "assistant" && o.message && typeof o.message.model === "string" && !o.message.model.startsWith("<")) {
+        return typeof o.effort === "string" && o.effort ? { model: o.message.model, effort: o.effort } : { model: o.message.model };
       }
     } else if (backendKey === "codex") {
       const p = o && o.payload;
@@ -108,7 +109,7 @@ function modelFromTranscriptTail(tail: string, backendKey: string, loose = true)
   }
   if (!loose) return null;
   const model = lastJsonStringValue(tail, "model");
-  if (!model) return null;
+  if (!model || model.startsWith("<")) return null;
   const effort = lastJsonStringValue(tail, "reasoning_effort");
   return effort ? { model, effort } : { model };
 }

@@ -23,6 +23,7 @@ interface Core {
   _renderService?: { dimensions?: { css?: { cell?: { width: number; height: number } } }; _renderer?: { value?: { _rowFactory?: RowFactory } } };
   _viewport?: { _latestYDisp?: number; queueSync?(ydisp?: number): void };
   _bufferService?: { scrollLines?(disp: number, suppressScrollEvent?: boolean): void };
+  _document?: Document;
 }
 
 function core(term: Terminal): Core | null {
@@ -55,6 +56,13 @@ export function sendWheelReport(term: Terminal, col: number, row: number, up: bo
   } finally {
     term.options.scrollOnUserInput = follows;
   }
+}
+
+export function adoptDocument(term: Terminal, doc: Document): boolean {
+  const c = core(term);
+  if (!c?._document) return false;
+  c._document = doc;
+  return true;
 }
 
 export function cellSize(term: Terminal): { width: number; height: number } | null {
@@ -248,6 +256,7 @@ export function internalsPresent(term: Terminal): string[] {
   if (!c?._renderService?.dimensions?.css?.cell) missing.push("_renderService.dimensions.css.cell");
   if (typeof c?._viewport?.queueSync !== "function") missing.push("_viewport.queueSync");
   if (typeof c?._bufferService?.scrollLines !== "function") missing.push("_bufferService.scrollLines");
+  if (!c?._document) missing.push("_document");
   if (!rowFactory(term)) missing.push("_renderService._renderer.value._rowFactory.createRow");
   const cell = term.buffer.active.getLine(0)?.getCell(0) as unknown as CellInternals | undefined;
   if (typeof cell?.hasExtendedAttrs !== "function" || typeof cell.getUnderlineColor !== "function" || !cell.extended) missing.push("CellData underline color");

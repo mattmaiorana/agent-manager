@@ -1,5 +1,5 @@
 
-import type { App, MarkdownView, PluginManifest, WorkspaceLeaf } from "obsidian";
+import type { App, MarkdownView, PluginManifest, WorkspaceLeaf, WorkspaceWindow } from "obsidian";
 import { import_obsidian } from "../externals.js";
 import { isBackendKey } from "../constants/backends.js";
 import { AgentMethods } from "./agents.js";
@@ -12,6 +12,7 @@ import { SessionMethods } from "./sessions.js";
 import { SetupMethods } from "./setup.js";
 import { ShellMethods } from "./shell.js";
 import { WorkspaceMethods } from "./workspace.js";
+import { PaneWidthMethods, type PaneObserver, type WatchedSplit } from "./pane-widths.js";
 import { TerminalHostMethods } from "./terminal-host.js";
 import { TicketMethods } from "./tickets.js";
 import { SchedulerMethods } from "./scheduler.js";
@@ -19,17 +20,17 @@ import type { NewTaskDraft } from "../constants/scheduled.js";
 import { RunMethods } from "./runs.js";
 import { SessionRunMethods } from "./session-runs.js";
 import { ClockMethods } from "./clock.js";
-import { SafetyMethods } from "./safety.js";
 import type { LiveRun } from "./runs.js";
 import { AgentManagerSettingsTab } from "../settings/tab.js";
+import { ApprovalServer } from "../designed/approval-server.js";
 import { BrowserView } from "../browser/view.js";
 import { BROWSER_VIEW_TYPE, PLAIN_TERMINAL_VIEW_TYPE, SESSION_VIEW_TYPE } from "../sessions/constants.js";
 import { sessionLinkLabels } from "../notes/link-pills.js";
 import { TranscriptMethods } from "../transcripts/plugin-transcripts.js";
-import { ConfirmModal } from "../ui/modals.js";
+import { ConfirmModal, RecentNoticesModal } from "../ui/modals.js";
 import { applyParts } from "../util/apply-parts.js";
 import { isArray, stringOf } from "../util/guards.js";
-import type { PluginData, SavedSessionState, SessionRecord, SetupStatus, TicketCard } from "../types.js";
+import type { Browser, PluginData, SavedSessionState, SessionRecord, SetupStatus, TicketCard } from "../types.js";
 import type { VaultTerminal } from "../vault-terminal/core";
 import type { RunRow } from "../scheduled/run-core.js";
 import type { ScheduledTask } from "../scheduled/task-model.js";
@@ -39,10 +40,27 @@ class VaultTerminalPlugin extends import_obsidian.Plugin {
   declare pluginData: PluginData;
   declare lastActiveTerminalLeaf: WorkspaceLeaf | null;
   declare layoutReady: boolean;
+  declare _agentWindowOut: boolean | undefined;
+  declare _appClosing: boolean | undefined;
+  declare _poppingOut: boolean | undefined;
+  declare _windowSidebarWidth: number | undefined;
+  declare _guardedAgentWindows: WeakSet<WorkspaceWindow> | undefined;
+  declare _windowSidebarEl: HTMLElement | null | undefined;
+  declare _windowSidebarHidden: boolean | undefined;
+  declare _windowLeadEl: HTMLElement | null | undefined;
+  declare _windowToggleEl: HTMLElement | null | undefined;
+  declare _arrangeSeen: { agents: boolean; colors: boolean } | undefined;
+  declare _docking: boolean | undefined;
+  declare _lastAgentWindow: WorkspaceWindow | null | undefined;
+  declare _paneSplits: Map<HTMLElement, WatchedSplit> | undefined;
+  declare _paneObservers: Map<Window, PaneObserver> | undefined;
+  declare _paneStopped: boolean | undefined;
+  declare _paneQuiet: { width: number } | undefined;
   declare ribbonIcon: HTMLElement;
   declare _timeouts: Set<number> | undefined;
   declare _unloading: boolean | undefined;
   declare terminal: VaultTerminal | undefined;
+  declare approvals: ApprovalServer | undefined;
   declare _reloadAsked: number | undefined;
   declare _claudeModDir: string | null | undefined;
   declare _guidesDir: string | null | undefined;
@@ -72,6 +90,7 @@ class VaultTerminalPlugin extends import_obsidian.Plugin {
   declare _sweepScheduled: boolean | undefined;
   declare _unmovableStrays: WeakSet<WorkspaceLeaf> | undefined;
   declare newCardOpen: boolean | undefined;
+  declare newCardOwner: Browser | undefined;
   declare ticketCard: TicketCard | undefined;
   declare taskCard: { open: boolean; draft: NewTaskDraft } | undefined;
   declare _restoreQueue: Promise<unknown> | undefined;
@@ -80,20 +99,13 @@ class VaultTerminalPlugin extends import_obsidian.Plugin {
   declare _taskCache: Promise<{ task: ScheduledTask; runs: RunRow[] }[]> | null | undefined;
   declare _followUpQueue: Promise<string | null> | undefined;
   declare _taskRedraw: number | null | undefined;
-  declare _transcriptNotes: string[] | undefined;
   declare _liveRuns: Map<string, LiveRun> | undefined;
   declare _runLogChains: Map<string, Promise<unknown>> | undefined;
   declare _gitChain: Promise<boolean> | undefined;
-  declare _ownPids: Set<number> | undefined;
   declare _tickBusy: boolean | undefined;
   declare _waited: Set<string> | undefined;
-  declare _safetyRun: Promise<import("../scheduled/safety-core.js").PhaseResult[]> | null | undefined;
-  declare _safetyClaude: { at: number; found: { program: string; real: string; version: string; env: Record<string, string> } | { error: string } } | undefined;
-  declare _safetyLastSession: string | undefined;
-  declare _safetyWaited: Set<string> | undefined;
   declare _busyWaited: Set<string> | undefined;
   declare _startRefused: Map<string, string> | undefined;
-  declare _safetyPids: Set<number> | undefined;
   declare _firstTextsCache: Map<string, string[]> | undefined;
   constructor(...args: [app: App, manifest: PluginManifest]) {
     super(...args);
@@ -122,10 +134,12 @@ class VaultTerminalPlugin extends import_obsidian.Plugin {
     this.layoutReady = false;
     this.installOpenRouting();
     this.installTerminalGroupJanitor();
+    this.installAgentWindow();
+    this.installPaneWidths();
     this.app.workspace.onLayoutReady(() => {
       this.layoutReady = true;
+      this.paintAgentTabs();
       void this.checkSetup();
-      this.cleanupSafetyScratch();
       if (this.scheduledTasksOn()) void this.cleanupLeftoverRuns().catch((e) => console.error("[Agent Manager] leftover run cleanup failed:", e)).then(() => this.schedulerTick());
       this.scheduleTimeout(() => {
         const sessionLeaves = this.app.workspace.getLeavesOfType(SESSION_VIEW_TYPE);
@@ -133,8 +147,10 @@ class VaultTerminalPlugin extends import_obsidian.Plugin {
       }, 0);
       if (this._openRoutingAvailable === false && this.useDedicatedSplit()) {
         this.notify(
-          "Agent Manager",
-          "This version of Obsidian works differently inside, so notes you open may appear in the terminal's pane for a moment before moving out. Nothing else is affected. Turn off “Dedicated terminal split” in settings to stop this notice.",
+          {
+            head: "Notes may open in the terminal's pane for a moment",
+            detail: "This version of Obsidian works differently inside, so notes you open may appear there before moving out. Nothing else is affected. Turn off “Keep sessions in their own split” in Settings → Agent Manager → Sessions to stop this notice.",
+          },
           undefined,
           undefined,
           "info"
@@ -152,7 +168,7 @@ class VaultTerminalPlugin extends import_obsidian.Plugin {
       const tc = this._tc();
       void tc.withTranscriptLock(tc.transcriptLockKey(this.folderOf("transcriptsFolder"), id), async () => {
         if (!this.app.vault.getAbstractFileByPath(to)) await this.app.fileManager.renameFile(subs, to);
-      }).catch(() => { notice(`Agent Manager: couldn't move the sub-agents' transcripts in “${subs.path}” beside “${file.path}”.`); });
+      }).catch(() => { notice({ head: "Couldn't move the sub-agents' transcripts", detail: `“${subs.path}” stayed where it was, not beside “${file.path}”.` }); });
     }));
     this.registerEvent(this.app.vault.on("rename", (file, oldPath) => {
       const isFolder = file instanceof import_obsidian.TFolder;
@@ -210,6 +226,14 @@ class VaultTerminalPlugin extends import_obsidian.Plugin {
         const to = moved(stringOf(this.pluginData[key] ?? "") || null);
         if (to) { this.pluginData[key] = to; named = true; }
       }
+      if (isArray(this.pluginData.agents)) {
+        for (const a of this.pluginData.agents) {
+          if (!a || typeof a !== "object") continue;
+          const r = a as Record<string, unknown>;
+          const to = moved(typeof r.dashboardTarget === "string" ? r.dashboardTarget || null : null);
+          if (to) { r.dashboardTarget = to; named = true; }
+        }
+      }
       const transcripts = moved(this.folderOf("transcriptsFolder"));
       if (transcripts) { this.pluginData.names = { ...(this.pluginData.names || {}), transcriptsFolder: transcripts }; named = true; }
       if (isArray(this.pluginData.neverRead)) {
@@ -251,6 +275,7 @@ class VaultTerminalPlugin extends import_obsidian.Plugin {
     this.registerEvent(
       this.app.workspace.on('layout-change', () => {
         this.scheduleStatusRefresh();
+        this.paintAgentTabs();
       })
     );
     const ribbonIcon = this.addRibbonIcon("bot", "Open Agent Manager", () => {
@@ -264,6 +289,48 @@ class VaultTerminalPlugin extends import_obsidian.Plugin {
       id: "open-sidebar",
       name: "Open the sidebar",
       callback: () => this.revealBrowser()
+    });
+    this.addCommand({
+      id: "show-recent-notices",
+      name: "Show recent notices",
+      callback: () => this.showRecentNotices()
+    });
+    this.addCommand({
+      id: "arrange-tabs-by-profile",
+      name: "Arrange tabs by agent profile",
+      checkCallback: (checking) => {
+        if (!this.agentsOn()) return false;
+        if (!checking) this.arrangeAgentTabs();
+        return true;
+      }
+    });
+    this.addCommand({
+      id: "open-own-window",
+      name: "Open in pop-out mode",
+      checkCallback: (checking) => {
+        if (this.agentWindow()) return false;
+        if (!checking) void this.popOutAgentManager();
+        return true;
+      }
+    });
+    this.addCommand({
+      id: "dock-in-main-window",
+      name: "Dock in the main window",
+      checkCallback: (checking) => {
+        if (!this.agentWindow()) return false;
+        if (!checking) this.dockAgentManager();
+        return true;
+      }
+    });
+    this.addCommand({
+      id: "toggle-designed-view",
+      name: "Switch the session between the terminal and the conversation view",
+      checkCallback: (checking) => {
+        const v = this.sessionOf(this.activeLeaf());
+        if (!v || !v.designedOn()) return false;
+        if (!checking) { if (v._transcriptOpen) v.closeTranscript(); else void v.openTranscript(); }
+        return true;
+      }
     });
     this.addCommand({
       id: "new-session",
@@ -353,13 +420,23 @@ class VaultTerminalPlugin extends import_obsidian.Plugin {
     window.clearTimeout(id);
     this._timeouts?.delete(id);
   }
+  showRecentNotices(this: AgentManagerPlugin): void {
+    new RecentNoticesModal(this.app, this.terminal?.recent ?? [], this.terminal?.settings.keepRecent === false).open();
+  }
   override onunload(this: AgentManagerPlugin): void {
     this._unloading = true;
     this.killAllRuns();
+    this.unpaintAgentTabs();
     this.unloadTerminal();
+    this.approvals?.stop();
     for (const id of this._timeouts || []) window.clearTimeout(id);
     this._timeouts?.clear();
     document.body.classList.remove("agent-manager-show-tab-title");
+  }
+  async designedApprovals(this: AgentManagerPlugin): Promise<ApprovalServer | null> {
+    if (this.pluginData.localServer !== true || this._unloading) return null;
+    this.approvals ??= new ApprovalServer();
+    return (await this.approvals.start()) ? this.approvals : null;
   }
   applySidebarTitleClass(): void {
     document.body.classList.toggle("agent-manager-show-tab-title", this.pluginData.showSidebarTitle === true);
@@ -390,7 +467,7 @@ class VaultTerminalPlugin extends import_obsidian.Plugin {
     return new Promise((resolve) => this.app.workspace.onLayoutReady(() => resolve()));
   }
 }
-interface AgentManagerPlugin extends VaultTerminalPlugin, AgentMethods, ClaudeModMethods, TerminalHostMethods, ShellMethods, TranscriptMethods, ConfigMethods, GuideMethods, NoteMethods, LinkMethods, SessionMethods, SetupMethods, TicketMethods, SchedulerMethods, RunMethods, SessionRunMethods, ClockMethods, SafetyMethods, WorkspaceMethods {}
-applyParts(VaultTerminalPlugin, AgentMethods, ClaudeModMethods, TerminalHostMethods, ShellMethods, TranscriptMethods, ConfigMethods, GuideMethods, NoteMethods, LinkMethods, SessionMethods, SetupMethods, TicketMethods, SchedulerMethods, RunMethods, SessionRunMethods, ClockMethods, SafetyMethods, WorkspaceMethods);
+interface AgentManagerPlugin extends VaultTerminalPlugin, AgentMethods, ClaudeModMethods, TerminalHostMethods, ShellMethods, TranscriptMethods, ConfigMethods, GuideMethods, NoteMethods, LinkMethods, SessionMethods, SetupMethods, TicketMethods, SchedulerMethods, RunMethods, SessionRunMethods, ClockMethods, WorkspaceMethods, PaneWidthMethods {}
+applyParts(VaultTerminalPlugin, AgentMethods, ClaudeModMethods, TerminalHostMethods, ShellMethods, TranscriptMethods, ConfigMethods, GuideMethods, NoteMethods, LinkMethods, SessionMethods, SetupMethods, TicketMethods, SchedulerMethods, RunMethods, SessionRunMethods, ClockMethods, WorkspaceMethods, PaneWidthMethods);
 export { VaultTerminalPlugin };
 export type { AgentManagerPlugin };

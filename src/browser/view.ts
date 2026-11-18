@@ -6,7 +6,7 @@ import { applyParts } from "../util/apply-parts.js";
 import { BrowserMethods } from "./home.js";
 import { ScheduledMethods } from "./scheduled.js";
 import type { BrowserScope } from "./scheduled.js";
-import type { WorkspaceLeaf } from "obsidian";
+import type { Menu, WorkspaceLeaf } from "obsidian";
 import type { BackendKey } from "../constants/backends.js";
 import type { AgentManagerPlugin } from "../plugin/main.js";
 type CardKind = "session" | "ticket";
@@ -46,6 +46,10 @@ class BrowserView extends import_obsidian.ItemView {
   }
   override getIcon(): string {
     return "bot";
+  }
+  override onPaneMenu(menu: Menu, source: string): void {
+    super.onPaneMenu(menu, source);
+    menu.addItem((i) => i.setTitle("Show recent notices").setIcon("history").onClick(() => this.plugin.showRecentNotices()));
   }
   override async onOpen(this: Browser): Promise<void> {
     try {

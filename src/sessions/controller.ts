@@ -13,6 +13,13 @@ import { SessionActionMethods } from "./session-actions.js";
 import { ViewNoteMethods } from "../notes/view-note.js";
 import { ViewTicketMethods } from "../notes/view-ticket.js";
 import { ViewTranscriptMethods } from "../transcripts/view-transcripts.js";
+import { DesignedViewMethods } from "../designed/view-designed.js";
+import { FindMethods } from "../transcripts/view-find.js";
+import { StreamMethods } from "../designed/view-stream.js";
+import { MediaMethods } from "../designed/view-media.js";
+import type { AgentCard, AgentResult } from "../designed/view-media.js";
+import type { StreamState } from "../designed/view-stream.js";
+import type { ShownCard } from "../designed/view-designed.js";
 import { DraftTracker } from "./draft.js";
 import { readFileHead } from "./transcript-files.js";
 import { applyParts } from "../util/apply-parts.js";
@@ -89,6 +96,7 @@ class SessionController implements TerminalController {
   declare _closeQuietly: boolean | undefined;
   declare _started: boolean | undefined;
   declare _launchedAt: number | null | undefined;
+  declare _programStartedAt: number | undefined;
   declare _launchToken: string | null | undefined;
   declare _opening: string | null | undefined;
   declare _openingWithdrawn: boolean | undefined;
@@ -162,6 +170,81 @@ class SessionController implements TerminalController {
   declare _transcriptEarlierEl: HTMLElement | null | undefined;
   declare _transcriptLoadingEarlier: boolean | undefined;
   declare _transcriptGen: number | undefined;
+  declare _transcriptRefreshing: boolean | undefined;
+  declare _modelFileMissAt: number | undefined;
+  declare _findBarEl: HTMLElement | null | undefined;
+  declare _findInputEl: HTMLInputElement | null | undefined;
+  declare _findCountEl: HTMLElement | null | undefined;
+  declare _findEarlierEl: HTMLButtonElement | null | undefined;
+  declare _findRanges: Range[] | undefined;
+  declare _findAt: number | undefined;
+  declare _findSearched: number | undefined;
+  declare _findCurrentRange: Range | undefined;
+  declare _mdOwner: InstanceType<typeof import_obsidian.Component> | null | undefined;
+  declare _approvalTabId: string | undefined;
+  declare _peersTold: Map<string, number> | undefined;
+  declare _wasAsking: boolean | undefined;
+  declare _cards: Map<number, ShownCard> | undefined;
+  declare _designedFooterEl: HTMLElement | null | undefined;
+  declare _designedCardsEl: HTMLElement | null | undefined;
+  declare _designedBannerEl: HTMLElement | null | undefined;
+  declare _designedWorkingEl: HTMLElement | null | undefined;
+  declare _designedSayEl: HTMLElement | null | undefined;
+  declare _designedAgentsEl: HTMLElement | null | undefined;
+  declare _designedBoxEl: HTMLTextAreaElement | null | undefined;
+  declare _pending: HTMLElement[] | undefined;
+  declare _lastSent: string | undefined;
+  declare _approvalHooked: boolean | undefined;
+  declare _stopTimer: number | undefined;
+  declare _designedSending: boolean | undefined;
+  declare _sentInputCount: number | undefined;
+  declare _designedUnhookedEl: HTMLElement | null | undefined;
+  declare _designedStopEl: HTMLButtonElement | null | undefined;
+  declare _designedSwitchEl: HTMLElement | null | undefined;
+  declare _pickOnce: { model?: string; effort?: string } | undefined;
+  declare _restartForPick: boolean | undefined;
+  declare _designedModelEl: HTMLElement | null | undefined;
+  declare _designedDraftSaved: string | undefined;
+  declare _selfAnswer: boolean | undefined;
+  declare _prevState: string | null | undefined;
+  declare _promptCheckedAt: number | undefined;
+  declare _modelStage: { model?: string; effort?: string } | undefined;
+  declare _modelPopEl: HTMLElement | null | undefined;
+  declare _modelPopClose: (() => void) | undefined;
+  declare _modelInfo: { model: string; effort?: string } | null | undefined;
+  declare _attachments: { file: File; path?: string }[] | undefined;
+  declare _designedChipsEl: HTMLElement | null | undefined;
+  declare _hooksBlockedBy: string | null | undefined;
+  declare _designedHookNoteEl: HTMLElement | null | undefined;
+  declare _chipUrls: string[] | undefined;
+  declare _sentHistory: string[] | undefined;
+  declare _recallAt: number | undefined;
+  declare _stopping: boolean | undefined;
+  declare _stopAt: number | undefined;
+  declare _turnStartedAt: number | undefined;
+  declare _mentionFiles: InstanceType<typeof import_obsidian.TFile>[] | undefined;
+  declare _promptCheckedNow: number | undefined;
+  declare _defaultViewDone: boolean | undefined;
+  declare _savedViewOpen: boolean | undefined;
+  declare _streams: Map<string, StreamState> | undefined;
+  declare _mediaUrls: string[] | undefined;
+  declare _mediaObserver: IntersectionObserver | undefined;
+  declare _mediaObserverWin: Window | undefined;
+  declare _agentCards: Map<string, AgentCard> | undefined;
+  declare _agentResults: Map<string, AgentResult> | undefined;
+  declare _agentMetaIds: Map<string, string> | undefined;
+  declare _streamTimer: number | undefined;
+  declare _streamNextAt: number | undefined;
+  declare _landedReplies: Set<string> | undefined;
+  declare _streamsEnded: Set<string> | undefined;
+  declare _streamTimerWin: Window | undefined;
+  declare _mentionEl: HTMLElement | null | undefined;
+  declare _mentionHits: InstanceType<typeof import_obsidian.TFile>[] | undefined;
+  declare _mentionIndex: number | undefined;
+  declare _mentionAt: number | undefined;
+  declare _progressTimer: number | undefined;
+  declare _workingSince: number | undefined;
+  declare _terminalPrompt: boolean | undefined;
   constructor(view: TerminalView, plugin: AgentManagerPlugin) {
     this.view = view;
     this.plugin = plugin;
@@ -278,6 +361,10 @@ class SessionController implements TerminalController {
     if (this._rehostedFrom) state.rehostedFrom = this._rehostedFrom;
     const sid = this._stripSessionId?.();
     if (sid) state.sessionId = sid;
+    const boxText = this._designedBoxEl?.value ?? this._designedDraftSaved;
+    if (boxText && boxText.trim() && this.plugin.pluginData.keepDrafts !== false) state.designedDraft = boxText;
+    if (this.designedOn() && this._defaultViewDone) state.designedViewOpen = !!this._transcriptOpen;
+    else if (this._savedViewOpen !== undefined) state.designedViewOpen = this._savedViewOpen;
     const draft = this._draftForState(true);
     if (draft) state.draft = draft;
     return state;
@@ -303,6 +390,8 @@ class SessionController implements TerminalController {
     if (state.contextSource && typeof state.contextSource === "object") this._contextSource = { from: typeof state.contextSource.from === "string" ? state.contextSource.from : null, pinned: state.contextSource.pinned === true };
     if (state.ticketLinks && typeof state.ticketLinks === "object") this._ticketLinks = { ...state.ticketLinks };
     if (state.started) this._started = true;
+    if (typeof state.designedViewOpen === "boolean") this._savedViewOpen = state.designedViewOpen;
+    if (typeof state.designedDraft === "string" && state.designedDraft && this.plugin.pluginData.keepDrafts !== false) this._designedDraftSaved = state.designedDraft;
     if (typeof state.draft === "string" && state.draft && this.plugin.pluginData.keepDrafts !== false && this.backendKey !== "antigravity") this._savedDraft = this._draftInState = state.draft;
     if (state.rehostedFrom && typeof state.rehostedFrom === "object") this._rehostedFrom = state.rehostedFrom;
     if (typeof state.sessionTitle === "string" && state.sessionTitle) {
@@ -327,14 +416,20 @@ class SessionController implements TerminalController {
     this.transcriptHost = null;
     this._transcriptBodyEl = null;
     this._transcriptFilePath = null;
+    this._designedFooterEl = this._designedCardsEl = this._designedBannerEl = this._designedWorkingEl = this._designedSayEl = this._designedBoxEl = this._designedUnhookedEl = this._designedStopEl = this._designedChipsEl = this._designedModelEl = this._designedHookNoteEl = this._mentionEl = null;
+    this._pending = [];
+    this._findBarEl?.remove();
+    this._findBarEl = this._findInputEl = this._findCountEl = this._findEarlierEl = null;
     this.view.registerDomEvent(stage, "contextmenu", (e) => {
       if (!(this._transcriptOpen && this.transcriptHost && this.transcriptHost.contains(e.target as Node | null))) return;
       e.preventDefault();
       e.stopPropagation();
       const sel = this.view.containerEl.win.getSelection()?.toString() || "";
+      const designed = this.designedOn();
+      if (designed && !sel) return;
       const menu = new import_obsidian.Menu();
       menu.addItem((i) => i.setTitle("Copy").setIcon("copy").setDisabled(!sel).onClick(() => navigator.clipboard?.writeText(sel).catch(() => {})));
-      menu.addItem((i) => i.setTitle("Open transcript note").setIcon("file-text").onClick(() => { void this.openDurableTranscriptNote(); }));
+      if (!designed) menu.addItem((i) => i.setTitle("Open transcript note").setIcon("file-text").onClick(() => { void this.openDurableTranscriptNote(); }));
       menu.showAtMouseEvent(e);
     });
     this.rebuildStrip();
@@ -347,6 +442,18 @@ class SessionController implements TerminalController {
     this.buildStatusStrip(top);
   }
   async launch(this: Session, kind: string, plain: boolean): Promise<HostLaunch | { error: string }> {
+    const l = await this._launchFor(kind, plain);
+    if ("error" in l || l.plain || plain) { this._approvalHooked = false; this._pickOnce = undefined; this._syncDesignedSwitch(); return l; }
+    const a = await this._approvalLaunch();
+    this._approvalHooked = !!a?.approvals;
+    if (!this._approvalHooked) this._syncDesignedSwitch();
+    const pick = this.getBackendKey() === "claude" ? this._pickOnce : undefined;
+    this._pickOnce = undefined;
+    const args = [...(l.args ?? []), ...(pick?.model ? ["--model", pick.model] : []), ...(pick?.effort ? ["--effort", pick.effort] : [])];
+    const withPick = pick ? { ...l, args } : l;
+    return a ? { ...withPick, claudeHooks: a.claudeHooks, env: { ...l.env, ...a.env } } : withPick;
+  }
+  async _launchFor(this: Session, kind: string, plain: boolean): Promise<HostLaunch | { error: string }> {
     if (this._inert) return { error: this._inert.message };
     this._attempt++;
     this.hasOutput = false;
@@ -410,15 +517,19 @@ class SessionController implements TerminalController {
       return null;
     }
   }
-  started(pid: number): void {
+  started(this: Session, pid: number): void {
+    this._applyDefaultView();
     if (this._scheduledRun) this._scheduledRun.notBefore = Math.max(this._scheduledRun.notBefore, Date.now() + this._scheduledRun.floorMs);
     this._programPid = pid;
+    this._programStartedAt = Date.now();
     this._cliFound = true;
     this._ranOnce = true;
     this.plugin.scheduleStatusRefresh();
   }
-  launchFailed(message: string): void {
+  launchFailed(this: Session, message: string): void {
     this._cliFound = false;
+    this._defaultViewDone = true;
+    this._syncDesignedSwitch();
     this.plugin.scheduleStatusRefresh();
   }
   output(text: string): void {
@@ -434,6 +545,20 @@ class SessionController implements TerminalController {
     // eslint-disable-next-line no-control-regex -- terminal escape sequences are control characters
     if (!/^(?:\x1b\[<[\d;]+[Mm]|\x1b\[M[\s\S]{3})+$/.test(data)) this._inputCount++;
     this._rcTyped(data);
+    // eslint-disable-next-line no-control-regex -- the keys are control characters
+    if (this._cards?.size && /^(?:\r|\x1b)$/.test(data)) this._clearCards(true);
+    if (this.programState === "waiting" && /^[0-9]$/.test(data) && this.view.inputLooksEmpty() === null) {
+      this.lastUserInputAt = Date.now();
+      const attempt = this._attempt;
+      window.setTimeout(() => {
+        if (this._attempt !== attempt) return;
+        if (this.programState !== "waiting") { this._clearCards(true); return; }
+        if (this.view.inputLooksEmpty() === null) return;
+        this._clearCards(true);
+        this.view.answeredByHost();
+      }, 500);
+      return;
+    }
     this._draft.feed(data, this.getBackendKey());
     if (this._puttingBack && this._dialogShowing()) this._dialogMark = this._draftMark();
     this.lastUserInputAt = Date.now();
@@ -443,8 +568,15 @@ class SessionController implements TerminalController {
     this._draft.clear();
     this._draftChanged();
   }
+  inputMoved(): void {
+    this._draft.moved();
+  }
   inputEdited(): void {
     this._draft.edited();
+    this._draftChanged();
+  }
+  inputRead(text: string, atEnd: boolean): void {
+    this._draft.read(text, atEnd);
     this._draftChanged();
   }
   dialogShowing(): boolean {
@@ -453,11 +585,24 @@ class SessionController implements TerminalController {
   notifiesItself(): boolean {
     return !!this._scheduledRun;
   }
-  stateChange(state: ProgramState | null): void {
+  stateChange(this: Session, state: ProgramState | null): void {
     if (state === "working") this._sessionInteractive = true;
+    this._designedState(state);
+    this._syncAsking();
+  }
+  _syncAsking(this: Session): void {
+    const asking = this._askingYou();
+    if (asking === !!this._wasAsking) return;
+    this._wasAsking = asking;
+    for (const v of this.plugin.browserViews()) { try { v.refreshWaiting(); } catch { /* empty */ } }
   }
   exit(this: Session, info: ExitInfo): boolean {
     this.plugin.scheduleStatusRefresh();
+    if (this._restartForPick) {
+      this._restartForPick = false;
+      window.setTimeout(() => { void this._restartBySession().catch((e) => console.error("[Agent Manager] restart failed:", e)); }, 0);
+      return true;
+    }
     this._setRc("unknown");
     if (this._resumeStep === "attach") {
       const ran = info.ran !== undefined ? info.ran * 1000 : 0;
@@ -483,7 +628,7 @@ class SessionController implements TerminalController {
     }
     const id = this._ownSessionId() || (await this._liveSessionId());
     if (!id) {
-      notice("This session has no id yet (it never finished a turn), so it can't be resumed. Start a new one from the sidebar.");
+      notice({ head: "This session can't be resumed", detail: "It has no id yet (it never finished a turn). Start a new one from the sidebar." });
       return;
     }
     this.resumeSessionId = id;
@@ -496,8 +641,9 @@ class SessionController implements TerminalController {
   }
   closeReason(this: Session, own: CloseReason | null): CloseReason | null {
     if (this._closeQuietly) return own?.background ? null : own;
-    if (this._inert || !this.running) return own;
     const name = this.sessionTitle || this.getBackend().label;
+    if (!this._inert && (this._designedBoxEl?.value.trim() || this._designedDraftSaved?.trim() || this._attachments?.length)) return { agent: true, name, draft: true };
+    if (this._inert || !this.running) return own;
     if (this.hasPendingInput()) return { agent: true, name, draft: true };
     if (own) return { ...own, name };
     if (this.plugin.sessionIsWorking(this)) return { agent: true, name };
@@ -508,6 +654,13 @@ class SessionController implements TerminalController {
     this._closed = true;
     try { if (this.transcriptGrewSinceReconcile?.()) void this.updateDurableTranscript?.(); } catch { /* empty */ }
     this.closeTranscript?.();
+    this._clearMedia?.();
+    this._transcriptGen = (this._transcriptGen || 0) + 1;
+    this._clearStreams();
+    this._mdOwner?.unload();
+    this._mdOwner = null;
+    this._approvalClose();
+    this._closeModelPop();
     this._stopQuietWatch(true);
     this.plugin.scheduleStatusRefresh();
   }
@@ -575,7 +728,7 @@ class SessionController implements TerminalController {
       : this.plugin.buildOpening({ notePath: this._notePath || null, folderPath: this._folderPath || null, daily: !!this._daily, agentId: this.agentId() });
     if (this._setup && !this._opening) {
       this.leaf.detach();
-      this.plugin.notify("Agent Manager", "The setup guide couldn't be written into the plugin's folder, so setup didn't start. Try reloading the plugin.");
+      this.plugin.notify({ head: "Setup didn't start", detail: "The setup guide couldn't be written into the plugin's folder. Try reloading the plugin." });
       return;
     }
     this._go();
@@ -635,7 +788,7 @@ class SessionController implements TerminalController {
     this.leaf?.detach();
     if (source && this._noteReplaces) void source.continueSession(this.getBackendKey(), "main", true, true);
     else if (source) void source.pointerSideChat?.(true);
-    else notice("Agent Manager: Antigravity couldn't fork this conversation, and its session isn't open to start a side chat from.");
+    else notice({ head: "No side chat started", detail: "Antigravity couldn't fork this conversation, and its session isn't open to start one from." });
   }
   resumeSession(this: Session, session: SessionRecord): void {
     this._decided = true;
@@ -734,12 +887,12 @@ class SessionController implements TerminalController {
     if (!same()) return "restarted";
     if (!this.running) return "gone";
     if (!clear) {
-      this._notifyNeedsYou("The new session is asking a question first (a trust or permissions dialog). Answer it, and the opening instruction is sent once it clears.");
+      this._notifyNeedsYou("New session needs an answer first", "A trust or permissions dialog. The opening is sent once it clears.");
       clear = await this.waitPastTrustPrompt(5 * 60 * 1000);
       if (!same()) return "restarted";
       if (!this.running) return "gone";
       if (!clear) {
-        this._notifyNeedsYou("Its dialog never cleared, so the opening instruction was not sent.");
+        this._notifyNeedsYou("Opening not sent", "Its dialog never cleared.");
         return "gone";
       }
     }
@@ -756,12 +909,12 @@ class SessionController implements TerminalController {
         sent = await this.submitOpeningLine(line);
         if (!sent && !same()) return "restarted";
         if (sent || !this.running || !this._dialogShowing()) break;
-        if (tries === 0) this._notifyNeedsYou("The session is asking a question. Answer it, and the opening instruction is sent once it clears.");
+        if (tries === 0) this._notifyNeedsYou("New session needs an answer first", "The opening is sent once you answer.");
         if (!(await this.waitPastTrustPrompt(5 * 60 * 1000)) || !same()) break;
         await this._clearComposeLine(this._echoProbe(line), attempt);
       }
       if (!sent) {
-        if (same() && this.running) this._notifyNeedsYou("The opening instruction couldn't be sent. Type your first message yourself.");
+        if (same() && this.running) this._notifyNeedsYou("Opening not sent", "Type your first message yourself.");
         return "gone";
       }
       this._openingSent = true;
@@ -789,41 +942,43 @@ class SessionController implements TerminalController {
       + ` Read that note for the context, then wait for me to say what this session is for (helping,`
       + ` reviewing, or continuing).${intent}`;
   }
+  _askingYou(this: Session): boolean {
+    return this.programState === "waiting" || !!this._cards?.size;
+  }
   hasPendingInput(): boolean {
     if (!this._draft.pending()) return false;
     if (!this._draft._unknown && !this._draft._moved) return true;
     if (this.getBackendKey() !== "claude" || Date.now() - this.lastUserInputAt < INPUT_SETTLE_MS) return true;
     return this.view.inputLooksEmpty?.() !== true;
   }
-  async submitLine(text: string): Promise<boolean> {
+  async submitLine(this: Session, text: string): Promise<boolean> {
     const r = await this._typeLine(text);
-    if (r === "busy") this._notifyNeedsYou("Not sent: Agent Manager is still typing something else into this session. Try again in a moment.");
+    if (r === "busy") this._notifyNeedsYou("Not sent", "Agent Manager is still typing into this session. Try again in a moment.");
     if (r === "typed") {
       const s = String(text);
       const what = s.length > 40 ? `${s.slice(0, 40)}…` : s;
-      this._notifyNeedsYou(this._draft._unknown || this._draft._moved
-        ? `Not sent: you typed while Agent Manager was typing "${what}", so the prompt holds both. Fix it before you send it.`
-        : `Not sent: you typed while Agent Manager was typing "${what}". Your text is back in the prompt.`);
+      if (this._draft._unknown || this._draft._moved) this._notifyNeedsYou("Not sent: check the prompt", `You typed while Agent Manager was typing "${what}", so it holds both. Fix it before you send it.`);
+      else this._notifyNeedsYou("Not sent", `You typed while Agent Manager was typing "${what}". Your text is back in the prompt.`);
     }
     return r === "shown";
   }
-  async _typeLine(text: string, mark = this._draftMark()): Promise<"shown" | "unshown" | "refused" | "typed" | "busy"> {
-    if (!this.running || this._dialogShowing()) return "refused";
+  async _typeLine(this: Session, text: string, mark = this._draftMark(), opts: { paste?: boolean; guard?: () => boolean } = {}): Promise<"shown" | "unshown" | "refused" | "typed" | "busy"> {
+    if (!this.running || this._dialogShowing() || this._askingYou()) return "refused";
     if (this._lineBusy) return "busy";
     this._lineBusy = true;
     try {
-      return await this._typeLineNow(text, mark);
+      return await this._typeLineNow(text, mark, opts);
     } finally {
       this._lineBusy = false;
     }
   }
-  async _typeLineNow(text: string, typed: string): Promise<"shown" | "unshown" | "refused" | "typed"> {
+  async _typeLineNow(this: Session, text: string, typed: string, opts: { paste?: boolean; guard?: () => boolean } = {}): Promise<"shown" | "unshown" | "refused" | "typed"> {
     const attempt = this._attempt;
     const opening = this._typingOpening;
     const live = () => this.running && this._attempt === attempt && !(opening && this._openingWithdrawn);
     const probe = this._echoProbe(text);
     if (this._draftMark() !== typed) return this._typedOver(probe, attempt);
-    await this._writeInput(text);
+    await this._writeInput(text, opts.paste);
     let shown = !probe;
     const deadline = Date.now() + 2000;
     while (!shown && Date.now() < deadline) {
@@ -835,6 +990,7 @@ class SessionController implements TerminalController {
     await new Promise((r) => window.setTimeout(r, 180));
     if (!live()) return "refused";
     if (this._dialogShowing() && !DIALOG_RE.test(String(text))) return "refused";
+    if (this._askingYou() || (opts.guard && !opts.guard())) return "refused";
     if (this._draftMark() !== typed) return this._typedOver(probe, attempt);
     this.writeRaw("\r");
     return shown ? "shown" : "unshown";
@@ -879,20 +1035,20 @@ class SessionController implements TerminalController {
       if (why && this.plugin.pluginData.draftClipboard !== true) {
         this._savedDraft = null;
         this._draftChanged();
-        this._notifyNeedsYou(`Your unsent text from before the reload couldn't be put back in the prompt (${why}), so it was dropped. "Copy unsent text that can't be put back", in settings, copies it to the clipboard instead.`);
+        this._notifyNeedsYou("Unsent text lost", `Couldn't put it back in the prompt (${why}). Turn on "Copy unsent text that can't be put back" in settings to keep it next time.`);
         return;
       }
       if (why) {
         let copied = false;
         try { await navigator.clipboard.writeText(text); copied = true; } catch { /* empty */ }
         if (!copied) {
-          this._notifyNeedsYou(`Your unsent text from before the reload couldn't be put back in the prompt (${why}), or copied. It's kept with the tab and tried again after the next reload.`);
+          this._notifyNeedsYou("Unsent text not restored yet", `Couldn't put it back in the prompt (${why}), or copy it. Kept with the tab, and tried again after the next reload.`);
           return;
         }
       }
       this._savedDraft = null;
       this._draftChanged();
-      if (why) this._notifyNeedsYou(`Your unsent text from before the reload couldn't be put back in the prompt (${why}), so it's on the clipboard.`);
+      if (why) this._notifyNeedsYou("Unsent text on the clipboard", `Couldn't put it back in the prompt (${why}).`);
     };
     if (!text.trim()) return done();
     const end = Date.now() + 5 * 60 * 1000;
@@ -918,7 +1074,7 @@ class SessionController implements TerminalController {
     this.view.paste(text);
     this._savedDraft = null;
     this._draftChanged();
-    this._notifyNeedsYou("Your unsent text from before the reload is back in the prompt.");
+    this._notifyNeedsYou("Unsent text restored", "Back in the prompt after the reload.");
   }
 
   _draftMark(): string {
@@ -935,10 +1091,10 @@ class SessionController implements TerminalController {
       if (tail.indexOf(probe.head) === -1 && tail.indexOf(probe.tail) === -1 && !/\[Pastedtext/.test(tail)) return;
     }
   }
-  async _writeInput(text: string): Promise<void> {
+  async _writeInput(text: string, paste = false): Promise<void> {
     if (!this.running) return;
     const s = String(text);
-    const bracketed = s.length > INPUT_PASTE_MIN && this.view.bracketedPaste;
+    const bracketed = (paste || s.length > INPUT_PASTE_MIN) && this.view.bracketedPaste;
     this.writeRaw(bracketed ? `\x1b[200~${s}\x1b[201~` : s);
   }
   _echoProbe(text: string | null): EchoProbe | null {
@@ -951,24 +1107,24 @@ class SessionController implements TerminalController {
     if (/\[Pastedtext/.test(tail)) return true;
     return tail.indexOf(probe.head) !== -1 && tail.indexOf(probe.tail) !== -1;
   }
-  _notifyNeedsYou(text: string): void {
-    this.plugin.notify(this.sessionTitle || "New session", text, () => this.view.bringForward(), this.view.noticeKey);
+  _notifyNeedsYou(head: string, detail?: string, named = true): void {
+    this.plugin.notify({ head, ...(named ? { name: this.sessionTitle || "New session" } : {}), ...(detail ? { detail } : {}) }, () => this.view.bringForward(), this.view.noticeKey);
   }
-  async submitOpeningLine(text: string): Promise<boolean> {
+  async submitOpeningLine(this: Session, text: string): Promise<boolean> {
     const attempt = this._attempt;
     const same = () => this.running && this._attempt === attempt && !this._closed && !this._openingWithdrawn;
     for (let tries = 0; tries < 3; tries++) {
       if (this._draft.pending() && (this._draft.text() === "" || this._draft._unknown || this._draft._moved)) {
-        this._notifyNeedsYou("The new session's prompt has text in it, so the opening instruction waits until you send or clear it.");
+        this._notifyNeedsYou("Opening waiting", "The prompt has text in it. Send or clear it, and the opening goes.");
         const end = Date.now() + 5 * 60 * 1000;
         while (this._draft.pending() && same() && Date.now() < end) await new Promise((r) => window.setTimeout(r, 250));
         if (!same()) return false;
         if (this._draft.pending()) {
-          this._notifyNeedsYou("The prompt never cleared, so the opening instruction was not sent.");
+          this._notifyNeedsYou("Opening not sent", "The prompt never cleared.");
           return false;
         }
         if (!(await this.waitPastTrustPrompt(5 * 60 * 1000)) || !same()) {
-          if (same()) this._notifyNeedsYou("Its dialog never cleared, so the opening instruction was not sent.");
+          if (same()) this._notifyNeedsYou("Opening not sent", "Its dialog never cleared.");
           return false;
         }
       }
@@ -1076,8 +1232,8 @@ class SessionController implements TerminalController {
     void this._scanTickets?.();
   }
 }
-interface Session extends SessionController, ViewTranscriptMethods, StripMethods, RemoteControlMethods, ViewNoteMethods, ViewTicketMethods, IdentityMethods, SessionActionMethods {}
-applyParts(SessionController, ViewTranscriptMethods, StripMethods, RemoteControlMethods, ViewNoteMethods, ViewTicketMethods, IdentityMethods, SessionActionMethods);
+interface Session extends SessionController, ViewTranscriptMethods, FindMethods, StreamMethods, MediaMethods, DesignedViewMethods, StripMethods, RemoteControlMethods, ViewNoteMethods, ViewTicketMethods, IdentityMethods, SessionActionMethods {}
+applyParts(SessionController, ViewTranscriptMethods, FindMethods, StreamMethods, MediaMethods, DesignedViewMethods, StripMethods, RemoteControlMethods, ViewNoteMethods, ViewTicketMethods, IdentityMethods, SessionActionMethods);
 function isInside(p: string, dir: string): boolean {
   const rel = path.relative(path.resolve(dir), path.resolve(p));
   return rel === "" || (!!rel && !rel.startsWith("..") && !path.isAbsolute(rel));

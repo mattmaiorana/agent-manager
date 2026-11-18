@@ -415,7 +415,7 @@ class SessionMethods {
   }
   async startSession(this: AgentManagerPlugin, subject: string, sourceView: LaunchSource, opts: LaunchOptions | null = null): Promise<Session | null> {
     if (this.startFolderMissing()) {
-      notice(`Agent Manager: the AGENTS.md folder “${stringOf(this.pluginData.startFolder)}” isn't in this vault anymore, so no session was started. Choose another in Settings → Agent Manager.`);
+      notice({ head: "No session started", detail: `The AGENTS.md folder “${stringOf(this.pluginData.startFolder)}” isn't in this vault anymore. Choose another in Settings → Agent Manager.` });
       return null;
     }
     const lb = (sourceView as { _launchBackend?: unknown } | null | undefined)?._launchBackend;
@@ -458,6 +458,7 @@ class SessionMethods {
       const view = await this.openSessionLeaf("tab");
       if (!view) return null;
       prepare(view);
+      this.placeInAgentRun(view.leaf);
       view.launchSession(subject);
       return view;
     } finally {
@@ -517,7 +518,7 @@ class SessionMethods {
   async startResume(this: AgentManagerPlugin, session: SessionRecord, sourceView: LaunchSource): Promise<void> {
     if (this.placeMissing(session)) {
       const note = this.findTranscriptNoteBySessionId(session.sessionId);
-      notice(`Agent Manager: that session ran in ${session.cwd}, which is not on this machine.${note ? " Opening its transcript." : ""}`);
+      notice({ head: note ? "Opening its transcript" : "That session can't be resumed here", detail: `It ran in ${session.cwd}, which is not on this machine.` });
       if (note) await this.openInNotesArea(note);
       return;
     }
@@ -529,6 +530,7 @@ class SessionMethods {
       const view = await this.openSessionLeaf("tab");
       if (!view) return;
       view.resumeSession(session);
+      this.placeInAgentRun(view.leaf);
     } finally {
       this._resuming.delete(key);
     }

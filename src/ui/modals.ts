@@ -3,7 +3,8 @@ import { import_obsidian } from "../externals.js";
 import type { App, TAbstractFile, TFile, TFolder } from "obsidian";
 import type { AgentManagerPlugin } from "../plugin/main.js";
 import type { SessionRecord } from "../types.js";
-import { notice } from "../vault-terminal/notice";
+import { notice, saidBelow } from "../vault-terminal/notice";
+import type { RecentNotice } from "../vault-terminal/core";
 
 type SwitcherItem = { isNew: true } | (SessionRecord & { isNew?: undefined });
 interface ChoicePickerOptions<T> {
@@ -92,6 +93,44 @@ class ConfirmModal extends import_obsidian.Modal {
       this.close();
       this._onConfirm();
     });
+  }
+  override onClose(): void {
+    this.contentEl.empty();
+  }
+}
+class RecentNoticesModal extends import_obsidian.Modal {
+  declare _recent: readonly RecentNotice[];
+  declare _off: boolean;
+  constructor(app: App, recent: readonly RecentNotice[], off = false) {
+    super(app);
+    this._recent = recent;
+    this._off = off;
+  }
+  override onOpen(): void {
+    this.titleEl.setText("Recent notices");
+    this.modalEl.addClass("agent-manager-recent-notices");
+    if (!this._recent.length) {
+      this.contentEl.createEl("p", { cls: "agent-manager-recent-empty", text: this._off ? "Recent notices are off. Turn on \"Keep recent notices\" in Agent Manager's settings to keep them." : "No recent notices." });
+      return;
+    }
+    const list = this.contentEl.createDiv({ cls: "agent-manager-recent-list" });
+    for (const r of this._recent) {
+      const row = list.createDiv({ cls: "agent-manager-recent-row" });
+      const at = new Date(r.at);
+      const time = at.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+      row.createDiv({ cls: "agent-manager-recent-time", text: at.toDateString() === new Date().toDateString() ? time : `${at.toLocaleDateString([], { month: "short", day: "numeric" })}, ${time}` });
+      const what = row.createDiv({ cls: "agent-manager-recent-what" });
+      what.createDiv({ cls: "agent-manager-recent-head", text: r.said.head });
+      const below = saidBelow(r.said);
+      if (below) what.createDiv({ cls: "agent-manager-recent-below", text: below });
+      const go = r.onClick;
+      if (!go || (r.live && !r.live())) continue;
+      row.addClass("is-clickable");
+      row.addEventListener("click", () => {
+        this.close();
+        try { go(); } catch (e) { console.error("[Agent Manager] a recent notice's click failed:", e); }
+      });
+    }
   }
   override onClose(): void {
     this.contentEl.empty();
@@ -220,5 +259,5 @@ class AgentModal extends import_obsidian.Modal {
     this.contentEl.empty();
   }
 }
-export { AgentModal, FileSuggest, FolderSuggest, ReadsSuggest, ChoicePickerModal, ConfirmModal, SessionSwitcherModal, SetupChoiceModal };
+export { AgentModal, FileSuggest, FolderSuggest, ReadsSuggest, ChoicePickerModal, ConfirmModal, RecentNoticesModal, SessionSwitcherModal, SetupChoiceModal };
 export type { NewAgentFields };

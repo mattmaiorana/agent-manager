@@ -8,6 +8,7 @@ import { PLAIN_TERMINAL_VIEW_TYPE, SESSION_VIEW_TYPE } from "../sessions/constan
 import { SessionController } from "../sessions/controller.js";
 import type { AgentManagerPlugin } from "./main.js";
 import { notice } from "../vault-terminal/notice";
+import { CLI_BACKENDS, isBackendKey } from "../constants/backends.js";
 
 class TerminalHostMethods {
   terminalSettings(this: AgentManagerPlugin): TerminalSettings {
@@ -27,7 +28,9 @@ class TerminalHostMethods {
       name: "Agent Manager",
       viewType: SESSION_VIEW_TYPE,
       plainViewType: PLAIN_TERMINAL_VIEW_TYPE,
-      settingsPath: "Settings → Agent Manager → Terminal",
+      settingsPath: (setting) => setting === "python"
+        ? "Settings → Agent Manager → Advanced & experimental → Location of Python 3"
+        : `Settings → Agent Manager → CLIs → ${isBackendKey(setting.id) ? CLI_BACKENDS[setting.id].label : setting.name} → Location of ${setting.command.split(" ")[0]}`,
       settings: () => this.terminalSettings(),
       save: (state) => {
         this.pluginData.terminalState = state;
@@ -43,7 +46,7 @@ class TerminalHostMethods {
         return true;
       },
       windowConfirmed: (win) => this.reloadIfAsked(win),
-      windowKept: () => { this._reloadAsked = 0; },
+      windowKept: () => { this._reloadAsked = 0; this._appClosing = false; },
     });
     this.terminal.load();
     this.wrapReloadCommand();
@@ -97,7 +100,7 @@ class TerminalHostMethods {
     const cwd = !folder ? vault : path.isAbsolute(folder) ? folder : path.join(vault, (0, import_obsidian.normalizePath)(folder));
     let isDir = false;
     try { isDir = fs.statSync(cwd).isDirectory(); } catch { /* empty */ }
-    if (!isDir) { notice(`Agent Manager: there's no folder at ${cwd} to open a terminal in.`); return null; }
+    if (!isDir) { notice({ head: "No terminal opened", detail: `There's no folder at ${cwd}.` }); return null; }
     const leaf = this.openTerminalLeaf();
     await leaf.setViewState({ type: PLAIN_TERMINAL_VIEW_TYPE, active: true, state: { kind: "shell", cwd } });
     await this.app.workspace.revealLeaf(leaf);

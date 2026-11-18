@@ -78,10 +78,10 @@ class ViewTicketMethods {
   }
   pickTicketToAttach(this: Session, asMain: boolean): void {
     const id = this._ownSessionId();
-    if (asMain && (!id || !ID_RE.test(id))) { notice("This session can become a ticket's main session once it has started. Try again after its first turn."); return; }
+    if (asMain && (!id || !ID_RE.test(id))) { notice({ head: "Not a main session yet", detail: "A session can become a ticket's main session after its first turn." }); return; }
     const have = new Set(asMain ? [this._notePath || ""] : this._ticketTargets().map((t) => t.path));
     const tickets = this.app.vault.getMarkdownFiles().filter((f) => !have.has(f.path) && this.plugin.isTicketNote(f.path) && !(asMain && this.plugin.mainSessionIdOf(f.path) === id));
-    if (!tickets.length) { notice("No other tickets to attach this session to."); return; }
+    if (!tickets.length) { notice("No other tickets to attach this session to"); return; }
     const placeholder = asMain ? "Make this session the main session of which ticket…" : "Attach this session to a ticket…";
     new TicketPickerModal(this.app, tickets, (f) => { void this.attachToTicket(f.path, asMain); }, placeholder).open();
   }
@@ -89,12 +89,12 @@ class ViewTicketMethods {
     if (asMain) {
       const id = this._ownSessionId();
       const file = this.app.vault.getAbstractFileByPath(path);
-      if (!id || !ID_RE.test(id) || !(file instanceof import_obsidian.TFile)) { notice("Couldn't make this session the ticket's main session."); return; }
+      if (!id || !ID_RE.test(id) || !(file instanceof import_obsidian.TFile)) { notice("Couldn't make this session the ticket's main session"); return; }
       try {
         const url = this.plugin.buildResumeLink({ sessionId: id });
         await this.app.fileManager.processFrontMatter(file, (fm: Record<string, unknown>) => { fm[MAIN_SESSION_PROPERTY] = url; });
       } catch {
-        notice("Couldn't make this session the ticket's main session.");
+        notice("Couldn't make this session the ticket's main session");
         return;
       }
     }
@@ -104,7 +104,7 @@ class ViewTicketMethods {
     this.app.workspace.requestSaveLayout();
     await this.maybeWriteTicketBack();
     const name = path.replace(/^.*\//, "").replace(/\.md$/, "");
-    notice(asMain ? `This session is now the main session of “${name}”.` : this._ownSessionId() ? `Attached to “${name}”.` : "Attached. Its link goes on the ticket once the session has an id.");
+    notice(asMain ? { head: "Now the ticket's main session", detail: name } : this._ownSessionId() ? { head: "Attached to the ticket", detail: name } : { head: "Attached to the ticket", detail: "Its link goes on the ticket once the session has an id." });
   }
   resetTicketWriteback(this: Session): void {
     this._ticketWritten = {};

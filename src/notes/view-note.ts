@@ -8,39 +8,27 @@ const ID_RE = /^[0-9a-fA-F-]{16,}$/;
 const LINK_ID_RE = /session=([0-9a-fA-F-]{16,})/;
 class ViewNoteMethods {
   _showNoteIcon(this: Session, strip: HTMLElement | null = this.stripEl): void {
-    if (!strip || !strip.isConnected) return;
-    const fromTicket = !!this._notePath && this.plugin.isTicketNote(this._notePath);
-    const linked = Object.keys(this._ticketLinks || {}).filter((p) => this.plugin.isTicketNote(p));
-    const kind = fromTicket || linked.length ? "ticket" : this._notePath ? "note" : this._folderPath ? "folder" : null;
-    const old = strip.querySelector<HTMLElement>(".agent-manager-strip-note");
-    if (old?.dataset.kind === kind) return;
-    old?.remove();
-    if (!kind) return;
-    const icon = strip.createSpan({ cls: "agent-manager-strip-note", attr: { "data-kind": kind } });
-    const action = kind === "ticket" ? "Click to open this session's ticket" : kind === "note" ? "Click to open the note this session was started from" : "Click to show the folder this session was started from";
-    const tip = () => {
-      const has = !!this.plugin.contextFromString(this._contextSource?.from);
-      this._stripTip(icon, [this._contextTip(), has ? `${action}; right-click to open any of these.` : `${action}.`].filter(Boolean).join("\n\n"), ["agent-manager-context-tip"]);
-    };
-    tip();
-    icon.addEventListener("mouseenter", tip);
-    import_obsidian.setIcon(icon, kind === "ticket" ? "ticket" : kind === "note" ? "file-text" : "folder");
-    icon.addEventListener("contextmenu", (evt) => {
-      evt.preventDefault();
-      evt.stopPropagation();
-      this._contextMenu(evt);
-    });
-    icon.addEventListener("click", (evt) => {
-      const own = this._notePath && this.plugin.isTicketNote(this._notePath) ? [this._notePath] : [];
-      const tickets = [...own, ...Object.keys(this._ticketLinks || {}).filter((p) => p !== this._notePath && this.plugin.isTicketNote(p))];
-      if (kind !== "ticket" || !tickets.length || (own.length && tickets.length === 1)) { void this.openSourceNote(); return; }
-      if (tickets.length === 1) { void this.openTicket(tickets[0]); return; }
-      const menu = new import_obsidian.Menu();
-      for (const p of tickets) menu.addItem((i) => i.setTitle(p.replace(/^.*\//, "").replace(/\.md$/, "")).setIcon("ticket").onClick(() => { void this.openTicket(p); }));
-      menu.showAtMouseEvent(evt);
-    });
-    const after = strip.querySelector(".agent-manager-strip-title");
-    if (after) strip.insertBefore(icon, after);
+    strip?.querySelector(".agent-manager-strip-note")?.remove();
+  }
+  _addContextItems(this: Session, menu: InstanceType<typeof import_obsidian.Menu>): boolean {
+    const name = (p: string) => p.replace(/^.*\//, "").replace(/\.md$/, "");
+    const own = this._notePath && this.plugin.isTicketNote(this._notePath) ? [this._notePath] : [];
+    const tickets = [...own, ...Object.keys(this._ticketLinks || {}).filter((p) => p !== this._notePath && this.plugin.isTicketNote(p))];
+    let added = false;
+    if (tickets.length) {
+      for (const p of tickets) menu.addItem((i) => i.setTitle(tickets.length === 1 ? "Open ticket" : `Open ticket: ${name(p)}`).setIcon("ticket").onClick(() => { void this.openTicket(p); }));
+      added = true;
+    } else if (this._notePath || this._folderPath) {
+      menu.addItem((i) => i.setTitle(this._notePath ? "Open note" : "Show folder").setIcon(this._notePath ? "file-text" : "folder").onClick(() => { void this.openSourceNote(); }));
+      added = true;
+    }
+    const at = this.plugin.contextFromString(this._contextSource?.from);
+    if (!at) return added;
+    const { ctx } = this._sentContext(at);
+    const add = (title: string, icon: string, p: string, folder: boolean) => menu.addItem((i) => i.setTitle(title).setIcon(icon).onClick(() => { void this._openContextItem(p, folder); }));
+    for (const p of ctx.overviews) add(`Open overview: ${p.includes("/") ? name(p.slice(0, p.lastIndexOf("/"))) : "the vault's root"}`, "book-open", p, false);
+    for (const r of ctx.reads) add(`Open read: ${r.folder ? `${name(r.path)}/` : name(r.path)}`, r.folder ? "folder" : "file-text", r.path, r.folder);
+    return added || ctx.overviews.length + ctx.reads.length > 0;
   }
   _contextTip(this: Session): string {
     const src = this._contextSource;
@@ -65,23 +53,6 @@ class ViewNoteMethods {
       : "Kept through compactions:";
     return [how, ...lines].join("\n\n");
   }
-  _contextMenu(this: Session, evt: MouseEvent): void {
-    const at = this.plugin.contextFromString(this._contextSource?.from);
-    if (!at) {
-      notice(this._contextSource?.from ? "Where this session was started from isn't in the vault anymore." : "This session has no context to open: it wasn't started from a note or a folder.");
-      return;
-    }
-    const { ctx } = this._sentContext(at);
-    const menu = new import_obsidian.Menu();
-    const name = (p: string) => p.replace(/^.*\//, "").replace(/\.md$/, "");
-    const add = (title: string, icon: string, p: string, folder: boolean) => menu.addItem((i) => i.setTitle(title).setIcon(icon).onClick(() => { void this._openContextItem(p, folder); }));
-    const where = (at.notePath || at.folderPath) as string;
-    add(name(where), ctx.ticket ? "ticket" : at.folderPath ? "folder" : "file-text", where, !!at.folderPath);
-    if (ctx.overviews.length || ctx.reads.length) menu.addSeparator();
-    for (const p of ctx.overviews) add(`Overview: ${p.includes("/") ? name(p.slice(0, p.lastIndexOf("/"))) : "the vault's root"}`, "book-open", p, false);
-    for (const r of ctx.reads) add(r.folder ? `${name(r.path)}/` : name(r.path), r.folder ? "folder" : "file-text", r.path, r.folder);
-    menu.showAtMouseEvent(evt);
-  }
   _sentContext(this: Session, at: { notePath?: string; folderPath?: string }): { ctx: LaunchContext; own: boolean } {
     const full = this.plugin.launchContext(at);
     const on = (key: OpeningPartKey) => !!this.plugin.openingPart(key).trim();
@@ -91,31 +62,31 @@ class ViewNoteMethods {
   async _openContextItem(this: Session, p: string, folder: boolean): Promise<void> {
     const f = this.app.vault.getAbstractFileByPath(p);
     if (folder) {
-      if (!(f instanceof import_obsidian.TFolder)) { notice("That folder isn't there anymore."); return; }
+      if (!(f instanceof import_obsidian.TFolder)) { notice("That folder isn't there anymore"); return; }
       const explorer = this.app.internalPlugins?.getEnabledPluginById?.("file-explorer");
       if (explorer?.revealInFolder) explorer.revealInFolder(f);
-      else notice(`That's the folder “${f.path}”.`);
+      else notice({ head: "That's a folder", detail: f.path });
       return;
     }
-    if (!(f instanceof import_obsidian.TFile)) { notice("That note isn't there anymore."); return; }
+    if (!(f instanceof import_obsidian.TFile)) { notice("That note isn't there anymore"); return; }
     await this.plugin.openInNotesArea(f);
   }
   async openTicket(this: Session, path: string): Promise<void> {
     const f = this.app.vault.getAbstractFileByPath(path);
-    if (!(f instanceof import_obsidian.TFile)) { notice("That ticket isn't there anymore."); return; }
+    if (!(f instanceof import_obsidian.TFile)) { notice("That ticket isn't there anymore"); return; }
     await this.plugin.openInNotesArea(f);
   }
   async openSourceNote(this: Session): Promise<void> {
     if (this._folderPath) {
       const folder = this.app.vault.getAbstractFileByPath(this._folderPath);
-      if (!(folder instanceof import_obsidian.TFolder)) { notice("The folder this session was started from isn't there anymore."); return; }
+      if (!(folder instanceof import_obsidian.TFolder)) { notice("Its starting folder isn't there anymore"); return; }
       const explorer = this.app.internalPlugins?.getEnabledPluginById?.("file-explorer");
       if (explorer?.revealInFolder) explorer.revealInFolder(folder);
-      else notice(`This session was started from the folder “${folder.path}”.`);
+      else notice({ head: "Started from a folder", detail: folder.path });
       return;
     }
     const f = this._notePath && this.app.vault.getAbstractFileByPath(this._notePath);
-    if (!(f instanceof import_obsidian.TFile)) { notice("The note this session was started from isn't there anymore."); return; }
+    if (!(f instanceof import_obsidian.TFile)) { notice("Its starting note isn't there anymore"); return; }
     await this.plugin.openInNotesArea(f);
   }
   async maybeWriteNoteBack(this: Session): Promise<void> {
@@ -135,7 +106,7 @@ class ViewNoteMethods {
       const nf = this.app.vault.getAbstractFileByPath(this._notePath);
       if (!(nf instanceof import_obsidian.TFile)) {
         this._noteGone = true;
-        notice(`Agent Manager: the note at “${this._notePath}” isn't there anymore, so this session won't be linked to it.`);
+        notice({ head: "Not linked to its note", name: this.sessionTitle || "A new session", detail: `The note at “${this._notePath}” isn't there anymore.` });
         return;
       }
       const url = this.plugin.buildResumeLink({ sessionId: id });

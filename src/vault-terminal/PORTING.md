@@ -54,7 +54,7 @@ export default class MyPlugin extends Plugin {
       plugin: this,
       name: "Agent Manager",              // in notices and messages
       viewType: "agent-manager-terminal", // the host's own; two plugins can't share one
-      settingsPath: "Settings → Agent Manager → Terminal",
+      settingsPath: (setting) => setting === "python" ? "Settings → My Plugin → Location of Python 3" : `Settings → My Plugin → ${setting.name} → Location of ${setting.command.split(" ")[0]}`,
       settings: () => this.data.terminal, // the same object every call
       save: (state) => {
         this.data.terminalState = state;
@@ -92,7 +92,7 @@ export default class MyPlugin extends Plugin {
 
 - **Opening terminals.** `terminal.open(kind, "tab" | "right", folder?)`, where `kind` is `"shell"` or an agent id from `agents.ts`: `"claude"`, `"codex"` or `"antigravity"` (Antigravity's id; its program is `agy`). An unknown kind opens a shell. It resolves to the leaf; `leaf.view` is the `TerminalView`. `addCommands()` registers the usual commands for it.
 - **A terminal's view** (`TerminalView`, `view.ts`): `programState` (`"working"`, `"waiting"`, `"finished"`, ...), `getDisplayText()`, `text()` (all its text), `typePaths(paths)`, `folder`, `current` (the running session). `terminal.liveViews` holds every open one. There's no event yet when a state changes: read them when needed. Views are made by `makeTerminalView`, never with `new`.
-- **The settings screen.** `displayTerminalSettings(containerEl, terminal)` (`settings.ts`) draws every terminal setting into any container, a tab of its own or a section of the host's.
+- **The settings screen.** `terminalDefinitions(terminal, { refresh })` (`settings.ts`) gives every terminal setting as Obsidian's setting definitions (1.13.1 and later), in groups under headings, for a host's `getSettingDefinitions()`, so Obsidian's settings search finds them. A host that lays its page out itself takes the sections one by one (`appearanceDefinitions`, `notificationDefinitions`, and the rest). Each row draws its own control and saves as it changes; `refresh` is the host tab's `refreshDomState`, which the notification rows call so a length row shows or hides with its place.
 - **Changing settings in code.** Change the object from `settings()`, call `save`, then what the settings controls call: `terminal.refreshLook()` for the font, size, spacing, line height, Option key and scrollback; `terminal.applyPictures()` for "Pictures in the terminal"; `terminal.forgetPython()` for Python's location. The rest apply to the next terminal or the next event on their own.
 - **Web addresses** a user opens from a terminal go to `host.openUrl` if the host gives one, otherwise to Obsidian (`window.open`), as a link in a note does: Obsidian's Web viewer opens them when that core plugin is on, the browser otherwise.
 - **Unloading** ends every session the terminal started.

@@ -18,6 +18,8 @@ export interface LaunchContext {
   env: NodeJS.ProcessEnv;
   cwd: string;
   pictures: boolean;
+  hooks?: Record<string, unknown[]>;
+  input?: { script: string; prefix: string };
 }
 
 export const AGENTS: readonly AgentProfile[] = [
@@ -29,7 +31,7 @@ export const AGENTS: readonly AgentProfile[] = [
     reportsState: true,
     agentKeys: true,
     undoKey: true,
-    prepare: (words, { env, cwd, pictures }) => prepareClaude(words, env, cwd, { pictures }),
+    prepare: (words, { env, cwd, pictures, hooks, input }) => prepareClaude(words, env, cwd, { pictures, hooks, input }),
   },
   {
     id: "codex",

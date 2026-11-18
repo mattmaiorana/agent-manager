@@ -4,9 +4,12 @@ import { homedir } from "os";
 import { join } from "path";
 import { expandPath, inlineSettings, withSessionSettings } from "./finder";
 import { BRIDGE_ID, HOOK_ID } from "./status";
+import { INPUT_VAR, USER_VISUAL_VAR, isEditScript } from "./input-channel";
 
 export interface ClaudeOptions {
   pictures?: boolean;
+  hooks?: Record<string, unknown[]>;
+  input?: { script: string; prefix: string };
 }
 
 const SCROLL_SPEED = "CLAUDE_CODE_SCROLL_SPEED";
@@ -15,7 +18,12 @@ const ACCELERATION = "wheelScrollAccelerationEnabled";
 const MANAGED = "/Library/Application Support/ClaudeCode";
 
 export function prepareClaude(words: string[], env: NodeJS.ProcessEnv, cwd: string, options: ClaudeOptions): void {
-  const extra: Record<string, unknown> = { preferredNotifChannel: "kitty", hooks: sessionHooks() };
+  const hooks = sessionHooks();
+  for (const [event, entries] of Object.entries(options.hooks ?? {})) {
+    const own: unknown = hooks[event];
+    hooks[event] = [...(Array.isArray(own) ? (own as unknown[]) : []), ...entries];
+  }
+  const extra: Record<string, unknown> = { preferredNotifChannel: "kitty", hooks };
   if (!userScrollSetting(words, env, cwd) && !settingsFileFlag(words)) {
     extra[ACCELERATION] = false;
     env[SCROLL_SPEED] = CLAUDE_SCROLL_SPEED;
@@ -23,6 +31,12 @@ export function prepareClaude(words: string[], env: NodeJS.ProcessEnv, cwd: stri
   const supported = options.pictures ? { ...SUPPORTED, [PICTURES]: "1" } : SUPPORTED;
   for (const [name, value] of Object.entries(supported)) {
     if (env[name] === undefined && !userSetting(words, env, cwd, { vars: [name] })) env[name] = value;
+  }
+  if (options.input) {
+    const own = env.VISUAL;
+    if (own && !isEditScript(own)) env[USER_VISUAL_VAR] = own;
+    env.VISUAL = options.input.script;
+    env[INPUT_VAR] = options.input.prefix;
   }
   withSessionSettings(words, extra);
 }

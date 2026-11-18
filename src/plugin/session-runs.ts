@@ -3,14 +3,16 @@ import { import_obsidian, fs, os, path } from "../externals.js";
 import { OUTPUTS_FOLDER, TASK_MEMORY_FILE } from "../constants/scheduled.js";
 import { plainSessionName } from "../constants/names.js";
 import { composeOpening, readsOf, readsSentence } from "../context/launch-context.js";
-import { actionLog, hostsOffList, renderActionLog } from "../scheduled/action-log.js";
+import { actionLog, renderActionLog } from "../scheduled/action-log.js";
 import type { ActionLog } from "../scheduled/action-log.js";
-import { GATE_PASSED, GATE_REFUSED, HOOKS_READY, sandboxWidening, sessionOutcome, sessionRunArgs, sessionRunOpening, sessionWebWords } from "../scheduled/session-run.js";
+import { GATE_PASSED, GATE_REFUSED, HOOKS_READY, sandboxWidening, sandboxWritePaths, sessionOutcome, sessionRunArgs, sessionRunOpening, sessionLimitWords } from "../scheduled/session-run.js";
 import type { SessionOutcome, SessionRunState } from "../scheduled/session-run.js";
-import { blankTokens, runOutputPath, runPrepareResult, runResultPath, runSummary, runTook, RUN_DONE_OUTCOMES } from "../scheduled/run-core.js";
+import { blankTokens, runOutcomeHead, runOutputPath, runPrepareResult, runResultPath, runSummary, runTook, RUN_DONE_OUTCOMES } from "../scheduled/run-core.js";
 import type { RunRow } from "../scheduled/run-core.js";
 import { runTookMs } from "../scheduled/clock-core.js";
 import type { ResolvedReach } from "../scheduled/task-model.js";
+import { neverReads } from "../scheduled/task-model.js";
+import { vaultQueryText } from "../scheduled/vault-queries.js";
 import type { LiveRun } from "./runs.js";
 import { readOwnFile, writeOwnFile } from "./runs.js";
 import { lastMessageTsOf } from "../sessions/transcript-files.js";
@@ -28,7 +30,6 @@ const ACTIONS_FILE = "Actions.md";
 
 export interface SessionStart {
   occurrence: string;
-  attempt: number;
   quiet: boolean;
   start: Date;
   stamp: string;
@@ -37,7 +38,6 @@ export interface SessionStart {
   memoryRel: string;
   memoryLocalRel: string;
   memoryAtStart: string | null;
-  memoryBlocked: boolean;
   resumeId: string | null;
   rows: RunRow[];
   key: string;
@@ -55,9 +55,9 @@ class SessionRunMethods {
     let python = "";
     try { python = (await this.terminal?.pythonPath()) || ""; } catch { /* empty */ }
     if (!python) return say(`“${t.label}” is a full session task, and its guards need Python 3, which can't be found.`);
-    if (!reach.web.search && !reach.deny.includes("Bash")) {
+    if (!reach.web.search && reach.shell) {
       const found = await this.claudeSandboxWidening();
-      if (found.length) return say(`“${t.label}” limits its web, but Claude Code's settings on this computer widen every session's shell sandbox (${found.join(", ")}), which its run would keep. Remove that, or add Bash to the task's deny.`);
+      if (found.length) return say(`“${t.label}” limits its web, but Claude Code's settings on this computer widen every session's shell sandbox (${found.join(", ")}), which its run would keep. Remove that, or set the task's shell to false.`);
     }
     const contextFolder = t.projectFolder ?? t.folder;
     const ctx = this.launchContext({ folderPath: contextFolder });
@@ -66,18 +66,21 @@ class SessionRunMethods {
     const opening = sessionRunOpening({
       context,
       task: t.name, prompt: t.prompt, humanNotes: t.humanNotes, output: abs(x.resultRel),
-      memory: x.memoryBlocked ? null : { text: x.memoryAtStart, path: abs(x.memoryLocalRel) },
+      memory: { text: x.memoryAtStart, path: abs(x.memoryLocalRel) },
       previous: this.sessionPreviousResult(x.rows, t.folder, reach), onlyWhenNew: t.onlyWhenNew,
-      web: sessionWebWords(reach),
+      limits: sessionLimitWords(reach),
+      queries: this.vaultQueryAnswers(reach),
     });
-    const args = sessionRunArgs({ reach, python, runFolder: abs(x.runRel) });
+    const noWrite = reach.ownFolder && reach.shell && !reach.web.search ? [...this.addedFolders().map((d) => path.resolve(d)), ...(await this.claudeSandboxWrites())] : [];
+    if (noWrite.includes("/")) return say(`“${t.label}” writes only in its own folder, but Claude Code's settings on this computer let every session's shell write anywhere ("/"), which its run would keep. Remove that, or set the task's shell to false.`);
+    const args = sessionRunArgs({ reach, python, runFolder: abs(x.runRel), home: os.homedir(), noWrite });
     const name = `${plainSessionName(t.label) || "Scheduled task"}, ${x.stamp}`;
     Object.assign(run, {
-      claim: false, start: x.start.getTime(), started: runStartedOf(x.start), stamp: x.stamp, occurrence: x.occurrence, attempt: x.attempt,
-      sessionId: x.resumeId || "", title: name, tools: [], quiet: x.quiet, onlyWhenNew: t.onlyWhenNew,
+      claim: false, start: x.start.getTime(), started: runStartedOf(x.start), stamp: x.stamp, occurrence: x.occurrence,
+      sessionId: x.resumeId || "", title: name, quiet: x.quiet, onlyWhenNew: t.onlyWhenNew,
       runRel: x.runRel, resultRel: x.resultRel, memoryRel: x.memoryRel, memoryAtStart: x.memoryAtStart, agentId: x.agentId, agentName: x.agentName, key: x.key,
-      child: null, pid: 0, timer: null, sawInit: true, result: null, exitCode: null, spawnError: "", stderr: "", buf: "", searched: [], read: [], done: false,
-      mode: "full", session: null, states: [], waitingSaid: false, stalledSaid: false, stopped: false, timeLimitMin: x.timeLimitMin, priorRows: x.rows,
+      spawnError: "", searched: [], read: [], done: false,
+      session: null, states: [], waitingSaid: false, stalledSaid: false, stopped: false, timeLimitMin: x.timeLimitMin, priorRows: x.rows,
       web: { mode: reach.web.search ? "search" : reach.web.sites.length ? "sites" : "off", sites: reach.web.sites },
     } as Partial<LiveRun>);
     if (this._unloading || run.killedFor) return false;
@@ -93,6 +96,7 @@ class SessionRunMethods {
     view._ticketLinks = {};
     this.resetNoteWriteback(view);
     view._agentId = x.agentId;
+    this.placeInAgentRun(view.leaf);
     const readyFile = path.join(abs(x.runRel), HOOKS_READY);
     view._scheduledRun = { args, opening, notBefore: Date.now() + CONNECTORS_MS, floorMs: CONNECTORS_MS, contextFrom: t.notePath, ready: () => fs.existsSync(readyFile) };
     run.session = view;
@@ -152,7 +156,7 @@ class SessionRunMethods {
     if (st === "waiting" && v?._openingSent && !run.waitingSaid) {
       run.waitingSaid = true;
       await this.writeRunRow(run.task.folder, this._runRow(run, { Outcome: "waiting", Took: runTook(Date.now() - run.start), Note: "Waiting for you in its tab: a question or a permission prompt." }));
-      this.notifyDesktop(`${run.task.label} is waiting for you`, "A scheduled session run stopped to ask. Open its tab to answer.", run.task.notePath);
+      this.notifyDesktop({ head: "A scheduled run is waiting for you", name: run.task.label, detail: "It stopped to ask. Open its tab to answer." }, run.task.notePath);
       this.refreshBrowsers();
     } else if (st === "working" && run.waitingSaid) {
       run.waitingSaid = false;
@@ -165,7 +169,7 @@ class SessionRunMethods {
         run.stalledSaid = true;
         this._letSleep(run);
         await this.writeRunRow(run.task.folder, this._runRow(run, { Outcome: "stalled", Took: runTook(Date.now() - run.start), Note: `Still ${st === "waiting" ? "waiting" : "going"} past the time limit (${run.timeLimitMin} minutes). Left open, never ended.` }));
-        this.notifyDesktop(`Scheduled task stalled: ${run.task.label}`, "Still going past its time limit. Its tab is left open.", run.task.notePath);
+        this.notifyDesktop({ head: "Scheduled run stalled", name: run.task.label, detail: "Still going past its time limit. Its tab is left open." }, run.task.notePath);
         this.refreshBrowsers();
       }
     } else if (outcome) {
@@ -175,6 +179,24 @@ class SessionRunMethods {
     this.scheduleTimeout(() => { void this.watchSessionRun(run); }, POLL_MS);
   }
   async claudeSandboxWidening(this: AgentManagerPlugin): Promise<string[]> {
+    const out: string[] = [];
+    for (const { label, parsed } of await this.claudeSettingsObjects()) for (const k of sandboxWidening(parsed)) out.push(`${k} in ${label}`);
+    return out;
+  }
+  vaultQueryAnswers(this: AgentManagerPlugin, reach: ResolvedReach): string {
+    if (!reach.obsidianCli.length) return "";
+    const vault = path.resolve(this.getVaultPath());
+    const config = this.app.vault.configDir;
+    const hidden = (p: string) => p === config || p.startsWith(`${config}/`) || neverReads(reach.neverRead, path.join(vault, p));
+    const mc = this.app.metadataCache;
+    return vaultQueryText(reach.obsidianCli, { files: this.app.vault.getFiles().map((f) => f.path), resolved: mc.resolvedLinks, unresolved: mc.unresolvedLinks }, hidden);
+  }
+  async claudeSandboxWrites(this: AgentManagerPlugin): Promise<string[]> {
+    const out: string[] = [];
+    for (const { parsed } of await this.claudeSettingsObjects()) for (const p of sandboxWritePaths(parsed, os.homedir())) if (!out.includes(p)) out.push(p);
+    return out;
+  }
+  async claudeSettingsObjects(this: AgentManagerPlugin): Promise<{ label: string; parsed: unknown }[]> {
     const home = (d: string) => d.replace(/^["']|["']$/g, "").replace(/^~(?=\/|$)/, os.homedir());
     const dirs = new Set<string>();
     const words = splitCommand(this.terminal?.settings.agents?.claude?.command || "");
@@ -190,19 +212,19 @@ class SessionRunMethods {
     const managed = "/Library/Application Support/ClaudeCode";
     files.push(path.join(managed, "managed-settings.json"));
     try { for (const f of fs.readdirSync(path.join(managed, "managed-settings.d")).sort()) if (f.endsWith(".json")) files.push(path.join(managed, "managed-settings.d", f)); } catch { /* empty */ }
-    const out: string[] = [];
+    const out: { label: string; parsed: unknown }[] = [];
     for (let i = 0; i < words.length; i++) {
       const w = words[i];
       if (w !== "--settings" && !w.startsWith("--settings=")) continue;
       const value = w === "--settings" ? words[++i] ?? "" : w.slice("--settings=".length);
       const inline = inlineSettings(value);
-      if (inline) { for (const k of sandboxWidening(inline)) out.push(`${k} in the Command's --settings`); continue; }
+      if (inline) { out.push({ label: "the Command's --settings", parsed: inline }); continue; }
       if (value.trim()) files.push(path.resolve(this.startDir(), home(value.trim())));
     }
     for (const f of files) {
       let parsed: unknown = null;
       try { parsed = JSON.parse(fs.readFileSync(f, "utf8")); } catch { continue; }
-      for (const k of sandboxWidening(parsed)) out.push(`${k} in ${f.replace(os.homedir(), "~")}`);
+      out.push({ label: f.replace(os.homedir(), "~"), parsed });
     }
     return out;
   }
@@ -307,8 +329,8 @@ class SessionRunMethods {
       const paths = [resultRel, this.runLogPath(run.task.folder), memoryWritten, exists(actionsRel) ? actionsRel : ""].filter(Boolean);
       await this.commitPaths(paths, `Scheduled: ${run.task.label}, ${run.occurrence === "Run now" ? `run now ${run.stamp}` : run.occurrence}`);
     }
-    if (!run.quiet && outcome !== "interrupted") notice(`Agent Manager: “${run.task.label}” ${outcome === "succeeded" ? "finished" : outcome}${note ? `: ${note}` : "."}`);
-    if (log.alerts.length) this.notifyDesktop(`Scheduled task flagged: ${run.task.label}`, log.alerts[0], run.task.notePath);
+    if (!run.quiet && outcome !== "interrupted") notice({ head: runOutcomeHead(outcome), name: run.task.label, ...(note ? { detail: note } : {}) }, () => { void this.openTaskPage(run.task.notePath); });
+    if (log.alerts.length) this.notifyDesktop({ head: "Scheduled run flagged", name: run.task.label, detail: log.alerts[0] }, run.task.notePath);
     else this._notifyRunEnd(run.task.label, run.task.notePath, outcome, note, run.quiet);
     const v = run.session;
     if (run.task.tab === "close" && (outcome === "succeeded" || outcome === "nothing new") && !log.alerts.length && v && !v._closed && !this.sessionIsWorking(v) && !v.hasPendingInput() && !v.backgroundWork) {
@@ -324,9 +346,6 @@ class SessionRunMethods {
     try {
       await this.app.fileManager.processFrontMatter(f, (fm: Record<string, unknown>) => { fm["follow-up"] = wikiCell(ticket); });
     } catch (e) { console.error("[Agent Manager] result's follow-up link failed:", e); }
-  }
-  headlessOffList(this: AgentManagerPlugin, run: LiveRun): string[] {
-    return run.web ? hostsOffList(run.read, run.web) : [];
   }
 }
 

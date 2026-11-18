@@ -62,9 +62,9 @@ class IdentityMethods {
         : `No transcript found for “${title}” (it never took a turn, or the CLI deleted it), so there's nothing to resume.`);
     } else {
       const why = !title ? ""
-        : session ? `Agent Manager: "${title}" ran in ${session.cwd}, which is not on this machine; closing the tab.`
-        : this._restoreReason === "claimed" ? `Agent Manager: "${title}" is already open in another tab; closing the duplicate.`
-        : `Agent Manager: no transcript found for "${title}" (it never took a turn, or the CLI deleted it); closing the tab.`;
+        : session ? { head: "Tab closed", name: title, detail: `It ran in ${session.cwd}, which is not on this machine.` }
+        : this._restoreReason === "claimed" ? { head: "Duplicate tab closed", name: title, detail: "It's already open in another tab." }
+        : { head: "Tab closed", name: title, detail: "No transcript found (it never took a turn, or the CLI deleted it)." };
       this.leaf?.detach();
       if (why) notice(why);
     }
@@ -204,8 +204,11 @@ class IdentityMethods {
       this._repointTo(cand.sessionId, cand.file);
       this._rehostedFrom = { from: String(curId), to: String(cand.sessionId), at: Date.now(), kind };
       this._showRehostPill();
-      this.plugin.notify(this.sessionTitle || "A session",
-        `${kind === "continued" ? "Claude compacted it and carried on as a new session" : "Remote Control moved it to a new session id"} (${String(curId).slice(0, 8)} → ${String(cand.sessionId).slice(0, 8)}). Its tab and transcript note followed.`,
+      const ids = `(${String(curId).slice(0, 8)} → ${String(cand.sessionId).slice(0, 8)})`;
+      this.plugin.notify(
+        kind === "continued"
+          ? { head: "Continued as a new session", name: this.sessionTitle || "A session", detail: `Claude compacted it ${ids}. Its tab and transcript followed.` }
+          : { head: "Moved to a new session id", name: this.sessionTitle || "A session", detail: `By Remote Control ${ids}. Its tab and transcript followed.` },
         () => this.view.bringForward(), this.view?.noticeKey, "info");
       return true;
     }

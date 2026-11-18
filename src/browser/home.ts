@@ -37,8 +37,25 @@ class BrowserMethods {
     this.browserScope = null;
     this.renderBrowser();
   }
+  refreshWaiting(this: Browser): void {
+    const waiting = this.plugin.getWaitingSessionKeys();
+    const c = this.containerEl;
+    c.querySelectorAll<HTMLElement>(".agent-manager-row[data-session-title]").forEach((row) => {
+      const keys = this.plugin.sessionRowKeys(row.dataset.sessionBackend as string, row.dataset.sessionTitle as string, row.dataset.sessionId || null);
+      const on = keys.some((k) => waiting.has(k));
+      const dot = row.querySelector(".agent-manager-status-dot");
+      dot?.classList.toggle("is-waiting", on);
+      if (on) dot?.setAttribute("aria-label", "Asking you something"); else dot?.removeAttribute("aria-label");
+    });
+    const needs = c.querySelector<HTMLElement>(".agent-manager-home-needs");
+    if (needs) {
+      needs.setText(waiting.size ? `${waiting.size} need${waiting.size === 1 ? "s" : ""} you` : "");
+      needs.toggle(waiting.size > 0);
+    }
+  }
   refreshStatusDots(this: Browser): void {
     this.refreshTodayDot();
+    this.refreshWaiting();
     const openKeys = this.plugin.getOpenSessionKeys();
     const activeKey = this.plugin.getActiveSessionKey();
     const c = this.containerEl;
@@ -82,8 +99,22 @@ class BrowserMethods {
     const wrap = createDiv({ cls: "agent-manager-browser-inner agent-manager-home" });
     const head = wrap.createDiv({ cls: "agent-manager-home-head" });
     head.createDiv({ cls: "agent-manager-home-title", text: "Agent Manager" });
-    this.renderCustomButton(head.createDiv({ cls: "agent-manager-head-buttons" }));
+    const needs = head.createDiv({ cls: "agent-manager-home-needs", attr: { role: "button", "aria-label": "Go to a session that's asking you something" } });
+    needs.hide();
+    needs.addEventListener("click", () => {
+      const keys = this.plugin.getWaitingSessionKeys();
+      const o = this.plugin.getOpenSessions().find((x) => keys.has(this.plugin.openSessionKey(x)));
+      if (o?.leaf) { void this.app.workspace.revealLeaf(o.leaf); this.app.workspace.setActiveLeaf(o.leaf, { focus: true }); }
+    });
+    const headButtons = head.createDiv({ cls: "agent-manager-head-buttons" });
+    this.renderCustomButton(headButtons);
+    if (this.plugin.pluginData.windowButton !== false) {
+      const btn = headButtons.createDiv({ cls: "clickable-icon agent-manager-head-window" });
+      this.plugin.paintWindowButton(btn, this.leaf);
+      btn.addEventListener("click", () => this.plugin.clickWindowButton(this.leaf));
+    }
     this.renderAgentSwitch(wrap);
+    this.renderDashboardRow(wrap);
     this.renderTodayRow(wrap);
     await this.renderTasksRow(wrap);
     const reveals: HTMLElement[] = [];
@@ -96,6 +127,7 @@ class BrowserMethods {
     await new Promise((r) => window.setTimeout(r, 0));
     await this.renderSessionSections(wrap);
     this.swapBrowserContent(wrap, gen);
+    this.refreshWaiting();
     if (!wrap.isConnected) return;
     const autofocus = wrap.querySelector<HTMLElement>("[data-autofocus]");
     if (autofocus) { this._focusCard = undefined; autofocus.focus(); }
@@ -108,12 +140,15 @@ class BrowserMethods {
     }
   }
   isCardOpen(this: Browser, kind: CardKind): boolean {
-    return kind === "session" ? this.plugin.newCardOpen === true : this.plugin.ticketCard?.open === true;
+    const owner = kind === "session" ? this.plugin.newCardOwner : this.plugin.ticketCard?.owner;
+    const here = !owner || owner === this || !this.plugin.browserViews().includes(owner);
+    return here && (kind === "session" ? this.plugin.newCardOpen === true : this.plugin.ticketCard?.open === true);
   }
   setCardOpen(this: Browser, kind: CardKind, open: boolean): void {
-    if (kind === "session") { this.plugin.newCardOpen = open; return; }
+    if (kind === "session") { this.plugin.newCardOpen = open; this.plugin.newCardOwner = open ? this : undefined; return; }
     const card = this.ticketCardState();
     card.open = open;
+    card.owner = open ? this : undefined;
     if (!open) card.from = undefined;
   }
   renderCardRow(this: Browser, wrap: HTMLElement, kind: CardKind, reveals: HTMLElement[], rowParent: HTMLElement = wrap): void {
@@ -165,7 +200,7 @@ class BrowserMethods {
         note.createDiv({ cls: "agent-manager-setup-cli", text: CLI_BACKENDS[key].label });
         this.copyableCommand(note, CLI_BACKENDS[key].install);
       }
-      note.createDiv({ cls: "agent-manager-setup-hint", text: "Installed somewhere unusual? Set its location in Settings → Agent Manager." });
+      note.createDiv({ cls: "agent-manager-setup-hint", text: "Installed somewhere unusual? Set its location in Settings → Agent Manager → CLIs." });
     }
     const again = note.createEl("button", { text: "Check again" });
     again.addEventListener("click", () => {
@@ -194,8 +229,14 @@ class BrowserMethods {
     if (!agents.length) return;
     const current = { id: this.plugin.switchedAgentId() };
     const row = wrap.createDiv({ cls: "agent-manager-agent-switch" });
+    const paint = (id: string) => {
+      const color = this.plugin.agentColor(id);
+      row.setCssProps({ "--agent-manager-switch-color": color, "--agent-manager-switch-ink": color && this.plugin.agentBlackText(id) ? "#000000" : "" });
+      row.toggleClass("has-color", !!color);
+    };
     if (agents.length === 1) {
       row.createSpan({ cls: "agent-manager-agent-single", text: agents[0].name });
+      paint(agents[0].id);
       return;
     }
     if (agents.length === 2) {
@@ -204,6 +245,7 @@ class BrowserMethods {
       row.setAttribute("aria-label", "Agent profile");
       const at = Math.max(0, agents.findIndex((a) => a.id === current?.id));
       row.setCssProps({ "--agent-manager-switch-i": String(at) });
+      paint(agents[at].id);
       row.createDiv({ cls: "agent-manager-agent-thumb" });
       const pills: HTMLElement[] = [];
       agents.forEach((a, i) => {
@@ -213,6 +255,7 @@ class BrowserMethods {
         pill.addEventListener("click", () => {
           if (pill.hasClass("is-active")) return;
           row.setCssProps({ "--agent-manager-switch-i": String(i) });
+          paint(a.id);
           for (const p of pills) { p.toggleClass("is-active", p === pill); p.setAttribute("aria-checked", String(p === pill)); }
           const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
           window.setTimeout(() => { void this.plugin.setSwitchedAgent(a.id); }, reduce ? 0 : 200);
@@ -225,17 +268,18 @@ class BrowserMethods {
       const opt = select.createEl("option", { text: a.name, value: a.id });
       if (a.id === current?.id) opt.selected = true;
     }
-    select.addEventListener("change", () => { void this.plugin.setSwitchedAgent(select.value); });
+    paint(select.value);
+    select.addEventListener("change", () => { paint(select.value); void this.plugin.setSwitchedAgent(select.value); });
   }
   renderTodayRow(this: Browser, wrap: HTMLElement): void {
-    if (this.plugin.pluginData.dailyChatButton === false) return;
+    const profile = this.plugin.switchedAgent();
+    if (profile ? !profile.dailyOn : this.plugin.pluginData.dailyChatButton === false) return;
     const name = this.plugin.dailyChatName();
     const row = wrap.createDiv({ cls: "agent-manager-today", attr: { role: "button", tabindex: "0", "data-day": this.plugin.todayString() } });
     const icon = row.createSpan({ cls: "agent-manager-today-icon" });
     import_obsidian.setIcon(icon, "sun");
     const col = row.createDiv({ cls: "agent-manager-today-text" });
-    const profile = this.plugin.switchedAgent();
-    col.createDiv({ cls: "agent-manager-today-title", text: profile ? `${profile.name} Daily Chat` : "Daily Chat" });
+    col.createDiv({ cls: "agent-manager-today-title", text: profile ? profile.dailyButton || `${profile.name} Daily Chat` : "Daily Chat" });
     col.createDiv({ cls: "agent-manager-today-name", text: new Date().toLocaleDateString(undefined, { month: "long", day: "numeric", year: "numeric" }) });
     row.setAttribute("aria-label", name);
     const go = () => { void this.plugin.openTodaysChat(this); };
@@ -243,17 +287,34 @@ class BrowserMethods {
     row.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); go(); } });
     this.refreshTodayDot(row);
   }
+  renderDashboardRow(this: Browser, parent: HTMLElement): void {
+    const dash = this.plugin.agentDashboard(this.plugin.switchedAgent());
+    if (!dash) return;
+    const row = parent.createDiv({ cls: "agent-manager-dashboard-row", attr: { role: "button", tabindex: "0" } });
+    import_obsidian.setIcon(row.createSpan({ cls: "agent-manager-dashboard-row-icon" }), dash.icon);
+    row.createSpan({ cls: "agent-manager-dashboard-row-name", text: dash.name });
+    const go = () => { void this.plugin.openButtonTarget(dash.target, "The profile's custom button"); };
+    row.addEventListener("click", go);
+    row.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); go(); } });
+  }
   renderCustomButton(this: Browser, parent: HTMLElement): void {
     if (this.plugin.pluginData.customButton === false) return;
     const target = this.plugin.customButtonTarget();
     if (!target) return;
     const set = stringOf(this.plugin.pluginData.customButtonName ?? "").trim();
-    const opens = "url" in target ? target.url : target.path;
-    const name = set || (stringOf(this.plugin.pluginData.customButtonTarget ?? "").trim() ? opens.replace(/^.*\//, "").replace(/\.(md|base)$/, "") : "Tickets");
+    const go = () => { void this.plugin.openCustomButton(); };
+    if (!set) {
+      const opens = "url" in target ? target.url : target.path;
+      const label = stringOf(this.plugin.pluginData.customButtonTarget ?? "").trim() ? opens.replace(/^.*\//, "").replace(/\.(md|base)$/, "") : "Tickets";
+      const icon = parent.createDiv({ cls: "clickable-icon agent-manager-custom-icon", attr: { "aria-label": label } });
+      import_obsidian.setIcon(icon, this.plugin.customButtonIcon());
+      icon.addEventListener("click", go);
+      return;
+    }
     const btn = parent.createEl("button", { cls: "agent-manager-head-button agent-manager-custom-button" });
     import_obsidian.setIcon(btn.createSpan({ cls: "agent-manager-head-button-icon" }), this.plugin.customButtonIcon());
-    btn.createSpan({ cls: "agent-manager-head-button-name", text: name });
-    btn.addEventListener("click", () => { void this.plugin.openCustomButton(); });
+    btn.createSpan({ cls: "agent-manager-head-button-name", text: set });
+    btn.addEventListener("click", go);
   }
   refreshTodayDot(this: Browser, row: Element | null = this.containerEl.querySelector(".agent-manager-today")): void {
     if (!row) return;
@@ -269,7 +330,7 @@ class BrowserMethods {
   copyableCommand(parent: HTMLElement, command: string): void {
     const el = parent.createEl("code", { cls: "agent-manager-setup-cmd", text: command, attr: { "aria-label": "Click to copy" } });
     el.addEventListener("click", () => { void (async () => {
-      try { await navigator.clipboard.writeText(command); notice("Copied."); } catch { notice("Couldn't copy."); }
+      try { await navigator.clipboard.writeText(command); notice({ head: "Command copied", detail: command }); } catch { notice("Couldn't copy"); }
     })(); });
   }
   renderBackendSelector(this: Browser, parentEl: HTMLElement): void {
@@ -408,8 +469,8 @@ class BrowserMethods {
     const go = (andLaunch = false) => {
       if (done) return;
       const folder = draft.project ? this.plugin.app.vault.getAbstractFileByPath(draft.project) : null;
-      if (!ticketFileName(draft.name)) { notice("Name the ticket."); input.focus(); return; }
-      if (!(folder instanceof import_obsidian.TFolder)) { notice("Choose a project for the ticket."); project.focus(); return; }
+      if (!ticketFileName(draft.name)) { notice("Name the ticket"); input.focus(); return; }
+      if (!(folder instanceof import_obsidian.TFolder)) { notice("Choose a project for the ticket"); project.focus(); return; }
       done = true;
       const kept = { ...draft };
       const opts = { name: draft.name, backend: draft.backend, notes: draft.notes };
@@ -420,16 +481,16 @@ class BrowserMethods {
         const file = await this.plugin.newTicket(folder, opts);
         if (!file) {
           if (this.plugin.ticketCard !== fresh) return;
-          this.plugin.ticketCard = { open: true, draft: kept, from };
+          this.plugin.ticketCard = { open: true, draft: kept, from, owner: this };
           if (!this._closed) this.renderBrowser();
           return;
         }
         if ((andLaunch || (from && from.containerEl.isConnected)) && !(await this.plugin.whenIndexed(file))) {
-          notice(`Made “${file.basename}”, but it didn't read as a ticket in time (does the ticket template have type: ticket in its properties?), so ${andLaunch ? "nothing was launched" : "the session wasn't attached"}.`);
+          notice({ head: andLaunch ? "Ticket made, nothing launched" : "Ticket made, session not attached", detail: `“${file.basename}” didn't read as a ticket in time. Does the ticket template have type: ticket in its properties?` });
           return;
         }
         if (from && from.containerEl.isConnected) await from.attachToTicket(file.path);
-        else if (from) notice(`Made “${file.basename}”. “${from.sessionTitle || "The session"}” was closed, so it wasn't attached.`);
+        else if (from) notice({ head: "Ticket made, session not attached", detail: `“${from.sessionTitle || "The session"}” was closed.` });
         if (andLaunch) await this.plugin.startSession(file.basename, null, { notePath: file.path, ...(opts.backend ? { backendOverride: opts.backend } : {}) });
       })();
     };
@@ -473,7 +534,8 @@ class BrowserMethods {
   }
   async renderSessionSections(this: Browser, parentEl: HTMLElement): Promise<void> {
     let pinned: SessionRecord[] = [], sessions: SessionRecord[] = [];
-    try { pinned = await this.plugin.readPinnedSessions(); } catch { /* empty */ }
+    const pinShown = this.plugin.pinnedShown();
+    if (pinShown) try { pinned = await this.plugin.readPinnedSessions(); } catch { /* empty */ }
     try { sessions = await this.plugin.listedSessions(); } catch { /* empty */ }
     const shows = (s: SessionRecord) => this.plugin.agentShows(this.plugin.agentOfSession(s));
     pinned = pinned.filter(shows);
@@ -500,11 +562,13 @@ class BrowserMethods {
     const rest = sessions.filter((s) => !this.plugin.sessionRowKeys(s.backend, s.title, s.sessionId).some((k) => shown.has(k)));
     const rowOpts: RowOptions = { draggable: true, showDate: true };
 
-    parentEl.createDiv({ text: "Pinned", cls: "agent-manager-sublabel" });
-    const pinList = parentEl.createDiv({ cls: "agent-manager-list agent-manager-session-list agent-manager-pinned-list" });
-    this.attachSessionOrderDrop(pinList, (id, before) => this.plugin.reorderPinnedSession(id, before));
-    if (pinned.length) for (const s of pinned) this.renderSessionRow(pinList, s, openKeys, { ...rowOpts, pinned: true });
-    else pinList.createDiv({ cls: "agent-manager-empty", text: "Right-click a session and choose Pin, or drag it here, to keep it here." });
+    if (pinShown) {
+      parentEl.createDiv({ text: "Pinned", cls: "agent-manager-sublabel" });
+      const pinList = parentEl.createDiv({ cls: "agent-manager-list agent-manager-session-list agent-manager-pinned-list" });
+      this.attachSessionOrderDrop(pinList, (id, before) => this.plugin.reorderPinnedSession(id, before));
+      if (pinned.length) for (const s of pinned) this.renderSessionRow(pinList, s, openKeys, { ...rowOpts, pinned: true });
+      else pinList.createDiv({ cls: "agent-manager-empty", text: "Right-click a session and choose Pin, or drag it here, to keep it here." });
+    }
 
     parentEl.createDiv({ text: "Recent", cls: "agent-manager-sublabel agent-manager-sessions-head" });
     if (!open.length && !rest.length) {
@@ -581,7 +645,8 @@ class BrowserMethods {
     row.classList.toggle("is-active", (rowKeys as (string | null)[]).includes(this.plugin.getActiveSessionKey()));
     const canDrag = opts.draggable && !!s.sessionId;
     const body = row.createDiv({ cls: "agent-manager-row-body" });
-    body.createSpan({ cls: "agent-manager-status-dot" + (isOpen ? " is-open" : "") });
+    const waiting = this.plugin.getWaitingSessionKeys();
+    body.createSpan({ cls: "agent-manager-status-dot" + (isOpen ? " is-open" : "") + (rowKeys.some((k) => waiting.has(k)) ? " is-waiting" : "") });
     const col = body.createDiv({ cls: "agent-manager-row-col" });
     const name = col.createDiv({ cls: "agent-manager-row-name" });
     name.createSpan({ text: s.displayName || "Untitled", cls: "agent-manager-row-subject" + (s.displayName ? "" : " agent-manager-row-untitled") });
@@ -671,7 +736,7 @@ class BrowserMethods {
     const leaf = this.plugin.getLeafForSession(session.title, session.backend, session.sessionId);
     if (session.sessionId) {
       const pinned = this.plugin.isPinned(session.sessionId);
-      menu.addItem((item) =>
+      if (this.plugin.pinnedShown()) menu.addItem((item) =>
         item.setTitle(pinned ? "Unpin session" : "Pin session").setIcon(pinned ? "pin-off" : "pin").onClick(async () => {
           await this.plugin.togglePin(session.sessionId);
           this.renderBrowser();
@@ -689,9 +754,9 @@ class BrowserMethods {
           const url = `[${label}](${this.plugin.buildResumeLink(session as { sessionId: string })})`;
           try {
             await navigator.clipboard.writeText(url);
-            notice("Resume link copied.");
+            notice("Resume link copied");
           } catch {
-            notice("Couldn't copy the resume link.");
+            notice({ head: "Couldn't copy", detail: "The resume link." });
           }
         })
       );
@@ -729,7 +794,7 @@ class BrowserMethods {
   async deleteSession(this: Browser, session: SessionRecord): Promise<void> {
     if (!session.file) return;
     if (this.plugin.getLeafForSession(session.title, session.backend, session.sessionId)) {
-      notice("Close the session's tab before deleting it.");
+      notice("Close the session's tab before deleting it");
       return;
     }
     try {
@@ -740,7 +805,7 @@ class BrowserMethods {
       } else fs.unlinkSync(session.file);
     } catch (e) {
       console.error("[Agent Manager] Delete failed:", e);
-      notice("Couldn't delete the session.");
+      notice("Couldn't delete the session");
       return;
     }
     const id = session.sessionId;

@@ -13,12 +13,31 @@ declare module "obsidian" {
   interface DataAdapter {
     basePath?: string;
   }
+  interface WorkspaceItem {
+    containerEl?: HTMLElement;
+  }
+  interface WorkspaceSplit {
+    direction?: string;
+  }
   interface WorkspaceParent {
     type?: string;
     children?: WorkspaceLeaf[];
+    containerEl?: HTMLElement;
+    selectTabIndex?(index: number): void;
+    currentTab?: number;
+    insertChild?(index: number, child: WorkspaceLeaf): void;
+    removeChild?(child: WorkspaceLeaf): void;
+    setDimension?(dimension: number | null): void;
+  }
+  interface Workspace {
+    floatingSplit?: { children?: WorkspaceWindow[] };
+  }
+  interface WorkspaceWindow {
+    close?: (this: WorkspaceWindow) => void;
   }
   interface WorkspaceLeaf {
     pinned?: boolean;
+    setDimension?(dimension: number | null): void;
     activeTime?: number;
     tabHeaderEl?: HTMLElement;
     history?: {

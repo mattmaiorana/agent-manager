@@ -1,6 +1,7 @@
 
 import type { Menu, Plugin, TFile } from "obsidian";
 import type { TerminalSettings } from "./settings";
+import type { AgentProfile } from "./agents";
 import type { CloseReason } from "./close";
 import type { ExitInfo } from "./session";
 import type { ProgramState } from "./status";
@@ -12,7 +13,7 @@ export interface VaultTerminalHost {
   name: string;
   viewType: string;
   plainViewType?: string;
-  settingsPath: string;
+  settingsPath: (setting: "python" | AgentProfile) => string;
   settings(): TerminalSettings;
   save(state: VaultTerminalState): Promise<void>;
   state?: VaultTerminalState;
@@ -29,6 +30,7 @@ export interface HostLaunch {
   folder?: string;
   plain?: boolean;
   env?: Record<string, string>;
+  claudeHooks?: Record<string, unknown[]>;
 }
 
 export interface TerminalController {
@@ -39,7 +41,9 @@ export interface TerminalController {
   output?(text: string): void;
   input?(data: string): void;
   inputCleared?(): void;
+  inputMoved?(): void;
   inputEdited?(): void;
+  inputRead?(text: string, atEnd: boolean): void;
   dialogShowing?(): boolean;
   notifiesItself?(): boolean;
   stateChange?(state: ProgramState | null): void;
